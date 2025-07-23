@@ -297,6 +297,9 @@ final class DualCameraRecorder: NSObject, ObservableObject {
     func startRecording() throws {
         guard state == .previewing else { return }
 
+        // マイク収録のため AVAudioSession を一時的に PlayAndRecord へ昇格
+        AudioSessionManager.beginRecording()
+
         let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")
         self.outputURL = fileURL
         let writer = try AVAssetWriter(outputURL: fileURL, fileType: .mov)
@@ -368,6 +371,8 @@ final class DualCameraRecorder: NSObject, ObservableObject {
             Task { @MainActor in
                 self.state = .finished
                 completion(finishedURL)
+                // カテゴリを元に戻す
+                AudioSessionManager.endRecording()
                 self.cleanup()
             }
         }

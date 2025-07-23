@@ -213,28 +213,21 @@ struct ChatView: View {
                         .onChange(of: isTextFieldFocused) { focused in
                             if focused {
                                 withAnimation { attachmentsExpanded = false }
+                            } else {
+                                // キーボードが閉じたら左側ツールバーを元に戻す
+                                withAnimation { attachmentsExpanded = true }
                             }
                         }
 
                     if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        if isTextFieldFocused {
-                            // show single picker button when keyboard up
-                            Button {
-                                isEmojiPickerShown = true
-                            } label: {
-                                Image(systemName: "smiley")
-                                    .font(.system(size: 24))
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            QuickEmojiBar(recentEmojis: recentEmojis,
-                                          onEmojiTap: { emoji in
-                                              commitSend(with: emoji)
-                                              updateRecentEmoji(emoji)
-                                          }, onShowPicker: {
-                                              isEmojiPickerShown = true
-                                          })
+                        // テキストが無い場合は常に同一の絵文字ボタンを表示
+                        Button {
+                            isEmojiPickerShown = true
+                        } label: {
+                            Image(systemName: "smiley")
+                                .font(.system(size: 24))
                         }
+                        .buttonStyle(.plain)
                     } else {
                         Button(action: {
                             commitSend(with: text)
@@ -529,6 +522,21 @@ struct ChatView: View {
                     deleteMessage(message)
                 } label: {
                     Label("削除", systemImage: "trash")
+                }
+            } else {
+                if let body = message.body {
+                    Button {
+                        UIPasteboard.general.string = body
+                    } label: {
+                        Label("コピー", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        // 返信動作: 引用符付きでテキストフィールドへ挿入 (シンプル実装)
+                        text = "\u300e" + body + "\u300f "
+                        isTextFieldFocused = true
+                    } label: {
+                        Label("返信", systemImage: "arrowshape.turn.up.left")
+                    }
                 }
             }
         })

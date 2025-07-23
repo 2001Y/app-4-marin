@@ -6,6 +6,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         application.registerForRemoteNotifications()
+        // 他アプリのオーディオ再生を止めない AVAudioSession 設定
+        AudioSessionManager.configureForAmbient()
         Task {
             try? await CKSync.installSubscriptions()
         }

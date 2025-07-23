@@ -6,6 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		3B3B9B7F2E2FC89300984E92 /* MCEmojiPicker in Frameworks */ = {isa = PBXBuildFile; productRef = 3B3B9B7E2E2FC89300984E92 /* MCEmojiPicker */; };
+		3B3B9B812E2FC89300984E92 /* MCEmojiPickerJSON in Frameworks */ = {isa = PBXBuildFile; productRef = 3B3B9B802E2FC89300984E92 /* MCEmojiPickerJSON */; };
+		3B3B9B832E2FC8A000984E92 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 3B3B9B822E2FC8A000984E92 /* WebRTC */; };
+		3BE327DE2E30AFE5001B4072 /* EmojisReactionKit in Frameworks */ = {isa = PBXBuildFile; productRef = 3BE327DD2E30AFE5001B4072 /* EmojisReactionKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		3BB364E92E2F39DB00B1F051 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -65,6 +72,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3B3B9B7F2E2FC89300984E92 /* MCEmojiPicker in Frameworks */,
+				3BE327DE2E30AFE5001B4072 /* EmojisReactionKit in Frameworks */,
+				3B3B9B832E2FC8A000984E92 /* WebRTC in Frameworks */,
+				3B3B9B812E2FC89300984E92 /* MCEmojiPickerJSON in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,6 +136,10 @@
 			);
 			name = "marin-ee";
 			packageProductDependencies = (
+				3B3B9B7E2E2FC89300984E92 /* MCEmojiPicker */,
+				3B3B9B802E2FC89300984E92 /* MCEmojiPickerJSON */,
+				3B3B9B822E2FC8A000984E92 /* WebRTC */,
+				3BE327DD2E30AFE5001B4072 /* EmojisReactionKit */,
 			);
 			productName = "marin-ee";
 			productReference = 3BB364D72E2F39D900B1F051 /* marin-ee.app */;
@@ -208,6 +223,12 @@
 			);
 			mainGroup = 3BB364CE2E2F39D900B1F051;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				3BB3651A2E2F52E400B1F051 /* XCRemoteSwiftPackageReference "WebRTC" */,
+				3B3B9B782E2FB54700984E92 /* XCRemoteSwiftPackageReference "EmojiPalette" */,
+				3B3B9B7B2E2FBB4C00984E92 /* XCRemoteSwiftPackageReference "MCEmojiPicker" */,
+				3BE327D82E30A3E3001B4072 /* XCRemoteSwiftPackageReference "EmojisReactionKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3BB364D82E2F39D900B1F051 /* Products */;
 			projectDirPath = "";
@@ -290,9 +311,13 @@
 				CODE_SIGN_ENTITLEMENTS = "marin-ee/marin_ee.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2YQ8WT2BZY;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "marin-ee/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "4-Marin";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "アルバムへ画像を保存するために写真ライブラリへのアクセスを許可してください";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -303,19 +328,20 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.marin-ee";
+				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.4-marin";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TARGETED_DEVICE_FAMILY = "1,7";
 				XROS_DEPLOYMENT_TARGET = 2.5;
 			};
 			name = Debug;
@@ -328,9 +354,13 @@
 				CODE_SIGN_ENTITLEMENTS = "marin-ee/marin_ee.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2YQ8WT2BZY;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "marin-ee/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "4-Marin";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "アルバムへ画像を保存するために写真ライブラリへのアクセスを許可してください";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -341,19 +371,20 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.marin-ee";
+				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.4-marin";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TARGETED_DEVICE_FAMILY = "1,7";
 				XROS_DEPLOYMENT_TARGET = 2.5;
 			};
 			name = Release;
@@ -479,10 +510,10 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.marin-eeTests";
+				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.4-marinTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
@@ -501,10 +532,10 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.marin-eeTests";
+				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.4-marinTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
@@ -522,10 +553,10 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.marin-eeUITests";
+				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.4-marinUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
@@ -543,10 +574,10 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.marin-eeUITests";
+				PRODUCT_BUNDLE_IDENTIFIER = "me.2001y.4-marinUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
@@ -598,6 +629,64 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		3B3B9B782E2FB54700984E92 /* XCRemoteSwiftPackageReference "EmojiPalette" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Kyome22/EmojiPalette";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.1;
+			};
+		};
+		3B3B9B7B2E2FBB4C00984E92 /* XCRemoteSwiftPackageReference "MCEmojiPicker" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/izyumkin/MCEmojiPicker.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.5;
+			};
+		};
+		3BB3651A2E2F52E400B1F051 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 138.0.0;
+			};
+		};
+		3BE327D82E30A3E3001B4072 /* XCRemoteSwiftPackageReference "EmojisReactionKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ikhaled-ali/EmojisReactionKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3B3B9B7E2E2FC89300984E92 /* MCEmojiPicker */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3B3B9B7B2E2FBB4C00984E92 /* XCRemoteSwiftPackageReference "MCEmojiPicker" */;
+			productName = MCEmojiPicker;
+		};
+		3B3B9B802E2FC89300984E92 /* MCEmojiPickerJSON */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3B3B9B7B2E2FBB4C00984E92 /* XCRemoteSwiftPackageReference "MCEmojiPicker" */;
+			productName = MCEmojiPickerJSON;
+		};
+		3B3B9B822E2FC8A000984E92 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3BB3651A2E2F52E400B1F051 /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
+		};
+		3BE327DD2E30AFE5001B4072 /* EmojisReactionKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3BE327D82E30A3E3001B4072 /* XCRemoteSwiftPackageReference "EmojisReactionKit" */;
+			productName = EmojisReactionKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 3BB364CF2E2F39D900B1F051 /* Project object */;
 }

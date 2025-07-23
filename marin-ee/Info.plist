@@ -6,5 +6,13 @@
 	<array>
 		<string>remote-notification</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>無音ビデオ通話で映像共有</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>デュアルカメラ動画にマイクを使用します</string>
+	<key>NSSaveToCameraRollUsageDescription</key>
+	<string>撮影した動画をアルバムに保存します</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>アルバムへ画像を保存します</string>
 </dict>
 </plist>

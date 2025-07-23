@@ -489,13 +489,12 @@ struct ChatView: View {
                 }
             }
         }
-        // TODO: Fix popover implementation
-        // .popover(isPresented: .constant(reactionStore.reactingMessageID == message.id && message.senderID != myID), attachmentAnchor: .point(.top), arrowEdge: .bottom) {
-        //     ReactionPickerView()
-        //         .environment(reactionStore)
-        //         .presentationCompactAdaptation(.none)
-        //         .interactiveDismissDisabled()
-        // }
+        .popover(isPresented: .constant(reactionStore.reactingMessageID == message.id && message.senderID != myID), attachmentAnchor: .point(.bottom), arrowEdge: .bottom) {
+            ReactionPickerView()
+                .environment(reactionStore)
+                .presentationCompactAdaptation(.none)
+                .interactiveDismissDisabled()
+        }
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
         .padding(message.senderID == myID ? .trailing : .leading, 12)
@@ -506,8 +505,7 @@ struct ChatView: View {
                 text = message.body ?? ""
             } else {
                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                contextMessage = message
-                editTextOverlay = message.body ?? ""
+                reactionStore.reactingMessageID = message.id // リアクションピッカー起動
             }
         }
         .contextMenu(menuItems: {
@@ -638,7 +636,7 @@ struct ChatView: View {
 
         // 画像プレビューを即時反映し、ネットワーク送信はバックグラウンドで行う
         Task { @MainActor in
-            let caches = ImageCacheManager.cacheDirectory
+            _ = ImageCacheManager.cacheDirectory // 保持してキャッシュパス生成だけ行い未使用を回避
 
             // ① 使用する Message を決定（直近 3 分以内に自分が送った画像メッセージがあれば追記）
             let message: Message = {
@@ -669,8 +667,7 @@ struct ChatView: View {
                         guard let data = try? await item.loadTransferable(type: Data.self),
                               let uiImg = UIImage(data: data) else { return nil }
                         let ext = "jpg"
-                        let fileURL = caches.appendingPathComponent(UUID().uuidString)
-                                            .appendingPathExtension(ext)
+                        let fileURL = AttachmentManager.makeFileURL(ext: ext)
                         try? data.write(to: fileURL)
                         return (uiImg, fileURL)
                     }
@@ -722,14 +719,18 @@ struct ChatView: View {
     }
 
     private func insertVideoMessage(_ url: URL) {
+        // 永続領域へコピー
+        let dstURL = AttachmentManager.makeFileURL(ext: url.pathExtension)
+        try? FileManager.default.copyItem(at: url, to: dstURL)
+
         let message = Message(roomID: roomID,
                               senderID: myID,
-                              body: "video://" + url.path,
+                              body: "video://" + dstURL.path,
                               createdAt: .now,
                               isSent: false)
         modelContext.insert(message)
         Task { @MainActor in
-            if let recName = try? await CKSync.saveVideo(url, roomID: roomID, senderID: myID) {
+            if let recName = try? await CKSync.saveVideo(dstURL, roomID: roomID, senderID: myID) {
                 message.ckRecordName = recName
             }
             message.isSent = true

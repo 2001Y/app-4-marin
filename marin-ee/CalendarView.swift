@@ -62,30 +62,6 @@ struct CalendarView: View {
             .padding(.horizontal)
             
             Spacer()
-            
-            // Anniversary info
-            VStack(spacing: 8) {
-                Image(systemName: "heart.fill")
-                    .font(.system(size: 40))
-                    .foregroundColor(.pink)
-                
-                Text("記念日まで")
-                    .font(.headline)
-                
-                Text("\(daysUntilAnniversary())日")
-                    .font(.system(size: 48, weight: .bold, design: .rounded))
-                    .foregroundColor(.accentColor)
-                
-                Text(anniversaryDateString)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-            .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color(UIColor.secondarySystemBackground))
-            )
-            .padding()
         }
         .background(Color(UIColor.systemBackground))
         .dismissKeyboardOnDrag()

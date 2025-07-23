@@ -18,9 +18,10 @@ struct ReactionBarView: View {
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
         .background(.ultraThinMaterial)
         .clipShape(Capsule())
+        .offset(y: -6) // 少しかぶさるよう上方向へオフセット
         .frame(maxWidth: .infinity, alignment: isMine ? .trailing : .leading)
         .padding(isMine ? .trailing : .leading, 12)
     }

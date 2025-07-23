@@ -238,11 +238,10 @@ fileprivate struct MessageMapper {
 
         // image message (array)
         if let assetArray = record["imageAssets"] as? [CKAsset], !assetArray.isEmpty {
-            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             var urls: [URL] = []
             for asset in assetArray {
                 if let srcURL = asset.fileURL {
-                    let dstURL = caches.appendingPathComponent(srcURL.lastPathComponent)
+                    let dstURL = AttachmentManager.makeFileURL(ext: srcURL.pathExtension)
                     if !FileManager.default.fileExists(atPath: dstURL.path) {
                         try? FileManager.default.copyItem(at: srcURL, to: dstURL)
                     }
@@ -262,8 +261,7 @@ fileprivate struct MessageMapper {
         // video message
         if let vAsset = record["videoAsset"] as? CKAsset,
            let srcURL = vAsset.fileURL {
-            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            let dstURL = caches.appendingPathComponent(srcURL.lastPathComponent)
+            let dstURL = AttachmentManager.makeFileURL(ext: srcURL.pathExtension)
             if !FileManager.default.fileExists(atPath: dstURL.path) {
                 try? FileManager.default.copyItem(at: srcURL, to: dstURL)
             }

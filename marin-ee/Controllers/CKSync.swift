@@ -83,14 +83,15 @@ enum CKSync {
 
     // MARK: - Message CRUD
 
-    /// Uploads a `Message` to CloudKit.
-    static func saveMessage(_ message: Message) async throws {
+    /// Uploads a `Message` to CloudKit and returns the CloudKit record name.
+    static func saveMessage(_ message: Message) async throws -> String? {
         let record = CKRecord(recordType: "MessageCK")
         record["roomID"] = message.roomID as CKRecordValue
         record["senderID"] = message.senderID as CKRecordValue
         record["body"] = (message.body ?? "") as CKRecordValue
         record["createdAt"] = message.createdAt as CKRecordValue
-        _ = try await db.save(record)
+        let saved = try await db.save(record)
+        return saved.recordID.recordName
     }
 
     /// Updates the body text of an existing CloudKit MessageCK record.
@@ -347,7 +348,7 @@ extension CKDatabase {
         ]
 
         // Helper that fetches *all* records of 1 type using paginated CKQueryOperation
-        func fetchRecords(ofType type: String) async throws -> [CKRecord] {
+        func fetchRecords(ofType recordTypeStr: String) async throws -> [CKRecord] {
             var fetched: [CKRecord] = []
             var cursor: CKQueryOperation.Cursor? = nil
             repeat {
@@ -356,7 +357,8 @@ extension CKDatabase {
                     if let cur = cursor {
                         return CKQueryOperation(cursor: cur)
                     } else {
-                        return CKQueryOperation(recordType: type, predicate: NSPredicate(value: true))
+                        let query = CKQuery(recordType: recordTypeStr, predicate: NSPredicate(value: true))
+                        return CKQueryOperation(query: query)
                     }
                 }()
 
@@ -379,9 +381,9 @@ extension CKDatabase {
 
         // 各タイプを並列取得
         return try await withThrowingTaskGroup(of: [CKRecord].self) { group in
-            for type in recordTypes {
+            for rt in recordTypes {
                 group.addTask {
-                    try await fetchRecords(ofType: type)
+                    try await fetchRecords(ofType: rt)
                 }
             }
             var combined: [CKRecord] = []

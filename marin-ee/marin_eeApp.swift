@@ -15,9 +15,6 @@ struct MarinEEApp: App {
     // DB リセットが発生したかを保持し、UI でアラート表示に使う
     @State private var showDBResetAlert: Bool = false
     
-    // Reaction Store
-    @State private var reactionStore = ReactionStore()
-
     init() {
         // makeContainer でリセット有無を inout で受け取る
         var didReset = false
@@ -90,7 +87,7 @@ struct MarinEEApp: App {
                     .dismissKeyboardOnDrag()
                 }
             }
-            .environment(reactionStore)
+            // ReactionStore を削除したため環境注入も不要
             // DB リセット時のみアラートを表示
             .alert("データベースをリセットしました", isPresented: $showDBResetAlert) {
                 Button("OK", role: .cancel) { showDBResetAlert = false }

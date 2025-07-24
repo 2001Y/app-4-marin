@@ -1,3 +1,6 @@
+#if canImport(EmojisReactionKit)
+import EmojisReactionKit
+#endif
 import SwiftUI
 import UIKit
 import SwiftData
@@ -23,8 +26,7 @@ struct ChatView: View {
     // ピッカーで選択された絵文字
     @State private var pickedEmoji: String = ""
 
-    // リアクションストア
-    @Environment(ReactionStore.self) private var reactionStore
+    // ReactionKit does not need global state — handled per bubble
 
     // 直近 3 件を配列に変換
     private var recentEmojis: [String] {
@@ -59,8 +61,7 @@ struct ChatView: View {
     // Compose bar states
     @FocusState private var isTextFieldFocused: Bool
     @State private var attachmentsExpanded: Bool = true
-    @State private var plusReactionTarget: Message? = nil
-
+    
     // Context overlay for partner message actions
     @State private var contextMessage: Message? = nil
     @State private var editTextOverlay: String = ""
@@ -86,7 +87,7 @@ struct ChatView: View {
 
     // リストスクロール・ページ遷移ブロック用
     private var interactionBlocked: Bool {
-        reactionStore.reactingMessageID != nil || editingMessage != nil
+        editingMessage != nil
     }
 
     var body: some View {
@@ -194,6 +195,10 @@ struct ChatView: View {
                                 .foregroundColor(.accentColor)
                         }
                         .buttonStyle(.plain)
+                        // 画像を選択し Picker が閉じたら即送信
+                        .onChange(of: photosPickerItems) { _ in
+                            sendSelectedImages()
+                        }
 
                         // Dual camera recording button
                         CameraDualButton()
@@ -225,24 +230,46 @@ struct ChatView: View {
                             }
                         }
 
-                    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        // テキストが無い場合は常に同一の絵文字ボタンを表示
-                        Button {
-                            isEmojiPickerShown = true
-                        } label: {
-                            Image(systemName: "smiley")
-                                .font(.system(size: 24))
+                    // ------- Trailing accessory (emoji bar / send / smiley) -------
+                    if isTextFieldFocused {
+                        // キーボード表示中 → スマイリー or 送信ボタン
+                        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Button {
+                                isEmojiPickerShown = true
+                            } label: {
+                                Image(systemName: "smiley")
+                                    .font(.system(size: 24))
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Button(action: {
+                                commitSend(with: text)
+                                text = ""
+                            }) {
+                                Image(systemName: "arrow.up.circle.fill")
+                                    .font(.system(size: 24))
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     } else {
-                        Button(action: {
-                            commitSend(with: text)
-                            text = ""
-                        }) {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.system(size: 24))
+                        // キーボード非表示 → QuickEmojiBar 常時表示（送信ボタンはテキスト有無で追加）
+                        QuickEmojiBar(recentEmojis: Array(recentEmojis.prefix(3))) { emoji in
+                            commitSend(with: emoji)
+                            updateRecentEmoji(emoji)
+                        } onShowPicker: {
+                            isEmojiPickerShown = true
                         }
-                        .buttonStyle(.plain)
+
+                        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                            Button(action: {
+                                commitSend(with: text)
+                                text = ""
+                            }) {
+                                Image(systemName: "arrow.up.circle.fill")
+                                    .font(.system(size: 24))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -267,7 +294,6 @@ struct ChatView: View {
                                     updateRecentEmoji(emoji)
                                     contextMessage = nil
                                 } onShowPicker: {
-                                    plusReactionTarget = ctx
                                     isEmojiPickerShown = true
                                     contextMessage = nil
                                 }
@@ -320,9 +346,14 @@ struct ChatView: View {
         // --- Interaction block overlay ---
         .overlay {
             if interactionBlocked {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .allowsHitTesting(true)
+                Color.clear.contentShape(Rectangle()).allowsHitTesting(true)
+            }
+        }
+
+        // -------- 編集オーバーレイ ----------
+        .overlay(alignment: .bottomTrailing) {
+            if let editing = editingMessage {
+                EditingOverlay(message: editing)
             }
         }
         // 画像フルスクリーンプレビュー
@@ -448,7 +479,7 @@ struct ChatView: View {
 
     // Text / reaction bubble
     @ViewBuilder private func textBubble(for message: Message) -> some View {
-        let reactionStr = reactionStore.reactions[message.id] ?? message.reactionEmoji
+        let reactionStr = message.reactionEmoji
         let isEmojiOnly = message.body?.trimmingCharacters(in: .whitespacesAndNewlines).allSatisfy { $0.unicodeScalars.allSatisfy { $0.properties.isEmoji } } ?? false
         let emojiCount = message.body?.count ?? 0
         
@@ -488,22 +519,27 @@ struct ChatView: View {
                         }
                     }
                 }
-                // Reaction below message
+                // Reaction below message (single emoji)
                 if let reactionStr {
-                    ReactionBarView(emojis: reactionStr.map { String($0) }, isMine: message.senderID == myID)
-                } else if message.senderID != myID && message.id == messages.last?.id {
-                    ReactionBarView(emojis: [], isMine: false) {
-                        plusReactionTarget = message
-                        isEmojiPickerShown = true
-                    }
+                    Text(reactionStr)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Capsule())
+                        .offset(y: -6)
                 }
             }
         }
-        .popover(isPresented: .constant(reactionStore.reactingMessageID == message.id && message.senderID != myID), attachmentAnchor: .point(.bottom), arrowEdge: .bottom) {
-            ReactionPickerView()
-                .environment(reactionStore)
-                .presentationCompactAdaptation(.none)
-                .interactiveDismissDisabled()
+        // Reactionable overlay for partner messages
+        .overlay {
+            if message.senderID != myID {
+                Reactionable(message: message) { emoji in
+                    message.reactionEmoji = emoji
+                    if let recName = message.ckRecordName {
+                        Task { try? await CKSync.updateMessageBody(recordName: recName, newBody: emoji) }
+                    }
+                }
+            }
         }
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
@@ -512,10 +548,7 @@ struct ChatView: View {
         .onLongPressGesture(minimumDuration: 0.35) {
             if message.senderID == myID {
                 editingMessage = message
-                text = message.body ?? ""
-            } else {
-                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                reactionStore.reactingMessageID = message.id // リアクションピッカー起動
+                editTextOverlay = message.body ?? ""
             }
         }
         .contextMenu(menuItems: {
@@ -560,17 +593,12 @@ struct ChatView: View {
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(message.imageLocalURLs, id: \.self) { url in
+                        ForEach(Array(message.imageLocalURLs.enumerated()), id: \.element) { (index, url) in
                             if let img = UIImage(contentsOfFile: url.path) {
                                 Button {
                                     // 画像プレビューを起動
-                                    let imgs = message.imageLocalURLs.compactMap { UIImage(contentsOfFile: $0.path) }
-                                    previewImages = imgs
-                                    if let idx = imgs.firstIndex(of: img) {
-                                        previewStartIndex = idx
-                                    } else {
-                                        previewStartIndex = 0
-                                    }
+                                    previewImages = message.imageLocalURLs.compactMap { UIImage(contentsOfFile: $0.path) }
+                                    previewStartIndex = index
                                     isPreviewShown = true
                                 } label: {
                                     Image(uiImage: img)
@@ -608,7 +636,9 @@ struct ChatView: View {
                               isSent: false)
         modelContext.insert(message)
         Task { @MainActor in
-            try? await CKSync.saveMessage(message)
+            if let rec = try? await CKSync.saveMessage(message) {
+                message.ckRecordName = rec
+            }
             message.isSent = true
         }
     }
@@ -626,7 +656,9 @@ struct ChatView: View {
                 if let recName = target.ckRecordName {
                     try? await CKSync.updateMessageBody(recordName: recName, newBody: trimmed)
                 } else {
-                    try? await CKSync.saveMessage(target)
+                    if let rec = try? await CKSync.saveMessage(target) {
+                        target.ckRecordName = rec
+                    }
                 }
                 target.isSent = true
             }
@@ -744,6 +776,44 @@ struct ChatView: View {
                 message.ckRecordName = recName
             }
             message.isSent = true
+        }
+    }
+
+    // MARK: - Editing Overlay
+    @ViewBuilder private func EditingOverlay(message: Message) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            Color.black.opacity(0.4).ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("メッセージを編集")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                TextEditor(text: $editTextOverlay)
+                    .frame(minHeight: 120)
+                    .padding(8)
+                    .background(Color(UIColor.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .onAppear { editTextOverlay = message.body ?? "" }
+            }
+            .padding()
+
+            Button {
+                let trimmed = editTextOverlay.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.isEmpty == false else { return }
+                message.body = trimmed
+                if let recName = message.ckRecordName {
+                    Task { try? await CKSync.updateMessageBody(recordName: recName, newBody: trimmed) }
+                }
+                editingMessage = nil
+            } label: {
+                Label("確定", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 28))
+                    .padding(16)
+                    .background(Color.accentColor, in: Circle())
+                    .foregroundColor(.white)
+                    .shadow(radius: 4)
+            }
+            .padding([.trailing, .bottom], 24)
         }
     }
 } // end struct ChatView 

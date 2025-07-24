@@ -356,7 +356,8 @@ extension CKDatabase {
                     if let cur = cursor {
                         return CKQueryOperation(cursor: cur)
                     } else {
-                        return CKQueryOperation(recordType: type, predicate: NSPredicate(value: true))
+                        let query = CKQuery(recordType: type, predicate: NSPredicate(value: true))
+                        return CKQueryOperation(query: query)
                     }
                 }()
 

@@ -26,16 +26,21 @@ struct MarinEEApp: App {
         
         // makeContainer でリセット有無を inout で受け取る
         var didReset = needsReset
-        if let container = Self.makeContainer(resetOccurred: &didReset) {
-            sharedModelContainer = container
+        let container: ModelContainer
+        
+        if let validContainer = Self.makeContainer(resetOccurred: &didReset) {
+            container = validContainer
         } else {
             // 最後の防衛策: 空スキーマでメモリストア
             let schema = Schema([Message.self, Anniversary.self, ChatRoom.self])
-            sharedModelContainer = try! ModelContainer(for: schema,
-                                                       configurations: [.init(schema: schema,
-                                                                              isStoredInMemoryOnly: true)])
+            container = try! ModelContainer(for: schema,
+                                          configurations: [.init(schema: schema,
+                                                                 isStoredInMemoryOnly: true)])
             didReset = true
         }
+        
+        // 一度だけ初期化
+        sharedModelContainer = container
 
         // アラート表示用 State を初期化
         self._showDBResetAlert = State(initialValue: didReset)
@@ -96,9 +101,15 @@ struct MarinEEApp: App {
                 TabView {
                     ChatListView()
                         .tag(0)
+                        .tabItem {
+                            Label("チャット", systemImage: "bubble.left.and.bubble.right")
+                        }
                     
                     CalendarView()
                         .tag(1)
+                        .tabItem {
+                            Label("カレンダー", systemImage: "calendar")
+                        }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
             }

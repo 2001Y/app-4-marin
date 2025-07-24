@@ -80,10 +80,10 @@ struct FullScreenPreviewView: View {
 
     var body: some View {
         GeometryReader { geo in
-            // 背景ブラー
+            // 背景: 黒 + 軽いブラー
             Rectangle()
-                .background(.ultraThinMaterial)
-                .overlay(Color.black.opacity( backgroundOpacity()))
+                .background(.thinMaterial)
+                .overlay(Color.black.opacity(backgroundOpacity()))
                 .ignoresSafeArea()
 
             // ---- カスタム横ページング ----
@@ -202,9 +202,9 @@ struct FullScreenPreviewView: View {
     }
 
     private func backgroundOpacity() -> Double {
-        // 0.25 → 0 にフェード
+        // 0.15 → 0 へフェード (以前より軽め)
         let progress = min(abs(dragTranslation.height) / dismissThreshold, 1)
-        return 0.25 * (1 - Double(progress))
+        return 0.15 * (1 - Double(progress))
     }
 }
 

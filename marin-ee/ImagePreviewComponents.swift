@@ -166,13 +166,12 @@ struct FullScreenPreviewView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .padding(.bottom, 60)
             }
-
-            // 保存確認アラート / ActionSheet
-            .confirmationDialog("全てダウンロードしますか？", isPresented: $showConfirm, titleVisibility: .visible) {
-                Button("これのみ") { save(images[currentIndex]) }
-                Button("全てダウンロード") { saveAll() }
-                Button("キャンセル", role: .cancel) { }
-            }
+        }
+        // 保存確認アラート / ActionSheet
+        .confirmationDialog("全てダウンロードしますか？", isPresented: $showConfirm, titleVisibility: .visible) {
+            Button("これのみ") { save(images[currentIndex]) }
+            Button("全てダウンロード") { saveAll() }
+            Button("キャンセル", role: .cancel) { }
         }
         .statusBarHidden(true)
         .interactiveDismissDisabled()

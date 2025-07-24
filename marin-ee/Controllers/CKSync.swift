@@ -9,7 +9,7 @@ import SwiftData
 import AVFoundation
 #endif
 
-/// Utility namespace that encapsulates all CloudKit interactions used by MarinEE.
+/// Utility namespace that encapsulates all CloudKit interactions used by 4-Marin.
 enum CKSync {
     private static let db = CKContainer.default().privateCloudDatabase
 

@@ -3,7 +3,7 @@ import SwiftData
 import UIKit
 
 @main
-struct MarinEEApp: App {
+struct marin_eeApp: App {
     // Schema versioning
     private static let currentSchemaVersion = 2
     @AppStorage("schemaVersion") private var schemaVersion = 0
@@ -16,6 +16,9 @@ struct MarinEEApp: App {
 
     // DB リセットが発生したかを保持し、UI でアラート表示に使う
     @State private var showDBResetAlert: Bool = false
+    
+    // ReactionStore インスタンス
+    private let reactionStore = ReactionStore()
     
     init() {
         // Check schema version - UserDefaultsから直接読み取る
@@ -61,7 +64,7 @@ struct MarinEEApp: App {
         try? FileManager.default.createDirectory(at: appSupport,
                                                  withIntermediateDirectories: true)
 
-        let url = appSupport.appendingPathComponent("MarinEE.sqlite")
+        let url = appSupport.appendingPathComponent("4-Marin.sqlite")
 
         // If reset requested, delete existing DB
         if resetOccurred {
@@ -111,7 +114,7 @@ struct MarinEEApp: App {
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
             }
-            // ReactionStore を削除したため環境注入も不要
+            .environment(reactionStore)
             // DB リセット時のみアラートを表示
             .alert("データベースをリセットしました", isPresented: $showDBResetAlert) {
                 Button("OK", role: .cancel) { showDBResetAlert = false }

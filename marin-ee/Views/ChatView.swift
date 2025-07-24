@@ -11,6 +11,7 @@ import AVKit
 struct ChatView: View {
     let chatRoom: ChatRoom
     @Environment(\.dismiss) private var dismiss
+    @Environment(ReactionStore.self) private var reactionStore
     
     // In a production app roomID should be deterministic hash of both users.
     private var roomID: String { chatRoom.roomID }
@@ -695,7 +696,6 @@ struct ChatView: View {
                     Spacer(minLength: 0)
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
-<<<<<<< HEAD
                     HStack(spacing: 8) {
                         ForEach(Array(message.imageLocalURLs.enumerated()), id: \.element) { (index, url) in
                             if let img = UIImage(contentsOfFile: url.path) {
@@ -703,17 +703,6 @@ struct ChatView: View {
                                     // 画像プレビューを起動
                                     previewImages = message.imageLocalURLs.compactMap { UIImage(contentsOfFile: $0.path) }
                                     previewStartIndex = index
-=======
-                    HStack(spacing: 6) {
-                        ForEach(message.imageLocalURLs, id: \.path) { url in
-                            if let img = UIImage(contentsOfFile: url.path) {
-                                Button {
-                                    // 画像プレビューを起動
-                                    let imgs = message.imageLocalURLs.compactMap { UIImage(contentsOfFile: $0.path) }
-                                    previewImages = imgs
-                                    if let idx = imgs.firstIndex(of: img) {
-                                        previewStartIndex = idx
-                                    }
                                     isPreviewShown = true
                                 } label: {
                                     Image(uiImage: img)
@@ -906,7 +895,6 @@ struct ChatView: View {
         }
     }
 
-<<<<<<< HEAD
     // MARK: - Editing Overlay
     @ViewBuilder private func EditingOverlay(message: Message) -> some View {
         ZStack(alignment: .bottomTrailing) {
@@ -942,7 +930,9 @@ struct ChatView: View {
                     .shadow(radius: 4)
             }
             .padding([.trailing, .bottom], 24)
-=======
+        }
+    }
+
     // MARK: - Inline edit commit
     private func commitInlineEdit() {
         guard let target = editingMessage else { return }

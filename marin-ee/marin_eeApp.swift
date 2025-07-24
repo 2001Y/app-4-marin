@@ -4,6 +4,10 @@ import UIKit
 
 @main
 struct MarinEEApp: App {
+    // Schema versioning
+    private static let currentSchemaVersion = 2
+    @AppStorage("schemaVersion") private var schemaVersion = 0
+    
     // UIApplicationDelegate for push and CloudKit
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -19,8 +23,11 @@ struct MarinEEApp: App {
     @State private var reactionStore = ReactionStore()
 
     init() {
+        // Check schema version
+        let needsReset = schemaVersion != Self.currentSchemaVersion
+        
         // makeContainer でリセット有無を inout で受け取る
-        var didReset = false
+        var didReset = needsReset
         if let container = Self.makeContainer(resetOccurred: &didReset) {
             sharedModelContainer = container
         } else {
@@ -34,6 +41,11 @@ struct MarinEEApp: App {
 
         // アラート表示用 State を初期化
         self._showDBResetAlert = State(initialValue: didReset)
+        
+        // Update schema version after successful init
+        if didReset {
+            schemaVersion = Self.currentSchemaVersion
+        }
     }
 
     /// 既存ストアをそのまま開き、失敗時のみ削除してリセット。
@@ -49,6 +61,13 @@ struct MarinEEApp: App {
                                                  withIntermediateDirectories: true)
 
         let url = appSupport.appendingPathComponent("MarinEE.sqlite")
+
+        // If reset requested, delete existing DB
+        if resetOccurred {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: url.appendingPathExtension("-shm"))
+            try? FileManager.default.removeItem(at: url.appendingPathExtension("-wal"))
+        }
 
         // まず既存ファイルをそのまま開く試み
         if let disk = try? ModelContainer(for: schema,
@@ -87,7 +106,6 @@ struct MarinEEApp: App {
                             .tag(1)
                     }
                     .tabViewStyle(.page(indexDisplayMode: .never))
-                    .dismissKeyboardOnDrag()
                 }
             }
             .environment(reactionStore)

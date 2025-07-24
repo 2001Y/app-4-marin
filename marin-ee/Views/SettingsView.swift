@@ -14,12 +14,15 @@ struct SettingsView: View {
     @AppStorage("remoteUserID") private var remoteUserID: String = ""
     @AppStorage("myDisplayName") private var myDisplayName: String = ""
     @AppStorage("myAvatarData") private var myAvatarData: Data = Data()
+    @AppStorage("autoDownloadImages") private var autoDownloadImages: Bool = false
+    @AppStorage("photosFavoriteSync") private var photosFavoriteSync: Bool = true
     @Environment(\.modelContext) private var modelContext
 
     @State private var showClearChatAlert = false
     @State private var showClearCacheImagesAlert = false
     @State private var showLogoutAlert = false
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
+    @State private var showResetAlert = false
 
     @State private var cacheSizeBytes: UInt64 = 0
     @State private var photosPickerItem: PhotosPickerItem? = nil
@@ -45,6 +48,7 @@ struct SettingsView: View {
         Form {
             profileSection
             notificationsSection
+            imageSettingsSection
             infoSection
             dangerSection
         }
@@ -164,6 +168,13 @@ struct SettingsView: View {
             } else if notificationStatus == .denied {
                 Button("設定を開く") { openAppSettings() }
             }
+        }
+    }
+    
+    @ViewBuilder private var imageSettingsSection: some View {
+        Section(header: Text("画像設定")) {
+            Toggle("画像を自動ダウンロード", isOn: $autoDownloadImages)
+            Toggle("写真アプリのお気に入りと同期", isOn: $photosFavoriteSync)
         }
     }
 

@@ -6,12 +6,14 @@ import CloudKit
 import AVKit
 
 struct ChatView: View {
+    let chatRoom: ChatRoom
+    
     // In a production app roomID should be deterministic hash of both users.
-    private let roomID: String = "default-room"
+    private var roomID: String { chatRoom.roomID }
     private let myID: String = UIDevice.current.identifierForVendor?.uuidString ?? "me"
 
     // 相手ユーザー ID をヘッダーに表示
-    @AppStorage("remoteUserID") private var remoteUserID: String = "Partner"
+    private var remoteUserID: String { chatRoom.remoteUserID }
 
     // 最近使った絵文字を保存（最大3件）
     // デフォルトで 3 つの絵文字をプリセット（初回起動時のみ表示用）
@@ -41,7 +43,15 @@ struct ChatView: View {
         recentEmojisString = arr.joined(separator: ",")
     }
 
-    @Query(filter: #Predicate<Message> { $0.roomID == "default-room" }, sort: \.createdAt) private var messages: [Message]
+    @Query private var messages: [Message]
+    
+    init(chatRoom: ChatRoom) {
+        self.chatRoom = chatRoom
+        let roomID = chatRoom.roomID
+        self._messages = Query(filter: #Predicate<Message> { message in
+            message.roomID == roomID
+        }, sort: \.createdAt)
+    }
     @Environment(\.modelContext) private var modelContext
 
     @State private var text: String = ""
@@ -138,12 +148,13 @@ struct ChatView: View {
                         Button {
                             showProfileSheet = true
                         } label: {
-                            HStack(spacing: 6) {
-                                if let img = partnerAvatar {
-                                    Image(uiImage: img).resizable().scaledToFill().frame(width: 28, height: 28).clipShape(Circle())
-                                }
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(partnerName.isEmpty ? remoteUserID : partnerName)
                                     .foregroundColor(.primary)
+                                    .font(.headline)
+                                Text("あと\(daysUntilAnniversary)日")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                         }
                         .buttonStyle(.plain)
@@ -331,14 +342,16 @@ struct ChatView: View {
         .overlay {
             // Hero single image preview
             if showHero, let img = heroImage {
+                let targetMessage = messages.first { $0.assetPath == heroImageID || $0.imageLocalURLs.contains { $0.path == heroImageID } }
                 HeroImagePreview(image: img,
                                   geometryID: heroImageID,
                                   namespace: heroNS,
                                   onDismiss: {
-                    withAnimation(.spring()) {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
                         showHero = false
                     }
-                })
+                }, message: targetMessage)
+                .environment(reactionStore)
                 .transition(.opacity)
             }
         }
@@ -445,7 +458,7 @@ struct ChatView: View {
 
     // MARK: - UI Helpers
     @ViewBuilder private func bubble(for message: Message) -> some View {
-        if message.imageLocalURLs.isEmpty == false {
+        if message.assetPath != nil || message.imageLocalURLs.isEmpty == false {
             imageBubble(for: message)
         } else if let body = message.body, body.hasPrefix("video://") {
             videoBubble(for: message)
@@ -565,7 +578,7 @@ struct ChatView: View {
             if message.senderID == myID {
                 Button {
                     editingMessage = message
-                    text = message.body ?? ""
+                    editingText = message.body ?? ""
                 } label: {
                     Label("編集", systemImage: "pencil")
                 }
@@ -581,6 +594,46 @@ struct ChatView: View {
     // MARK: - Extracted Helper Views
     @ViewBuilder
     private func imageBubble(for message: Message) -> some View {
+        // Handle new single asset messages
+        if let assetPath = message.assetPath,
+           let img = UIImage(contentsOfFile: assetPath) {
+            VStack(alignment: message.senderID == myID ? .trailing : .leading, spacing: 4) {
+                HStack {
+                    if message.senderID == myID {
+                        Spacer(minLength: 0)
+                    }
+                    let id = assetPath
+                    Button {
+                        let targetMessage = messages.first { $0.assetPath == assetPath }
+                        heroImage = img
+                        heroImageID = id
+                        withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
+                            showHero = true
+                        }
+                    } label: {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(height: 120)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .matchedGeometryEffect(id: id, in: heroNS)
+                    }
+                    if message.senderID != myID {
+                        Spacer(minLength: 0)
+                    }
+                }
+                Text(message.createdAt, style: .time)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 4)
+            .padding(message.senderID == myID ? .trailing : .leading, 8)
+            .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
+            .id(message.id)
+            return
+        }
+        
+        // Legacy: Handle old imageLocalURLs
         VStack(alignment: message.senderID == myID ? .trailing : .leading, spacing: 4) {
             HStack {
                 if message.senderID == myID {
@@ -594,7 +647,7 @@ struct ChatView: View {
                                 Button {
                                     heroImage = img
                                     heroImageID = id
-                                    withAnimation(.spring()) {
+                                    withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
                                         showHero = true
                                     }
                                 } label: {
@@ -670,79 +723,34 @@ struct ChatView: View {
         let items = photosPickerItems
         photosPickerItems = []
 
-        // 画像プレビューを即時反映し、ネットワーク送信はバックグラウンドで行う
+        // 各画像を個別メッセージとして即時送信
         Task { @MainActor in
-            _ = ImageCacheManager.cacheDirectory // 保持してキャッシュパス生成だけ行い未使用を回避
-
-            // ① 使用する Message を決定（直近 3 分以内に自分が送った画像メッセージがあれば追記）
-            let message: Message = {
-                if let last = messages.last,
-                   last.senderID == myID,
-                   !last.imageLocalURLs.isEmpty,
-                   abs(Date().timeIntervalSince(last.createdAt)) < 180 {
-                    return last
-                } else {
-                    let msg = Message(roomID: roomID,
-                                       senderID: myID,
-                                       body: nil,
-                                       imageLocalURLs: [],
-                                       createdAt: .now,
-                                       isSent: false)
-                    modelContext.insert(msg)
-                    return msg
-                }
-            }()
-
-            // ② 各画像を並列ロード → ファイル保存
-            var fileURLs: [URL] = []
-            var uiImages: [UIImage] = []
-
-            await withTaskGroup(of: (UIImage, URL)?.self) { group in
-                for item in items {
-                    group.addTask {
-                        guard let data = try? await item.loadTransferable(type: Data.self),
-                              let uiImg = UIImage(data: data) else { return nil }
-                        let ext = "jpg"
-                        let fileURL = AttachmentManager.makeFileURL(ext: ext)
-                        try? data.write(to: fileURL)
-                        return (uiImg, fileURL)
-                    }
-                }
-
-                for await result in group {
-                    if let (img, url) = result {
-                        uiImages.append(img)
-                        fileURLs.append(url)
+            for item in items {
+                guard let data = try? await item.loadTransferable(type: Data.self),
+                      let image = UIImage(data: data) else { continue }
+                
+                // Save to local cache
+                guard let localURL = AttachmentManager.saveImageToCache(image) else { continue }
+                
+                // Create message immediately
+                let message = Message(roomID: roomID,
+                                    senderID: myID,
+                                    body: nil,
+                                    assetPath: localURL.path,
+                                    createdAt: .now,
+                                    isSent: false)
+                modelContext.insert(message)
+                
+                // Upload to CloudKit in background
+                Task {
+                    if let recName = try? await CKSync.saveImageMessage(image, roomID: roomID, senderID: myID) {
+                        await MainActor.run {
+                            message.ckRecordName = recName
+                            message.isSent = true
+                        }
                     }
                 }
             }
-
-            guard uiImages.isEmpty == false else { return }
-
-            // MainActor で Message に反映してプレビュー更新
-            var current = message.imageLocalURLs
-            current.append(contentsOf: fileURLs)
-            message.imageLocalURLs = current
-
-            ImageCacheManager.enforceLimit()
-
-            // ③ CloudKit へアップロード（HEIC/JPEG 最適化）
-            var optimized: [UIImage] = uiImages.map { img in
-                if let data = img.optimizedData(), let opt = UIImage(data: data) {
-                    return opt
-                }
-                return img
-            }
-
-            if let recName = message.ckRecordName {
-                try? await CKSync.appendImages(optimized, recordName: recName)
-            } else if let recName = try? await CKSync.saveImages(optimized,
-                                                                 roomID: roomID,
-                                                                 senderID: myID) {
-                message.ckRecordName = recName
-            }
-
-            message.isSent = true
         }
     }
 

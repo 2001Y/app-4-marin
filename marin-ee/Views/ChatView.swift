@@ -47,6 +47,8 @@ struct ChatView: View {
     @State private var text: String = ""
     // 編集中のメッセージ（nil なら通常送信モード）
     @State private var editingMessage: Message? = nil
+    @State private var editingText: String = ""
+    @FocusState private var editingFieldFocused: Bool
     @State private var photosPickerItems: [PhotosPickerItem] = []
     @State private var showSettings: Bool = false
     @State private var showDualCameraRecorder: Bool = false
@@ -355,13 +357,23 @@ struct ChatView: View {
             isEmojiPickerShown = false
         }
         .onAppear {
+            // 通知許可要求（初回のみ）
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                if settings.authorizationStatus == .notDetermined {
+                    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                        print("[DEBUG] notification permission granted = \(granted)")
+                    }
+                }
+            }
+
             // recentEmojis が空の場合はデフォルト値を設定（AppStorage に保存済みでも上書きしない）
             if recentEmojisString.isEmpty {
                 recentEmojisString = "😀,👍,🎉"
             }
             P2PController.shared.startIfNeeded()
             CKSync.modelContext = modelContext
-            
+
+            print("[DEBUG] ChatView appeared. messages = \(messages.count)")
             // Load partner profile
             Task {
                 let (name, avatarData) = await CKSync.fetchProfile(for: remoteUserID)
@@ -474,7 +486,18 @@ struct ChatView: View {
                         Text(message.createdAt, style: .time)
                             .font(.caption2)
                             .foregroundColor(.secondary)
-                        if isEmojiOnly && emojiCount <= 3 {
+                        if editingMessage?.id == message.id {
+                            TextField("", text: $editingText, axis: .vertical)
+                                .textFieldStyle(.plain)
+                                .padding(10)
+                                .background(Color.accentColor.opacity(0.8))
+                                .foregroundColor(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 20))
+                                .font(.system(size: 15))
+                                .focused($editingFieldFocused)
+                                .onSubmit { commitInlineEdit() }
+                                .onAppear { editingFieldFocused = true }
+                        } else if isEmojiOnly && emojiCount <= 3 {
                             Text(message.body ?? "")
                                 .font(.system(size: 60))
                         } else {
@@ -498,7 +521,10 @@ struct ChatView: View {
                 }
             }
         }
-        .popover(isPresented: .constant(reactionStore.reactingMessageID == message.id && message.senderID != myID), attachmentAnchor: .point(.bottom), arrowEdge: .bottom) {
+        .popover(isPresented: Binding<Bool>(
+            get: { reactionStore.reactingMessageID == message.id && message.senderID != myID },
+            set: { val in if !val { reactionStore.reactingMessageID = nil } }
+        ), attachmentAnchor: .point(.bottom), arrowEdge: .bottom) {
             ReactionPickerView()
                 .environment(reactionStore)
                 .presentationCompactAdaptation(.none)
@@ -508,14 +534,11 @@ struct ChatView: View {
         .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
         .padding(message.senderID == myID ? .trailing : .leading, 12)
         .id(message.id)
+        // 相手メッセージのみロングタップでリアクション
         .onLongPressGesture(minimumDuration: 0.35) {
-            if message.senderID == myID {
-                editingMessage = message
-                text = message.body ?? ""
-            } else {
-                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                reactionStore.reactingMessageID = message.id // リアクションピッカー起動
-            }
+            guard message.senderID != myID else { return }
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            reactionStore.reactingMessageID = message.id // ピッカー起動
         }
         .contextMenu(menuItems: {
             if message.senderID == myID {
@@ -729,6 +752,25 @@ struct ChatView: View {
             }
             message.isSent = true
         }
+    }
+
+    // MARK: - Inline edit commit
+    private func commitInlineEdit() {
+        guard let target = editingMessage else { return }
+        let trimmed = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { editingMessage = nil; return }
+
+        target.body = trimmed
+        target.isSent = false
+        Task { @MainActor in
+            if let recName = target.ckRecordName {
+                try? await CKSync.updateMessageBody(recordName: recName, newBody: trimmed)
+            } else {
+                try? await CKSync.saveMessage(target)
+            }
+            target.isSent = true
+        }
+        editingMessage = nil
     }
 } // end struct ChatView 
 

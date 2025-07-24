@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// アプリの永続領域 (Application Support/attachments) にメディアファイルを保存・取得するヘルパ。
 struct AttachmentManager {

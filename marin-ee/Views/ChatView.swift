@@ -163,7 +163,6 @@ struct ChatView: View {
                                 bubble(for: message)
                             }
                         }
-                        // no outer horizontal margin for full-width slider
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .dismissKeyboardOnDrag()
@@ -173,11 +172,6 @@ struct ChatView: View {
                             proxy.scrollTo(id, anchor: .bottom)
                         }
                     }
-                }
-                .onDrag {
-                    // Dismiss keyboard on drag
-                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                    return NSItemProvider()
                 }
 
                 Divider()
@@ -325,9 +319,14 @@ struct ChatView: View {
                     .allowsHitTesting(true)
             }
         }
-        // 画像フルスクリーンプレビュー
-        .fullScreenCover(isPresented: $isPreviewShown) {
-            FullScreenPreviewView(images: previewImages, startIndex: previewStartIndex)
+        // 画像フルスクリーンプレビュー (オーバーレイ)
+        .overlay {
+            if isPreviewShown {
+                FullScreenPreviewView(images: previewImages,
+                                      startIndex: previewStartIndex,
+                                      onDismiss: { isPreviewShown = false })
+                .transition(.opacity)
+            }
         }
         // 動画プレイヤー
         .fullScreenCover(isPresented: $isVideoPlayerShown) {
@@ -530,21 +529,6 @@ struct ChatView: View {
                     deleteMessage(message)
                 } label: {
                     Label("削除", systemImage: "trash")
-                }
-            } else {
-                if let body = message.body {
-                    Button {
-                        UIPasteboard.general.string = body
-                    } label: {
-                        Label("コピー", systemImage: "doc.on.doc")
-                    }
-                    Button {
-                        // 返信動作: 引用符付きでテキストフィールドへ挿入 (シンプル実装)
-                        text = "「" + body + "」 "
-                        isTextFieldFocused = true
-                    } label: {
-                        Label("返信", systemImage: "arrowshape.turn.up.left")
-                    }
                 }
             }
         })

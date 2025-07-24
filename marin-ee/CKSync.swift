@@ -23,6 +23,7 @@ enum CKSync {
             ("IceCandidateCK", "ice-sub"),
             ("PresenceCK", "pre-sub"),
             ("ProfileCK", "profile-sub")
+            ,("AnniversaryCK","anniv-sub")
         ]
 
         for (type, id) in types {
@@ -104,6 +105,30 @@ enum CKSync {
     static func deleteMessage(recordName: String) async throws {
         let recordID = CKRecord.ID(recordName: recordName)
         _ = try await db.deleteRecord(withID: recordID)
+    }
+
+    // MARK: - Anniversary CRUD
+    static func saveAnniversary(title: String, date: Date, roomID: String) async throws -> String? {
+        let record = CKRecord(recordType: "AnniversaryCK")
+        record["roomID"] = roomID as CKRecordValue
+        record["title"] = title as CKRecordValue
+        record["annivDate"] = date as CKRecordValue
+        record["createdAt"] = Date() as CKRecordValue
+        let saved = try await db.save(record)
+        return saved.recordID.recordName
+    }
+
+    static func updateAnniversary(recordName: String, title: String, date: Date) async throws {
+        let recordID = CKRecord.ID(recordName: recordName)
+        let record = try await db.record(for: recordID)
+        record["title"] = title as CKRecordValue
+        record["annivDate"] = date as CKRecordValue
+        _ = try await db.save(record)
+    }
+
+    static func deleteAnniversary(recordName: String) async {
+        let recordID = CKRecord.ID(recordName: recordName)
+        _ = try? await db.deleteRecord(withID: recordID)
     }
 
     // MARK: - Image Message CRUD
@@ -214,6 +239,8 @@ enum CKSync {
                     for record in changes {
                         if let message = MessageMapper.message(from: record) {
                             context.insert(message)
+                        } else if let anniv = AnniversaryMapper.anniversary(from: record) {
+                            context.insert(anniv)
                         }
                         P2PController.shared.ingest(record)
                     }
@@ -282,6 +309,19 @@ fileprivate struct MessageMapper {
                        ckRecordName: record.recordID.recordName,
                        createdAt: createdAt,
                        isSent: true)
+    }
+}
+
+fileprivate struct AnniversaryMapper {
+    static func anniversary(from record: CKRecord) -> Anniversary? {
+        guard record.recordType == "AnniversaryCK",
+              let roomID = record["roomID"] as? String,
+              let title = record["title"] as? String,
+              let date = record["annivDate"] as? Date else { return nil }
+        return Anniversary(roomID: roomID,
+                           title: title,
+                           date: date,
+                           ckRecordName: record.recordID.recordName)
     }
 }
 

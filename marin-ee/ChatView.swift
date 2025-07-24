@@ -68,6 +68,8 @@ struct ChatView: View {
     // Partner profile
     @State private var partnerName: String = ""
     @State private var partnerAvatar: UIImage? = nil
+
+    @State private var showProfileSheet: Bool = false
     
     // Anniversary countdown (temporary fixed date)
     private let anniversaryDate = Calendar.current.date(from: DateComponents(year: 2025, month: 2, day: 14))!
@@ -90,7 +92,7 @@ struct ChatView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             VStack(spacing: 0) {
-                // Header
+                // Header (tap to open profile)
                 HStack {
                     // Left: settings button (ellipsis / gear)
                     Button {
@@ -125,14 +127,18 @@ struct ChatView: View {
                                 )
                         }
 
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(partnerName.isEmpty ? remoteUserID : partnerName)
-                                .font(.headline)
-                                .foregroundColor(.primary)
-                            Text("あと\(daysUntilAnniversary)日")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                        Button {
+                            showProfileSheet = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                if let img = partnerAvatar {
+                                    Image(uiImage: img).resizable().scaledToFill().frame(width: 28, height: 28).clipShape(Circle())
+                                }
+                                Text(partnerName.isEmpty ? remoteUserID : partnerName)
+                                    .foregroundColor(.primary)
+                            }
                         }
+                        .buttonStyle(.plain)
                     }
                     .frame(maxWidth: .infinity)
 
@@ -398,6 +404,10 @@ struct ChatView: View {
                                         myID: myID,
                                         partnerID: partner)
             }
+        }
+        // Profile sheet
+        .sheet(isPresented: $showProfileSheet) {
+            ProfileDetailView(partnerName: partnerName.isEmpty ? remoteUserID : partnerName, partnerAvatar: partnerAvatar, roomID: roomID)
         }
     }
 

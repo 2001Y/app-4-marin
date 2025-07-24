@@ -25,7 +25,7 @@ struct MarinEEApp: App {
             sharedModelContainer = container
         } else {
             // 最後の防衛策: 空スキーマでメモリストア
-            let schema = Schema([Message.self])
+            let schema = Schema([Message.self, Anniversary.self])
             sharedModelContainer = try! ModelContainer(for: schema,
                                                        configurations: [.init(schema: schema,
                                                                               isStoredInMemoryOnly: true)])
@@ -40,7 +40,7 @@ struct MarinEEApp: App {
     /// - Parameter resetOccurred: リセットが行われた場合 true がセットされる
     /// - Returns: 正常に作成できたコンテナ（失敗時は nil）
     private static func makeContainer(resetOccurred: inout Bool) -> ModelContainer? {
-        let schema = Schema([Message.self])
+        let schema = Schema([Message.self, Anniversary.self])
 
         // Application Support のパス
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory,

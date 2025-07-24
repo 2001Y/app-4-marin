@@ -22,3 +22,12 @@ struct AttachmentManager {
         try? FileManager.default.removeItem(at: baseURL)
     }
 }
+
+extension AttachmentManager {
+    /// Saves UIImage as optimized JPEG and returns file URL in cache directory.
+    static func saveImageToCache(_ image: UIImage) -> URL? {
+        guard let data = image.optimizedData() ?? image.jpegData(compressionQuality: 0.9) else { return nil }
+        let url = makeFileURL(ext: "jpg")
+        do { try data.write(to: url); return url } catch { print("[AttachmentManager] save error", error); return nil }
+    }
+}

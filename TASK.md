@@ -4,11 +4,22 @@
 - [ ] 画像 1 枚 = 1 メッセージ構造へ移行
   - Message.imageLocalURLs を削除し assetPath:String? へ置換
   - CloudKit `MessageCK` スキーマに `assetData` と `reactions:String`, `favoriteCount:Int64` 追加
-- [ ] モデル Migration ルーチン（旧 DB→新 DB）
-- [ ] DB リセット機能（公開前なので自動リセットで可）
+
+### 実装方針
+* Message に `var assetPath:String?` を追加、`imageLocalURLs` を削除。
+* CloudKit Record `MessageCK` に `asset <Asset>` フィールドを追加。
+* 既存送信ロジック : 各画像ごとに `Message` 作成 → ファイル保存 → `CKAsset` に添付。
+* 受信ロジック : `asset` が存在する場合ローカルへ保存し `assetPath` に書き込み。
+* Migration : 起動時に `imageLocalURLs` が非空のレコードを分割して新構造にコピーし旧レコードを削除。
+* DB リセット : `UserDefaults` フラグ `schemaVersion` を保持し、変更検知でストア削除。
 
 ## 2️⃣ 画像送信フロー
 - [ ] 写真ライブラリから選択した画像を **即時** 送信
+
+### 実装方針
+* `PhotosPicker` の `item.loadTransferable(type: UIImage.self)` 完了時点で send。
+* 送信 UI: ループで `sendImage(uiImg)` を呼び、各 send が非同期アップロード。
+* サムネイル View は `alignment: .trailing` を確定させ `Spacer()` 位置を修正。
 - [ ] 送信後サムネイルを右揃えで表示
 
 ## 3️⃣ ヒーロープレビュー UX 強化

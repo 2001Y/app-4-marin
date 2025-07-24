@@ -540,7 +540,7 @@ struct ChatView: View {
                     }
                     Button {
                         // 返信動作: 引用符付きでテキストフィールドへ挿入 (シンプル実装)
-                        text = "\u300e" + body + "\u300f "
+                        text = "「" + body + "」 "
                         isTextFieldFocused = true
                     } label: {
                         Label("返信", systemImage: "arrowshape.turn.up.left")

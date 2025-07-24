@@ -71,6 +71,12 @@ struct ChatView: View {
     @State private var partnerName: String = ""
     @State private var partnerAvatar: UIImage? = nil
 
+    // Hero preview
+    @Namespace private var heroNS
+    @State private var heroImage: UIImage? = nil
+    @State private var heroImageID: String = ""
+    @State private var showHero: Bool = false
+    
     @State private var showProfileSheet: Bool = false
     
     // Anniversary countdown (temporary fixed date)
@@ -323,6 +329,21 @@ struct ChatView: View {
         }
         // 画像フルスクリーンプレビュー (オーバーレイ)
         .overlay {
+            // Hero single image preview
+            if showHero, let img = heroImage {
+                HeroImagePreview(image: img,
+                                  geometryID: heroImageID,
+                                  namespace: heroNS,
+                                  onDismiss: {
+                    withAnimation(.spring()) {
+                        showHero = false
+                    }
+                })
+                .transition(.opacity)
+            }
+        }
+        // Fallback multi-image preview (if ever used)
+        .overlay {
             if isPreviewShown {
                 FullScreenPreviewView(images: previewImages,
                                       startIndex: previewStartIndex,
@@ -569,22 +590,20 @@ struct ChatView: View {
                     HStack(spacing: 8) {
                         ForEach(message.imageLocalURLs, id: \.self) { url in
                             if let img = UIImage(contentsOfFile: url.path) {
+                                let id = url.path
                                 Button {
-                                    // 画像プレビューを起動
-                                    let imgs = message.imageLocalURLs.compactMap { UIImage(contentsOfFile: $0.path) }
-                                    previewImages = imgs
-                                    if let idx = imgs.firstIndex(of: img) {
-                                        previewStartIndex = idx
-                                    } else {
-                                        previewStartIndex = 0
+                                    heroImage = img
+                                    heroImageID = id
+                                    withAnimation(.spring()) {
+                                        showHero = true
                                     }
-                                    isPreviewShown = true
                                 } label: {
                                     Image(uiImage: img)
                                         .resizable()
                                         .scaledToFit()
                                         .frame(height: 120)
                                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        .matchedGeometryEffect(id: id, in: heroNS)
                                 }
                             }
                         }

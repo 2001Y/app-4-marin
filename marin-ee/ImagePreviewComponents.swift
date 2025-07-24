@@ -60,17 +60,20 @@ struct HorizontalSliderView: View {
 struct FullScreenPreviewView: View {
     let images: [UIImage]
     @State private var page: Int
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismiss) private var dismissEnv
     @State private var showConfirm = false
     // 縦ドラッグによるインタラクティブディスミス
     @State private var dragTranslation: CGSize = .zero // gesture translation
     @State private var currentIndex: Int
     private let dismissThreshold: CGFloat = 120
+    // overlay 表示時用の手動ディスミスクロージャ（fullScreenCover では nil）
+    var onDismiss: (() -> Void)? = nil
 
-    init(images: [UIImage], startIndex: Int) {
+    init(images: [UIImage], startIndex: Int, onDismiss: (() -> Void)? = nil) {
         self.images = images
         _currentIndex = State(initialValue: startIndex)
         _page = State(initialValue: startIndex)
+        self.onDismiss = onDismiss
     }
 
     var body: some View {
@@ -114,7 +117,7 @@ struct FullScreenPreviewView: View {
                         } else {
                             // 縦スワイプ
                             if abs(dy) > dismissThreshold {
-                                dismiss()
+                                dismissAction()
                             } else {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                                     dragTranslation = .zero
@@ -128,7 +131,7 @@ struct FullScreenPreviewView: View {
             VStack {
                 HStack {
                     Button {
-                        dismiss()
+                        dismissAction()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.title)
@@ -229,5 +232,16 @@ private struct ZoomGestureModifier: ViewModifier {
                         }
                 )
             )
+    }
+}
+
+// MARK: - 内部ユーティリティ
+extension FullScreenPreviewView {
+    private func dismissAction() {
+        if let manual = onDismiss {
+            manual()
+        } else {
+            dismissEnv()
+        }
     }
 } 

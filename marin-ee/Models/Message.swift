@@ -16,6 +16,9 @@ final class Message {
     // Message body plain text (nil for image-only message)
     var body: String?
 
+    // 単一画像メッセージの場合のローカルファイルパス
+    var assetPath: String?
+
     // 画像ローカルパス配列を JSON エンコードしたバイナリ
     private var imageLocalURLsBlob: Data?
 
@@ -51,7 +54,8 @@ final class Message {
          roomID: String,
          senderID: String,
          body: String? = nil,
-         imageLocalURLs: [URL] = [],
+         assetPath: String? = nil,
+         imageLocalURLs: [URL] = [], // 🟡 deprecated: 移行期間のみ使用
          ckRecordName: String? = nil,
          createdAt: Date = Date(),
          isSent: Bool = false,
@@ -63,6 +67,7 @@ final class Message {
         self.createdAt = createdAt
         self.isSent = isSent
         self.reactionEmoji = reactionEmoji
+        self.assetPath = assetPath
         self.ckRecordName = ckRecordName
         let paths = imageLocalURLs.map { $0.path }
         self.imageLocalURLsBlob = try? JSONEncoder().encode(paths)

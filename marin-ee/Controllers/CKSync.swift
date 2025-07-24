@@ -332,9 +332,64 @@ extension CKSync {
 }
 
 extension CKDatabase {
-    /// Temporary helper that returns an empty array. Replace with real implementation.
+    /// Fetches **all** records for the app in parallel, grouped by record type.
+    /// 本サンプルではサーバートークンを保持せず、毎回全件取得する実装とする。
+    /// - Returns: 取得した `CKRecord` 配列（重複なし）。
     func fetchAllChanges() async throws -> [CKRecord] {
-        []
+        // 追加したいレコードタイプがあれば配列へ追記する
+        let recordTypes: [String] = [
+            "MessageCK",
+            "AnniversaryCK",
+            "CallSessionCK",
+            "IceCandidateCK",
+            "PresenceCK",
+            "ProfileCK"
+        ]
+
+        // Helper that fetches *all* records of 1 type using paginated CKQueryOperation
+        func fetchRecords(ofType type: String) async throws -> [CKRecord] {
+            var fetched: [CKRecord] = []
+            var cursor: CKQueryOperation.Cursor? = nil
+            repeat {
+                // カーソル有無でオペレーション生成
+                let operation: CKQueryOperation = {
+                    if let cur = cursor {
+                        return CKQueryOperation(cursor: cur)
+                    } else {
+                        return CKQueryOperation(recordType: type, predicate: NSPredicate(value: true))
+                    }
+                }()
+
+                // 結果一時格納
+                var batch: [CKRecord] = []
+
+                // Continuation で async/await へ橋渡し
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    operation.recordFetchedBlock = { rec in batch.append(rec) }
+                    operation.queryCompletionBlock = { nextCursor, error in
+                        cursor = nextCursor
+                        if let error { cont.resume(throwing: error) } else { cont.resume(returning: ()) }
+                    }
+                    self.add(operation)
+                }
+                fetched.append(contentsOf: batch)
+            } while cursor != nil
+            return fetched
+        }
+
+        // 各タイプを並列取得
+        return try await withThrowingTaskGroup(of: [CKRecord].self) { group in
+            for type in recordTypes {
+                group.addTask {
+                    try await fetchRecords(ofType: type)
+                }
+            }
+            var combined: [CKRecord] = []
+            for try await list in group {
+                combined.append(contentsOf: list)
+            }
+            return combined
+        }
     }
 }
 

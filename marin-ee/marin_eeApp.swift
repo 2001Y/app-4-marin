@@ -21,8 +21,9 @@ struct MarinEEApp: App {
     @State private var reactionStore = ReactionStore()
 
     init() {
-        // Check schema version
-        let needsReset = schemaVersion != Self.currentSchemaVersion
+        // Check schema version - UserDefaultsから直接読み取る
+        let currentVersion = UserDefaults.standard.integer(forKey: "schemaVersion")
+        let needsReset = currentVersion != Self.currentSchemaVersion
         
         // makeContainer でリセット有無を inout で受け取る
         var didReset = needsReset
@@ -47,7 +48,7 @@ struct MarinEEApp: App {
         
         // Update schema version after successful init
         if didReset {
-            schemaVersion = Self.currentSchemaVersion
+            UserDefaults.standard.set(Self.currentSchemaVersion, forKey: "schemaVersion")
         }
     }
 

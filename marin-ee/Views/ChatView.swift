@@ -7,6 +7,7 @@ import AVKit
 
 struct ChatView: View {
     let chatRoom: ChatRoom
+    @Environment(\.dismiss) private var dismiss
     
     // In a production app roomID should be deterministic hash of both users.
     private var roomID: String { chatRoom.roomID }
@@ -112,15 +113,14 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 // Header (tap to open profile)
                 HStack {
-                    // Left: settings button (ellipsis / gear)
+                    // Left: back button
                     Button {
-                        showSettings = true
+                        dismiss()
                     } label: {
-                        Image(systemName: "gearshape")
+                        Image(systemName: "chevron.left")
                             .font(.system(size: 20))
                     }
                     .buttonStyle(.plain)
-                    .sheet(isPresented: $showSettings) { SettingsView() }
 
                     Spacer()
                     

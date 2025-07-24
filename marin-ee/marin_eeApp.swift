@@ -4,10 +4,12 @@ import UIKit
 
 @main
 struct MarinEEApp: App {
+    // Schema versioning
+    private static let currentSchemaVersion = 2
+    @AppStorage("schemaVersion") private var schemaVersion = 0
+    
     // UIApplicationDelegate for push and CloudKit
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
-    @AppStorage("remoteUserID") private var remoteUserID: String = ""
 
     // SwiftData container（必ず作成）
     private let sharedModelContainer: ModelContainer
@@ -16,28 +18,42 @@ struct MarinEEApp: App {
     @State private var showDBResetAlert: Bool = false
     
     init() {
+        // Check schema version - UserDefaultsから直接読み取る
+        let currentVersion = UserDefaults.standard.integer(forKey: "schemaVersion")
+        let needsReset = currentVersion != Self.currentSchemaVersion
+        
         // makeContainer でリセット有無を inout で受け取る
-        var didReset = false
-        if let container = Self.makeContainer(resetOccurred: &didReset) {
-            sharedModelContainer = container
+        var didReset = needsReset
+        let container: ModelContainer
+        
+        if let validContainer = Self.makeContainer(resetOccurred: &didReset) {
+            container = validContainer
         } else {
             // 最後の防衛策: 空スキーマでメモリストア
-            let schema = Schema([Message.self, Anniversary.self])
-            sharedModelContainer = try! ModelContainer(for: schema,
-                                                       configurations: [.init(schema: schema,
-                                                                              isStoredInMemoryOnly: true)])
+            let schema = Schema([Message.self, Anniversary.self, ChatRoom.self])
+            container = try! ModelContainer(for: schema,
+                                          configurations: [.init(schema: schema,
+                                                                 isStoredInMemoryOnly: true)])
             didReset = true
         }
+        
+        // 一度だけ初期化
+        sharedModelContainer = container
 
         // アラート表示用 State を初期化
         self._showDBResetAlert = State(initialValue: didReset)
+        
+        // Update schema version after successful init
+        if didReset {
+            UserDefaults.standard.set(Self.currentSchemaVersion, forKey: "schemaVersion")
+        }
     }
 
     /// 既存ストアをそのまま開き、失敗時のみ削除してリセット。
     /// - Parameter resetOccurred: リセットが行われた場合 true がセットされる
     /// - Returns: 正常に作成できたコンテナ（失敗時は nil）
     private static func makeContainer(resetOccurred: inout Bool) -> ModelContainer? {
-        let schema = Schema([Message.self, Anniversary.self])
+        let schema = Schema([Message.self, Anniversary.self, ChatRoom.self])
 
         // Application Support のパス
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory,
@@ -46,6 +62,13 @@ struct MarinEEApp: App {
                                                  withIntermediateDirectories: true)
 
         let url = appSupport.appendingPathComponent("MarinEE.sqlite")
+
+        // If reset requested, delete existing DB
+        if resetOccurred {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: url.appendingPathExtension("-shm"))
+            try? FileManager.default.removeItem(at: url.appendingPathExtension("-wal"))
+        }
 
         // まず既存ファイルをそのまま開く試み
         if let disk = try? ModelContainer(for: schema,
@@ -73,19 +96,20 @@ struct MarinEEApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if remoteUserID.isEmpty {
-                    PairingView()
-                } else {
-                    TabView {
-                        ChatView()
-                            .tag(0)
-                        
-                        CalendarView()
-                            .tag(1)
-                    }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .dismissKeyboardOnDrag()
+                TabView {
+                    ChatListView()
+                        .tag(0)
+                        .tabItem {
+                            Label("チャット", systemImage: "bubble.left.and.bubble.right")
+                        }
+                    
+                    CalendarView()
+                        .tag(1)
+                        .tabItem {
+                            Label("カレンダー", systemImage: "calendar")
+                        }
                 }
+                .tabViewStyle(.page(indexDisplayMode: .never))
             }
             // ReactionStore を削除したため環境注入も不要
             // DB リセット時のみアラートを表示

@@ -11,15 +11,17 @@ extension Notification.Name {
 @MainActor
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("remoteUserID") private var remoteUserID: String = ""
     @AppStorage("myDisplayName") private var myDisplayName: String = ""
     @AppStorage("myAvatarData") private var myAvatarData: Data = Data()
+    @AppStorage("autoDownloadImages") private var autoDownloadImages: Bool = false
+    @AppStorage("photosFavoriteSync") private var photosFavoriteSync: Bool = true
     @Environment(\.modelContext) private var modelContext
 
     @State private var showClearChatAlert = false
     @State private var showClearCacheImagesAlert = false
     @State private var showLogoutAlert = false
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
+    @State private var showResetAlert = false
 
     @State private var cacheSizeBytes: UInt64 = 0
     @State private var photosPickerItem: PhotosPickerItem? = nil
@@ -45,6 +47,7 @@ struct SettingsView: View {
         Form {
             profileSection
             notificationsSection
+            imageSettingsSection
             infoSection
             dangerSection
         }
@@ -166,6 +169,13 @@ struct SettingsView: View {
             }
         }
     }
+    
+    @ViewBuilder private var imageSettingsSection: some View {
+        Section(header: Text("画像設定")) {
+            Toggle("画像を自動ダウンロード", isOn: $autoDownloadImages)
+            Toggle("写真アプリのお気に入りと同期", isOn: $photosFavoriteSync)
+        }
+    }
 
     @ViewBuilder private var infoSection: some View {
         Section(header: Text("情報")) {
@@ -200,7 +210,12 @@ struct SettingsView: View {
     }
 
     private func logout() {
-        remoteUserID = ""
+        // 全てのチャットルームを削除
+        do {
+            let allRooms = try modelContext.fetch(FetchDescriptor<ChatRoom>())
+            for room in allRooms { modelContext.delete(room) }
+        } catch { print(error) }
+        
         clearMessages()
         ImageCacheManager.clearCache()
     }

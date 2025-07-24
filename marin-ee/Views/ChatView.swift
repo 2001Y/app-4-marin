@@ -9,12 +9,15 @@ import CloudKit
 import AVKit
 
 struct ChatView: View {
+    let chatRoom: ChatRoom
+    @Environment(\.dismiss) private var dismiss
+    
     // In a production app roomID should be deterministic hash of both users.
-    private let roomID: String = "default-room"
+    private var roomID: String { chatRoom.roomID }
     private let myID: String = UIDevice.current.identifierForVendor?.uuidString ?? "me"
 
     // 相手ユーザー ID をヘッダーに表示
-    @AppStorage("remoteUserID") private var remoteUserID: String = "Partner"
+    private var remoteUserID: String { chatRoom.remoteUserID }
 
     // 最近使った絵文字を保存（最大3件）
     // デフォルトで 3 つの絵文字をプリセット（初回起動時のみ表示用）
@@ -43,12 +46,22 @@ struct ChatView: View {
         recentEmojisString = arr.joined(separator: ",")
     }
 
-    @Query(filter: #Predicate<Message> { $0.roomID == "default-room" }, sort: \.createdAt) private var messages: [Message]
+    @Query private var messages: [Message]
+    
+    init(chatRoom: ChatRoom) {
+        self.chatRoom = chatRoom
+        let roomID = chatRoom.roomID
+        self._messages = Query(filter: #Predicate<Message> { message in
+            message.roomID == roomID
+        }, sort: \.createdAt)
+    }
     @Environment(\.modelContext) private var modelContext
 
     @State private var text: String = ""
     // 編集中のメッセージ（nil なら通常送信モード）
     @State private var editingMessage: Message? = nil
+    @State private var editingText: String = ""
+    @FocusState private var editingFieldFocused: Bool
     @State private var photosPickerItems: [PhotosPickerItem] = []
     @State private var showSettings: Bool = false
     @State private var showDualCameraRecorder: Bool = false
@@ -70,6 +83,12 @@ struct ChatView: View {
     @State private var partnerName: String = ""
     @State private var partnerAvatar: UIImage? = nil
 
+    // Hero preview
+    @Namespace private var heroNS
+    @State private var heroImage: UIImage? = nil
+    @State private var heroImageID: String = ""
+    @State private var showHero: Bool = false
+    
     @State private var showProfileSheet: Bool = false
     
     // Anniversary countdown (temporary fixed date)
@@ -95,15 +114,14 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 // Header (tap to open profile)
                 HStack {
-                    // Left: settings button (ellipsis / gear)
+                    // Left: back button
                     Button {
-                        showSettings = true
+                        dismiss()
                     } label: {
-                        Image(systemName: "gearshape")
+                        Image(systemName: "chevron.left")
                             .font(.system(size: 20))
                     }
                     .buttonStyle(.plain)
-                    .sheet(isPresented: $showSettings) { SettingsView() }
 
                     Spacer()
                     
@@ -131,12 +149,13 @@ struct ChatView: View {
                         Button {
                             showProfileSheet = true
                         } label: {
-                            HStack(spacing: 6) {
-                                if let img = partnerAvatar {
-                                    Image(uiImage: img).resizable().scaledToFill().frame(width: 28, height: 28).clipShape(Circle())
-                                }
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(partnerName.isEmpty ? remoteUserID : partnerName)
                                     .foregroundColor(.primary)
+                                    .font(.headline)
+                                Text("あと\(daysUntilAnniversary)日")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                         }
                         .buttonStyle(.plain)
@@ -352,6 +371,23 @@ struct ChatView: View {
         }
         // 画像フルスクリーンプレビュー (オーバーレイ)
         .overlay {
+            // Hero single image preview
+            if showHero, let img = heroImage {
+                let targetMessage = messages.first { $0.assetPath == heroImageID || $0.imageLocalURLs.contains { $0.path == heroImageID } }
+                HeroImagePreview(image: img,
+                                  geometryID: heroImageID,
+                                  namespace: heroNS,
+                                  onDismiss: {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
+                        showHero = false
+                    }
+                }, message: targetMessage)
+                .environment(reactionStore)
+                .transition(.opacity)
+            }
+        }
+        // Fallback multi-image preview (if ever used)
+        .overlay {
             if isPreviewShown {
                 FullScreenPreviewView(images: previewImages,
                                       startIndex: previewStartIndex,
@@ -386,13 +422,28 @@ struct ChatView: View {
             isEmojiPickerShown = false
         }
         .onAppear {
+            // 通知許可要求（初回のみ）
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                if settings.authorizationStatus == .notDetermined {
+                    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                        print("[DEBUG] notification permission granted = \(granted)")
+                    }
+                }
+            }
+
             // recentEmojis が空の場合はデフォルト値を設定（AppStorage に保存済みでも上書きしない）
             if recentEmojisString.isEmpty {
                 recentEmojisString = "😀,👍,🎉"
             }
             P2PController.shared.startIfNeeded()
             CKSync.modelContext = modelContext
+
+            print("[DEBUG] ChatView appeared. messages = \(messages.count)")
             
+            // Auto-download images if enabled
+            if autoDownloadImages {
+                autoDownloadNewImages()
+            }
             // Load partner profile
             Task {
                 let (name, avatarData) = await CKSync.fetchProfile(for: remoteUserID)
@@ -413,10 +464,10 @@ struct ChatView: View {
                                         partnerID: partner)
             }
         }
-        // 録画終了通知
-        .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamRecording)) { notif in
-            if let url = notif.userInfo?["videoURL"] as? URL {
-                insertVideoMessage(url)
+        .onChange(of: messages.count) { _, _ in
+            // Check for new images to auto-download
+            if autoDownloadImages {
+                autoDownloadNewImages()
             }
         }
         .onDisappear {
@@ -435,6 +486,19 @@ struct ChatView: View {
                                         partnerID: partner)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .didReceiveRemoteMessage)) { notif in
+            let (partner, _) = notif.userInfo?["message"] as? (String, Message) ?? ("", nil)
+            if partner == remoteUserID {
+                ckListener.checkNewMessages(roomID: roomID,
+                                          partnerID: partner)
+            }
+        }
+        // 録画終了通知
+        .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamRecording)) { notif in
+            if let url = notif.userInfo?["videoURL"] as? URL {
+                insertVideoMessage(url)
+            }
+        }
         // Profile sheet
         .sheet(isPresented: $showProfileSheet) {
             ProfileDetailView(partnerName: partnerName.isEmpty ? remoteUserID : partnerName, partnerAvatar: partnerAvatar, roomID: roomID)
@@ -443,7 +507,7 @@ struct ChatView: View {
 
     // MARK: - UI Helpers
     @ViewBuilder private func bubble(for message: Message) -> some View {
-        if message.imageLocalURLs.isEmpty == false {
+        if message.assetPath != nil || message.imageLocalURLs.isEmpty == false {
             imageBubble(for: message)
         } else if let body = message.body, body.hasPrefix("video://") {
             videoBubble(for: message)
@@ -505,7 +569,18 @@ struct ChatView: View {
                         Text(message.createdAt, style: .time)
                             .font(.caption2)
                             .foregroundColor(.secondary)
-                        if isEmojiOnly && emojiCount <= 3 {
+                        if editingMessage?.id == message.id {
+                            TextField("", text: $editingText, axis: .vertical)
+                                .textFieldStyle(.plain)
+                                .padding(10)
+                                .background(Color.accentColor.opacity(0.8))
+                                .foregroundColor(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 20))
+                                .font(.system(size: 15))
+                                .focused($editingFieldFocused)
+                                .onSubmit { commitInlineEdit() }
+                                .onAppear { editingFieldFocused = true }
+                        } else if isEmojiOnly && emojiCount <= 3 {
                             Text(message.body ?? "")
                                 .font(.system(size: 60))
                         } else {
@@ -529,32 +604,30 @@ struct ChatView: View {
                 }
             }
         }
-        // Reactionable overlay for partner messages
-        .overlay {
-            if message.senderID != myID {
-                Reactionable(message: message) { emoji in
-                    message.reactionEmoji = emoji
-                    if let recName = message.ckRecordName {
-                        Task { try? await CKSync.updateMessageBody(recordName: recName, newBody: emoji) }
-                    }
-                }
-            }
+        .popover(isPresented: Binding<Bool>(
+            get: { reactionStore.reactingMessageID == message.id && message.senderID != myID },
+            set: { val in if !val { reactionStore.reactingMessageID = nil } }
+        ), attachmentAnchor: .point(.bottom), arrowEdge: .bottom) {
+            ReactionPickerView()
+                .environment(reactionStore)
+                .presentationCompactAdaptation(.none)
+                .interactiveDismissDisabled()
         }
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
         .padding(message.senderID == myID ? .trailing : .leading, 12)
         .id(message.id)
+        // 相手メッセージのみロングタップでリアクション
         .onLongPressGesture(minimumDuration: 0.35) {
-            if message.senderID == myID {
-                editingMessage = message
-                editTextOverlay = message.body ?? ""
-            }
+            guard message.senderID != myID else { return }
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            reactionStore.reactingMessageID = message.id // ピッカー起動
         }
         .contextMenu(menuItems: {
             if message.senderID == myID {
                 Button {
                     editingMessage = message
-                    text = message.body ?? ""
+                    editingText = message.body ?? ""
                 } label: {
                     Label("編集", systemImage: "pencil")
                 }
@@ -570,12 +643,59 @@ struct ChatView: View {
     // MARK: - Extracted Helper Views
     @ViewBuilder
     private func imageBubble(for message: Message) -> some View {
+        // Handle new single asset messages
+        if let assetPath = message.assetPath,
+           let img = UIImage(contentsOfFile: assetPath) {
+            VStack(alignment: message.senderID == myID ? .trailing : .leading, spacing: 4) {
+                HStack {
+                    if message.senderID == myID {
+                        Spacer(minLength: 0)
+                    }
+                    let id = assetPath
+                    Button {
+                        let targetMessage = messages.first { $0.assetPath == assetPath }
+                        heroImage = img
+                        heroImageID = id
+                        withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
+                            showHero = true
+                        }
+                    } label: {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(height: 120)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .matchedGeometryEffect(id: id, in: heroNS)
+                    }
+                    if message.senderID != myID {
+                        Spacer(minLength: 0)
+                    }
+                }
+                
+                // Show reactions if any
+                if let reactions = message.reactionEmoji, !reactions.isEmpty {
+                    ReactionBarView(emojis: reactions.map { String($0) }, isMine: message.senderID == myID)
+                }
+                
+                Text(message.createdAt, style: .time)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 4)
+            .padding(message.senderID == myID ? .trailing : .leading, 8)
+            .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
+            .id(message.id)
+            return
+        }
+        
+        // Legacy: Handle old imageLocalURLs
         VStack(alignment: message.senderID == myID ? .trailing : .leading, spacing: 4) {
             HStack {
                 if message.senderID == myID {
                     Spacer(minLength: 0)
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
+<<<<<<< HEAD
                     HStack(spacing: 8) {
                         ForEach(Array(message.imageLocalURLs.enumerated()), id: \.element) { (index, url) in
                             if let img = UIImage(contentsOfFile: url.path) {
@@ -583,25 +703,43 @@ struct ChatView: View {
                                     // 画像プレビューを起動
                                     previewImages = message.imageLocalURLs.compactMap { UIImage(contentsOfFile: $0.path) }
                                     previewStartIndex = index
+=======
+                    HStack(spacing: 6) {
+                        ForEach(message.imageLocalURLs, id: \.path) { url in
+                            if let img = UIImage(contentsOfFile: url.path) {
+                                Button {
+                                    // 画像プレビューを起動
+                                    let imgs = message.imageLocalURLs.compactMap { UIImage(contentsOfFile: $0.path) }
+                                    previewImages = imgs
+                                    if let idx = imgs.firstIndex(of: img) {
+                                        previewStartIndex = idx
+                                    }
                                     isPreviewShown = true
                                 } label: {
                                     Image(uiImage: img)
                                         .resizable()
-                                        .scaledToFit()
-                                        .frame(height: 120)
+                                        .scaledToFill()
+                                        .frame(width: 120, height: 120)
+                                        .clipped()
                                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        .matchedGeometryEffect(id: url.path, in: heroNS)
                                 }
                             }
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .scrollTargetLayout()
                 }
                 .frame(height: 120)
                 if message.senderID != myID {
                     Spacer(minLength: 0)
                 }
             }
+            
+            // Aggregate reactions for slider
+            let aggregatedReactions = aggregateSliderReactions(for: message)
+            if !aggregatedReactions.isEmpty {
+                ReactionBarView(emojis: aggregatedReactions, isMine: message.senderID == myID)
+            }
+            
             Text(message.createdAt, style: .time)
                 .font(.caption2)
                 .foregroundColor(.secondary)
@@ -609,6 +747,47 @@ struct ChatView: View {
         .padding(.vertical, 4)
         .padding(message.senderID == myID ? .trailing : .leading, 8)
         .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
+        .id(message.id)
+    }
+    
+    // Helper to aggregate reactions from consecutive image messages
+    private func aggregateSliderReactions(for message: Message) -> [String] {
+        guard !message.imageLocalURLs.isEmpty else { return [] }
+        
+        // Find consecutive image messages from same sender within 3 minutes
+        let senderID = message.senderID
+        let messageIndex = messages.firstIndex(where: { $0.id == message.id }) ?? 0
+        var reactions: [String] = []
+        
+        // Look backward
+        for i in stride(from: messageIndex, through: 0, by: -1) {
+            let msg = messages[i]
+            if msg.senderID == senderID && 
+               (!msg.imageLocalURLs.isEmpty || msg.assetPath != nil) &&
+               abs(msg.createdAt.timeIntervalSince(message.createdAt)) < 180 {
+                if let r = msg.reactionEmoji {
+                    reactions.append(contentsOf: r.map { String($0) })
+                }
+            } else if msg.senderID == senderID {
+                break
+            }
+        }
+        
+        // Look forward
+        for i in (messageIndex + 1)..<messages.count {
+            let msg = messages[i]
+            if msg.senderID == senderID && 
+               (!msg.imageLocalURLs.isEmpty || msg.assetPath != nil) &&
+               abs(msg.createdAt.timeIntervalSince(message.createdAt)) < 180 {
+                if let r = msg.reactionEmoji {
+                    reactions.append(contentsOf: r.map { String($0) })
+                }
+            } else if msg.senderID == senderID {
+                break
+            }
+        }
+        
+        return reactions
     }
 
     // MARK: - Actions
@@ -619,6 +798,11 @@ struct ChatView: View {
                               createdAt: .now,
                               isSent: false)
         modelContext.insert(message)
+        
+        // ChatRoomの最終メッセージを更新
+        chatRoom.lastMessageText = text
+        chatRoom.lastMessageDate = Date()
+        
         Task { @MainActor in
             if let rec = try? await CKSync.saveMessage(message) {
                 message.ckRecordName = rec
@@ -660,79 +844,38 @@ struct ChatView: View {
         let items = photosPickerItems
         photosPickerItems = []
 
-        // 画像プレビューを即時反映し、ネットワーク送信はバックグラウンドで行う
+        // 各画像を個別メッセージとして即時送信
         Task { @MainActor in
-            _ = ImageCacheManager.cacheDirectory // 保持してキャッシュパス生成だけ行い未使用を回避
-
-            // ① 使用する Message を決定（直近 3 分以内に自分が送った画像メッセージがあれば追記）
-            let message: Message = {
-                if let last = messages.last,
-                   last.senderID == myID,
-                   !last.imageLocalURLs.isEmpty,
-                   abs(Date().timeIntervalSince(last.createdAt)) < 180 {
-                    return last
-                } else {
-                    let msg = Message(roomID: roomID,
-                                       senderID: myID,
-                                       body: nil,
-                                       imageLocalURLs: [],
-                                       createdAt: .now,
-                                       isSent: false)
-                    modelContext.insert(msg)
-                    return msg
-                }
-            }()
-
-            // ② 各画像を並列ロード → ファイル保存
-            var fileURLs: [URL] = []
-            var uiImages: [UIImage] = []
-
-            await withTaskGroup(of: (UIImage, URL)?.self) { group in
-                for item in items {
-                    group.addTask {
-                        guard let data = try? await item.loadTransferable(type: Data.self),
-                              let uiImg = UIImage(data: data) else { return nil }
-                        let ext = "jpg"
-                        let fileURL = AttachmentManager.makeFileURL(ext: ext)
-                        try? data.write(to: fileURL)
-                        return (uiImg, fileURL)
-                    }
-                }
-
-                for await result in group {
-                    if let (img, url) = result {
-                        uiImages.append(img)
-                        fileURLs.append(url)
+            for item in items {
+                guard let data = try? await item.loadTransferable(type: Data.self),
+                      let image = UIImage(data: data) else { continue }
+                
+                // Save to local cache
+                guard let localURL = AttachmentManager.saveImageToCache(image) else { continue }
+                
+                // Create message immediately
+                let message = Message(roomID: roomID,
+                                    senderID: myID,
+                                    body: nil,
+                                    assetPath: localURL.path,
+                                    createdAt: .now,
+                                    isSent: false)
+                modelContext.insert(message)
+                
+                // ChatRoomの最終メッセージを更新
+                chatRoom.lastMessageText = "📷 写真"
+                chatRoom.lastMessageDate = Date()
+                
+                // Upload to CloudKit in background
+                Task {
+                    if let recName = try? await CKSync.saveImageMessage(image, roomID: roomID, senderID: myID) {
+                        await MainActor.run {
+                            message.ckRecordName = recName
+                            message.isSent = true
+                        }
                     }
                 }
             }
-
-            guard uiImages.isEmpty == false else { return }
-
-            // MainActor で Message に反映してプレビュー更新
-            var current = message.imageLocalURLs
-            current.append(contentsOf: fileURLs)
-            message.imageLocalURLs = current
-
-            ImageCacheManager.enforceLimit()
-
-            // ③ CloudKit へアップロード（HEIC/JPEG 最適化）
-            var optimized: [UIImage] = uiImages.map { img in
-                if let data = img.optimizedData(), let opt = UIImage(data: data) {
-                    return opt
-                }
-                return img
-            }
-
-            if let recName = message.ckRecordName {
-                try? await CKSync.appendImages(optimized, recordName: recName)
-            } else if let recName = try? await CKSync.saveImages(optimized,
-                                                                 roomID: roomID,
-                                                                 senderID: myID) {
-                message.ckRecordName = recName
-            }
-
-            message.isSent = true
         }
     }
 
@@ -763,6 +906,7 @@ struct ChatView: View {
         }
     }
 
+<<<<<<< HEAD
     // MARK: - Editing Overlay
     @ViewBuilder private func EditingOverlay(message: Message) -> some View {
         ZStack(alignment: .bottomTrailing) {
@@ -798,6 +942,39 @@ struct ChatView: View {
                     .shadow(radius: 4)
             }
             .padding([.trailing, .bottom], 24)
+=======
+    // MARK: - Inline edit commit
+    private func commitInlineEdit() {
+        guard let target = editingMessage else { return }
+        let trimmed = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { editingMessage = nil; return }
+
+        target.body = trimmed
+        target.isSent = false
+        Task { @MainActor in
+            if let recName = target.ckRecordName {
+                try? await CKSync.updateMessageBody(recordName: recName, newBody: trimmed)
+            } else {
+                try? await CKSync.saveMessage(target)
+            }
+            target.isSent = true
+        }
+        editingMessage = nil
+    }
+
+    private func autoDownloadNewImages() {
+        for message in messages {
+            // Download single asset messages
+            if let assetPath = message.assetPath,
+               let image = UIImage(contentsOfFile: assetPath) {
+                // Check if not already saved
+                let imageName = URL(fileURLWithPath: assetPath).lastPathComponent
+                if !UserDefaults.standard.bool(forKey: "downloaded_\(imageName)") {
+                    UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+                    UserDefaults.standard.set(true, forKey: "downloaded_\(imageName)")
+                    print("[DEBUG] Auto-downloaded image: \(imageName)")
+                }
+            }
         }
     }
 } // end struct ChatView 

@@ -62,6 +62,8 @@ struct FullScreenPreviewView: View {
     @State private var page: Int
     @Environment(\.dismiss) private var dismissEnv
     @State private var showConfirm = false
+    @State private var showActionSheet = false
+    @State private var toastMessage: String? = nil
     // 縦ドラッグによるインタラクティブディスミス
     @State private var dragTranslation: CGSize = .zero // gesture translation
     @State private var currentIndex: Int
@@ -78,10 +80,10 @@ struct FullScreenPreviewView: View {
 
     var body: some View {
         GeometryReader { geo in
-            // 背景ブラー
+            // 背景: 黒 + 軽いブラー
             Rectangle()
-                .background(.ultraThinMaterial)
-                .overlay(Color.black.opacity( backgroundOpacity()))
+                .background(.thinMaterial)
+                .overlay(Color.black.opacity(backgroundOpacity()))
                 .ignoresSafeArea()
 
             // ---- カスタム横ページング ----
@@ -149,13 +151,27 @@ struct FullScreenPreviewView: View {
                 Spacer()
             }
 
-            // 保存確認アラート
-            .alert("すべてダウンロードしますか？", isPresented: $showConfirm) {
-                Button("ダウンロード", role: .destructive) { saveAll() }
-                Button("キャンセル", role: .cancel) { }
-            } message: {
-                Text("\(images.count) 件の画像を保存")
+            // Toast overlay
+            if let msg = toastMessage {
+                Text(msg)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .transition(.opacity)
+                    .onAppear {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            withAnimation { toastMessage = nil }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, 60)
             }
+        }
+        // 保存確認アラート / ActionSheet
+        .confirmationDialog("全てダウンロードしますか？", isPresented: $showConfirm, titleVisibility: .visible) {
+            Button("これのみ") { save(images[currentIndex]) }
+            Button("全てダウンロード") { saveAll() }
+            Button("キャンセル", role: .cancel) { }
         }
         .statusBarHidden(true)
         .interactiveDismissDisabled()
@@ -163,11 +179,16 @@ struct FullScreenPreviewView: View {
 
     // MARK: - 保存処理
     private func downloadTapped() {
-        images.count == 1 ? save(images[0]) : (showConfirm = true)
+        if images.count == 1 {
+            save(images[0])
+        } else {
+            showConfirm = true
+        }
     }
     private func saveAll() { images.forEach(save) }
     private func save(_ img: UIImage) {
         UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil)
+        withAnimation { toastMessage = "ダウンロードしました" }
     }
 
     // MARK: - Helpers
@@ -180,9 +201,9 @@ struct FullScreenPreviewView: View {
     }
 
     private func backgroundOpacity() -> Double {
-        // 0.25 → 0 にフェード
+        // 0.15 → 0 へフェード (以前より軽め)
         let progress = min(abs(dragTranslation.height) / dismissThreshold, 1)
-        return 0.25 * (1 - Double(progress))
+        return 0.15 * (1 - Double(progress))
     }
 }
 

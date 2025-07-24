@@ -41,24 +41,28 @@ struct HeroImagePreview: View {
                 .onTapGesture { close() }
 
             // 画像本体
-            Image(uiImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-                .matchedGeometryEffect(id: geometryID, in: namespace)
-                .offset(dragState)
-                .scaleEffect(1 - 0.2 * dragProgress)
-                .gesture(
-                    DragGesture()
-                        .updating($dragState) { value, state, _ in
-                            state = value.translation
-                        }
-                        .onEnded { value in
-                            if abs(value.translation.height) > dismissThreshold {
-                                close()
+            GeometryReader { geometry in
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                    .matchedGeometryEffect(id: geometryID, in: namespace)
+                    .offset(dragState)
+                    .scaleEffect(1 - 0.2 * dragProgress)
+                    .gesture(
+                        DragGesture()
+                            .updating($dragState) { value, state, _ in
+                                state = value.translation
                             }
-                        }
-                )
+                            .onEnded { value in
+                                if abs(value.translation.height) > dismissThreshold {
+                                    close()
+                                }
+                            }
+                    )
+                    .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+            }
 
             // アクション (遅延フェードイン)
             VStack {

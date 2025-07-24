@@ -11,7 +11,6 @@ extension Notification.Name {
 @MainActor
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("remoteUserID") private var remoteUserID: String = ""
     @AppStorage("myDisplayName") private var myDisplayName: String = ""
     @AppStorage("myAvatarData") private var myAvatarData: Data = Data()
     @AppStorage("autoDownloadImages") private var autoDownloadImages: Bool = false
@@ -211,7 +210,12 @@ struct SettingsView: View {
     }
 
     private func logout() {
-        remoteUserID = ""
+        // 全てのチャットルームを削除
+        do {
+            let allRooms = try modelContext.fetch(FetchDescriptor<ChatRoom>())
+            for room in allRooms { modelContext.delete(room) }
+        } catch { print(error) }
+        
         clearMessages()
         ImageCacheManager.clearCache()
     }

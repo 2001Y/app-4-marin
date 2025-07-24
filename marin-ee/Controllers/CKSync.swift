@@ -212,6 +212,7 @@ enum CKSync {
         record["senderID"] = senderID
         record["createdAt"] = Date()
         record["asset"] = CKAsset(fileURL: fileURL)
+        record["reactions"] = "" // Initialize empty reactions
         
         let db = CKContainer.default().privateCloudDatabase
         let saved = try await db.save(record)
@@ -313,12 +314,14 @@ fileprivate struct MessageMapper {
             let localURL = AttachmentManager.makeFileURL(ext: "jpg")
             do {
                 try FileManager.default.copyItem(at: fileURL, to: localURL)
+                let reactions = record["reactions"] as? String
                 return Message(roomID: roomID,
                              senderID: senderID,
                              body: nil,
                              assetPath: localURL.path,
                              createdAt: createdAt,
-                             isSent: true)
+                             isSent: true,
+                             reactionEmoji: reactions)
             } catch {
                 print("[MessageMapper] Failed to copy asset: \(error)")
             }
@@ -362,14 +365,14 @@ fileprivate struct MessageMapper {
         }
 
         // text message
-        let body = record["body"] as? String ?? ""
+        let body = record["body"] as? String
+        let reactions = record["reactions"] as? String
         return Message(roomID: roomID,
                        senderID: senderID,
                        body: body,
-                       imageLocalURLs: [],
-                       ckRecordName: record.recordID.recordName,
                        createdAt: createdAt,
-                       isSent: true)
+                       isSent: true,
+                       reactionEmoji: reactions)
     }
 }
 

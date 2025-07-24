@@ -11,8 +11,6 @@ struct MarinEEApp: App {
     // UIApplicationDelegate for push and CloudKit
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
-    @AppStorage("remoteUserID") private var remoteUserID: String = ""
-
     // SwiftData container（必ず作成）
     private let sharedModelContainer: ModelContainer
 
@@ -32,7 +30,7 @@ struct MarinEEApp: App {
             sharedModelContainer = container
         } else {
             // 最後の防衛策: 空スキーマでメモリストア
-            let schema = Schema([Message.self, Anniversary.self])
+            let schema = Schema([Message.self, Anniversary.self, ChatRoom.self])
             sharedModelContainer = try! ModelContainer(for: schema,
                                                        configurations: [.init(schema: schema,
                                                                               isStoredInMemoryOnly: true)])
@@ -52,7 +50,7 @@ struct MarinEEApp: App {
     /// - Parameter resetOccurred: リセットが行われた場合 true がセットされる
     /// - Returns: 正常に作成できたコンテナ（失敗時は nil）
     private static func makeContainer(resetOccurred: inout Bool) -> ModelContainer? {
-        let schema = Schema([Message.self, Anniversary.self])
+        let schema = Schema([Message.self, Anniversary.self, ChatRoom.self])
 
         // Application Support のパス
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory,
@@ -95,18 +93,14 @@ struct MarinEEApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if remoteUserID.isEmpty {
-                    PairingView()
-                } else {
-                    TabView {
-                        ChatView()
-                            .tag(0)
-                        
-                        CalendarView()
-                            .tag(1)
-                    }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
+                TabView {
+                    ChatListView()
+                        .tag(0)
+                    
+                    CalendarView()
+                        .tag(1)
                 }
+                .tabViewStyle(.page(indexDisplayMode: .never))
             }
             .environment(reactionStore)
             // DB リセット時のみアラートを表示

@@ -1,7 +1,7 @@
 # App Store 申請情報
 
 ## アプリ名
-4-Marin
+forMarin
 
 ## サブタイトル
 大切な人とだけつながる
@@ -10,7 +10,7 @@
 二人だけの秘密の空間で、音声なしのビデオ通話やメッセージを楽しめます。サーバーを経由しない完全P2P接続で、プライバシーを最優先に。
 
 ## 説明文
-4-Marinは、大切な人とだけつながるプライベートなコミュニケーションアプリです。
+forMarinは、大切な人とだけつながるプライベートなコミュニケーションアプリです。
 
 【主な機能】
 • 完全プライベートチャット - CloudKitで安全に同期
@@ -31,10 +31,10 @@
 チャット,ビデオ通話,プライベート,カップル,家族,P2P,CloudKit,無音,記念日,リアクション
 
 ## サポートURL
-https://github.com/2001Y/app-4-marin/issues
+https://github.com/2001Y/app-forMarin/issues
 
 ## プライバシーポリシーURL
-https://github.com/2001Y/app-4-marin/blob/main/PRIVACY.md
+https://github.com/2001Y/app-forMarin/blob/main/PRIVACY.md
 
 ## 年齢制限
 4+
@@ -49,4 +49,4 @@ https://github.com/2001Y/app-4-marin/blob/main/PRIVACY.md
 なし
 
 ## 著作権
-© 2025 4-Marin 
+© 2025 forMarin 

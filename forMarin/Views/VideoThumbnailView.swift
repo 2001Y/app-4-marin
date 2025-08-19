@@ -66,11 +66,11 @@ struct VideoThumbnailView: View {
     }
 
     private func generateThumbnail() {
-        print("[DEBUG] VideoThumbnailView: Starting thumbnail generation for URL: \(videoURL)")
+        log("VideoThumbnailView: Starting thumbnail generation for URL: \(videoURL)", category: "DEBUG")
         
         // ファイル存在チェック
         guard FileManager.default.fileExists(atPath: videoURL.path) else {
-            print("[DEBUG] VideoThumbnailView: Video file does not exist: \(videoURL.path)")
+            log("VideoThumbnailView: Video file does not exist: \(videoURL.path)", category: "DEBUG")
             hasError = true
             return
         }
@@ -78,14 +78,14 @@ struct VideoThumbnailView: View {
         // ファイルサイズをチェック
         if let attributes = try? FileManager.default.attributesOfItem(atPath: videoURL.path),
            let fileSize = attributes[.size] as? Int64 {
-            print("[DEBUG] VideoThumbnailView: Video file size: \(fileSize) bytes (\(Double(fileSize) / 1024 / 1024) MB)")
+            log("VideoThumbnailView: Video file size: \(fileSize) bytes (\(Double(fileSize) / 1024 / 1024) MB)", category: "DEBUG")
         }
         
         // ファイル拡張子チェック
         let pathExtension = videoURL.pathExtension.lowercased()
-        print("[DEBUG] VideoThumbnailView: File extension: \(pathExtension)")
+        log("VideoThumbnailView: File extension: \(pathExtension)", category: "DEBUG")
         guard ["mov", "mp4", "m4v", "3gp", "avi"].contains(pathExtension) else {
-            print("[DEBUG] VideoThumbnailView: Unsupported video format: \(pathExtension)")
+            log("VideoThumbnailView: Unsupported video format: \(pathExtension)", category: "DEBUG")
             hasError = true
             return
         }
@@ -93,37 +93,40 @@ struct VideoThumbnailView: View {
         // 簡素化されたサムネイル生成
         Task {
             do {
-                print("[DEBUG] VideoThumbnailView: Creating AVAsset")
+                log("VideoThumbnailView: Creating AVAsset", category: "DEBUG")
                 let asset = AVAsset(url: videoURL)
                 
                 // アセットの読み込み可能性をチェック（iOS 16以降の新しいAPI）
                 let isReadable = try await asset.load(.isReadable)
-                print("[DEBUG] VideoThumbnailView: Asset is readable: \(isReadable)")
+                log("VideoThumbnailView: Asset is readable: \(isReadable)", category: "DEBUG")
                 
                 if !isReadable {
-                    print("[DEBUG] VideoThumbnailView: Asset is not readable, cannot generate thumbnail")
+                    log("VideoThumbnailView: Asset is not readable, cannot generate thumbnail", category: "DEBUG")
                     await MainActor.run {
                         hasError = true
                     }
                     return
                 }
                 
-                print("[DEBUG] VideoThumbnailView: Creating AVAssetImageGenerator")
+                log("VideoThumbnailView: Creating AVAssetImageGenerator", category: "DEBUG")
                 let gen = AVAssetImageGenerator(asset: asset)
                 gen.appliesPreferredTrackTransform = true
                 gen.maximumSize = CGSize(width: 320, height: 320)
                 
-                let time = CMTime(seconds: 0.1, preferredTimescale: 600)
-                print("[DEBUG] VideoThumbnailView: Generating thumbnail at time: \(time)")
-                let cgImage = try gen.copyCGImage(at: time, actualTime: nil)
+                // 動画の長さを取得して真ん中からサムネイルを生成
+                let duration = try await asset.load(.duration)
+                let middleTime = CMTime(seconds: duration.seconds / 2, preferredTimescale: 600)
+                log("VideoThumbnailView: Video duration: \(duration.seconds) seconds", category: "DEBUG")
+                log("VideoThumbnailView: Generating thumbnail at middle time: \(middleTime)", category: "DEBUG")
+                let cgImage = try gen.copyCGImage(at: middleTime, actualTime: nil)
                 let image = UIImage(cgImage: cgImage)
                 
-                print("[DEBUG] VideoThumbnailView: Successfully generated thumbnail: \(image.size)")
+                log("VideoThumbnailView: Successfully generated thumbnail: \(image.size)", category: "DEBUG")
                 await MainActor.run {
                     self.thumbnail = image
                 }
             } catch {
-                print("[DEBUG] VideoThumbnailView: Simple thumbnail generation failed: \(error)")
+                log("VideoThumbnailView: Simple thumbnail generation failed: \(error)", category: "DEBUG")
                 await MainActor.run {
                     hasError = true
                 }

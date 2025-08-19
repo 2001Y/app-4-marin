@@ -23,7 +23,7 @@ struct AudioSessionManager {
             try avSession.setCategory(.ambient, options: [.mixWithOthers])
             try avSession.setActive(true, options: [])
         } catch {
-            print("AudioSessionManager: Failed to set ambient category - \(error)")
+            log("Failed to set ambient category - \(error)", category: "AudioSessionManager")
         }
     }
 
@@ -36,7 +36,7 @@ struct AudioSessionManager {
             try avSession.setCategory(.playAndRecord, options: [.defaultToSpeaker, .allowBluetooth])
             try avSession.setActive(true, options: [])
         } catch {
-            print("AudioSessionManager: Failed to elevate category - \(error)")
+            log("Failed to elevate category - \(error)", category: "AudioSessionManager")
         }
     }
 
@@ -48,7 +48,7 @@ struct AudioSessionManager {
             try avSession.setCategory(prev, options: previousOptions)
             try avSession.setActive(true, options: [])
         } catch {
-            print("AudioSessionManager: Failed to restore category - \(error)")
+            log("Failed to restore category - \(error)", category: "AudioSessionManager")
         }
     }
 }

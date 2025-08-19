@@ -7,6 +7,24 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
+		<string>fetch</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.formarin.app.offline-check</string>
+	</array>
+	<key>CKSharingSupported</key>
+	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.formarin.app.invite</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>fourmarin</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

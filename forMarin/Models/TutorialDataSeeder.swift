@@ -10,12 +10,12 @@ struct TutorialDataSeeder {
     static func seed(into context: ModelContext, roomID: String, myID: String, partnerID: String) {
         let now = Date()
         
-        print("[DEBUG] TutorialDataSeeder: Starting seed for roomID: \(roomID)")
+        log("TutorialDataSeeder: Starting seed for roomID: \(roomID)", category: "DEBUG")
         
         // 既にこのルームでシード済みならスキップ
         let tutorialKey = "didSeedTutorial_\(roomID)"
         guard !UserDefaults.standard.bool(forKey: tutorialKey) else { 
-            print("[DEBUG] TutorialDataSeeder: Already seeded for roomID: \(roomID)")
+            log("TutorialDataSeeder: Already seeded for roomID: \(roomID)", category: "DEBUG")
             return 
         }
         
@@ -35,10 +35,10 @@ struct TutorialDataSeeder {
             (partnerID, "2人だけの思い出を作ろう💕", nil, now.addingTimeInterval(-60)),
         ]
 
-        print("[DEBUG] TutorialDataSeeder: Creating \(messages.count) messages")
+        log("TutorialDataSeeder: Creating \(messages.count) messages", category: "DEBUG")
         
         for (index, (senderID, body, assetPath, createdAt)) in messages.enumerated() {
-            print("[DEBUG] TutorialDataSeeder: Creating message \(index + 1): \(body ?? "image")")
+            log("TutorialDataSeeder: Creating message \(index + 1): \(body ?? "image")", category: "DEBUG")
             
             let message = Message(
                 roomID: roomID,
@@ -59,20 +59,20 @@ struct TutorialDataSeeder {
         
         do {
             try context.save()
-            print("[DEBUG] TutorialDataSeeder: Successfully saved messages")
+            log("TutorialDataSeeder: Successfully saved messages", category: "DEBUG")
         } catch {
-            print("[ERROR] TutorialDataSeeder: Failed to save context: \(error)")
+            log("TutorialDataSeeder: Failed to save context: \(error)", category: "ERROR")
         }
 
         UserDefaults.standard.set(true, forKey: tutorialKey)
-        print("[DEBUG] TutorialDataSeeder: Completed seed for roomID: \(roomID)")
+        log("TutorialDataSeeder: Completed seed for roomID: \(roomID)", category: "DEBUG")
     }
 
     /// ランダムカラー or 指定カラーのシンプルなデモ画像を生成し、キャッシュディレクトリに保存。
     /// 生成に失敗した場合は `nil` を返す。
     @discardableResult
     private static func createDemoImagePath(text: String, color: UIColor) -> String? {
-        print("[DEBUG] TutorialDataSeeder: Creating demo image with text: \(text)")
+        log("TutorialDataSeeder: Creating demo image with text: \(text)", category: "DEBUG")
         
         let size = CGSize(width: 240, height: 240)
         let renderer = UIGraphicsImageRenderer(size: size)
@@ -99,7 +99,7 @@ struct TutorialDataSeeder {
             }
             
             guard let data = image.pngData() else { 
-                print("[ERROR] TutorialDataSeeder: Failed to create PNG data")
+                log("TutorialDataSeeder: Failed to create PNG data", category: "ERROR")
                 return nil 
             }
             
@@ -107,13 +107,13 @@ struct TutorialDataSeeder {
                 .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("png")
             
-            print("[DEBUG] TutorialDataSeeder: Saving image to: \(url.path)")
+            log("TutorialDataSeeder: Saving image to: \(url.path)", category: "DEBUG")
             
             try data.write(to: url)
-            print("[DEBUG] TutorialDataSeeder: Successfully created demo image")
+            log("TutorialDataSeeder: Successfully created demo image", category: "DEBUG")
             return url.path
         } catch {
-            print("[ERROR] TutorialDataSeeder: Failed to create demo image: \(error)")
+            log("TutorialDataSeeder: Failed to create demo image: \(error)", category: "ERROR")
             return nil
         }
     }

@@ -15,6 +15,7 @@ struct SettingsView: View {
     @AppStorage("myAvatarData") private var myAvatarData: Data = Data()
     @AppStorage("autoDownloadImages") private var autoDownloadImages: Bool = false
     @AppStorage("photosFavoriteSync") private var photosFavoriteSync: Bool = true
+    @AppStorage("hasShownWelcome") private var hasShownWelcome: Bool = false
     @Environment(\.modelContext) private var modelContext
     @StateObject private var permissionManager = PermissionManager.shared
 
@@ -22,25 +23,76 @@ struct SettingsView: View {
     @State private var showClearCacheImagesAlert = false
     @State private var showLogoutAlert = false
     @State private var showResetAlert = false
+    @State private var showWelcomeModal = false
+    @State private var showPairingView = false
+    @State private var showImageDownloadModal = false
+    @State private var versionTapCount = 0
+    @State private var lastVersionTapTime = Date()
 
     @State private var cacheSizeBytes: UInt64 = 0
     @State private var photosPickerItem: PhotosPickerItem? = nil
     @State private var selectedImage: UIImage? = nil
     @State private var tempDisplayName: String = ""
+    @State private var myUserID: String = ""
+    @State private var isRebuildingSchema = false
+    @State private var showSchemaRebuildAlert = false
+    @State private var showCompleteResetAlert = false
+    @State private var showProductionResetConfirm = false
+    @State private var showEmergencyResetAlert = false
+    @State private var isPerformingReset = false
+    @State private var resetErrorMessage = ""
+    
+    // 統合リセット機能用の状態変数
+    @State private var showLocalResetAlert = false
+    @State private var showCompleteCloudResetAlert = false
+    @State private var isPerformingLocalReset = false
+    @State private var isPerformingCloudReset = false
+    
+    // テスト機能用
+    @StateObject private var connectivityManager = ConnectivityManager.shared
+    
+    // ログ共有機能用
+    @State private var isCollectingLogs = false
+    @State private var showLogShareSheet = false
+    @State private var logFileURL: URL?
+    
+    // テストモード終了時刻を計算
+    private var testModeEndTime: Date? {
+        let testUntil = UserDefaults.standard.double(forKey: "testModeScheduledUntil")
+        return testUntil > 0 && Date().timeIntervalSince1970 < testUntil ? Date(timeIntervalSince1970: testUntil) : nil
+    }
     
     var body: some View {
-        NavigationStack {
-            content
-        }
-        .onAppear {
-            // Initialize temp name from stored value
-            tempDisplayName = myDisplayName
-            // Load avatar image from data
-            if !myAvatarData.isEmpty {
-                selectedImage = UIImage(data: myAvatarData)
+        ZStack {
+            NavigationStack {
+                content
             }
-            // 権限状態を更新
-            refreshPermissionStatuses()
+            .onAppear {
+                // Initialize temp name from stored value
+                tempDisplayName = myDisplayName
+                // Load avatar image from data
+                if !myAvatarData.isEmpty {
+                    selectedImage = UIImage(data: myAvatarData)
+                }
+                // 権限状態を更新
+                refreshPermissionStatuses()
+                // ユーザーIDを取得
+                Task {
+                    if let userID = await UserIDManager.shared.getCurrentUserIDAsync() {
+                        await MainActor.run {
+                            myUserID = userID
+                        }
+                    }
+                }
+            }
+            
+            // ウェルカムモーダルオーバーレイ
+            WelcomeModalOverlay(isPresented: $showWelcomeModal) {
+                // 「つづける」ボタンが押された時の処理（何もしない）
+            }
+            
+            // 画像ダウンロード設定案内ハーフモーダル
+            ImageDownloadModalOverlay(isPresented: $showImageDownloadModal)
         }
     }
 
@@ -48,9 +100,11 @@ struct SettingsView: View {
     private var content: some View {
         Form {
             profileSection
+            userIDSection
             permissionsSection
             imageSettingsSection
             infoSection
+            testSection
             dangerSection
         }
         .navigationTitle("設定")
@@ -64,6 +118,10 @@ struct SettingsView: View {
         }
         .alert("画像キャッシュを削除しますか？", isPresented: $showClearCacheImagesAlert) {
             Button("削除", role: .destructive) {
+                // 触覚フィードバック
+                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                impactFeedback.impactOccurred()
+                
                 ImageCacheManager.clearCache()
                 cacheSizeBytes = 0
             }
@@ -74,6 +132,73 @@ struct SettingsView: View {
         .alert("ログアウトしますか？", isPresented: $showLogoutAlert) {
             Button("ログアウト", role: .destructive) { logout() }
             Button("キャンセル", role: .cancel) {}
+        }
+        .alert("アプリ完全初期化", isPresented: $showResetAlert) {
+            Button("初期化", role: .destructive) { resetAppCompletely() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("アプリを初回起動状態にリセットし、全てのデータが削除されます。初期化後、アプリを手動で再起動してください。")
+        }
+        .alert("スキーマ再構築完了", isPresented: $showSchemaRebuildAlert) {
+            Button("OK") {}
+        } message: {
+            Text("CloudKitスキーマの再構築が完了しました。アプリを再起動して変更を反映してください。")
+        }
+        .alert("CloudKit完全リセット", isPresented: $showCompleteResetAlert) {
+            Button("リセット", role: .destructive) { performCompleteReset() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("CloudKitデータベースを完全にリセットします。全てのチャットデータ、プロフィール、設定が削除されます。この操作は取り消せません。")
+        }
+        .alert("本番環境での緊急リセット", isPresented: $showProductionResetConfirm) {
+            Button("強制実行", role: .destructive) { performProductionEmergencyReset() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("本番環境で緊急リセットを実行します。全てのユーザーデータが失われます。本当に実行しますか？")
+        }
+        .alert("緊急リセット", isPresented: $showEmergencyResetAlert) {
+            Button("実行", role: .destructive) { performEmergencyReset() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("データ破損などの緊急時にリセットを実行します。\n\n\(resetErrorMessage)")
+        }
+        
+        // 統合リセット機能のアラート
+        .alert("ローカルリセット", isPresented: $showLocalResetAlert) {
+            Button("リセット", role: .destructive) { 
+                Task { 
+                    performLocalReset()
+                } 
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("ローカルキャッシュ、画像キャッシュ、設定をクリアします。\nCloudKitのデータは保持されます。")
+        }
+        
+        .alert("クラウドを含めた完全リセット", isPresented: $showCompleteCloudResetAlert) {
+            Button("完全リセット", role: .destructive) { 
+                Task { 
+                    performCompleteCloudReset() 
+                } 
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("CloudKitを含む全てのデータを削除します。\n⚠️ この操作は取り消せません")
+        }
+        .sheet(isPresented: $showPairingView) {
+            PairingView(showWelcomeModalOnAppear: true, onChatCreated: { _ in
+                // チャット作成時の処理は不要（設定画面からの呼び出しのため）
+                showPairingView = false
+            }, onDismiss: {
+                showPairingView = false
+            })
+            .presentationBackground(.clear)
+            .presentationBackgroundInteraction(.enabled)
+        }
+        .sheet(isPresented: $showLogShareSheet) {
+            if let url = logFileURL {
+                ShareSheet(items: [url])
+            }
         }
         // Lifecycle
         .onAppear {
@@ -160,6 +285,74 @@ struct SettingsView: View {
         }
     }
 
+    @ViewBuilder private var userIDSection: some View {
+        Section(header: Text("あなたの ID"), footer: Text("相手がチャットを開始するために必要なIDです。タップでコピーできます。")) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ユーザーID")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(myUserID.isEmpty ? "取得中..." : myUserID)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .lineLimit(nil)
+                        .textSelection(.enabled)
+                }
+                
+                Spacer()
+                
+                Button {
+                    if !myUserID.isEmpty {
+                        UIPasteboard.general.string = myUserID
+                        // 触覚フィードバック
+                        let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+                        impactFeedback.impactOccurred()
+                    }
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 16))
+                        .foregroundColor(.blue)
+                }
+                .disabled(myUserID.isEmpty)
+            }
+            .padding(.vertical, 4)
+            
+            Button {
+                let shareText = """
+                4-Marinで一緒にチャットしませんか？ 🌊
+                
+                私のID: \(myUserID)
+                
+                アプリをダウンロードして、上記のIDを追加してください！
+                遠距離でも、一緒に開いてる時は顔が見える特別なメッセージアプリです。
+                
+                https://apps.apple.com/app/4-marin/id123456789
+                """
+                
+                let activityVC = UIActivityViewController(
+                    activityItems: [shareText],
+                    applicationActivities: nil
+                )
+                
+                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let window = windowScene.windows.first,
+                   let rootVC = window.rootViewController {
+                    activityVC.popoverPresentationController?.sourceView = window
+                    rootVC.present(activityVC, animated: true)
+                }
+            } label: {
+                HStack {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 16))
+                    Text("招待メッセージをシェア")
+                    Spacer()
+                }
+                .foregroundColor(.blue)
+            }
+            .disabled(myUserID.isEmpty)
+        }
+    }
+
     @ViewBuilder private var permissionsSection: some View {
         Section(header: Text("アプリ権限"), footer: Text("アプリの機能を正常に利用するために必要な権限です。拒否された権限は設定アプリから変更できます。")) {
             // カメラ権限
@@ -222,24 +415,230 @@ struct SettingsView: View {
     
     @ViewBuilder private var imageSettingsSection: some View {
         Section(header: Text("画像設定")) {
-            Toggle("画像を自動ダウンロード", isOn: $autoDownloadImages)
+            Button {
+                showImageDownloadModal = true
+            } label: {
+                HStack {
+                    Text("画像を自動ダウンロード")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .foregroundColor(.primary)
+            
             Toggle("写真アプリのお気に入りと同期", isOn: $photosFavoriteSync)
         }
     }
 
     @ViewBuilder private var infoSection: some View {
         Section(header: Text("情報")) {
-            HStack {
-                Text("App Version")
-                Spacer()
-                Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-")
-                    .foregroundColor(.secondary)
+            Button {
+                showPairingView = true
+            } label: {
+                HStack {
+                    Text("このアプリについて")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
-            Button("画像キャッシュを削除", role: .destructive) { showClearCacheImagesAlert = true }
+            .foregroundColor(.primary)
+            
+            Button {
+                handleVersionTap()
+            } label: {
+                HStack {
+                    Text("App Version")
+                    Spacer()
+                    Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .foregroundColor(.primary)
+            .buttonStyle(.plain)
+            Button("画像キャッシュを削除", role: .destructive) { 
+                // 触覚フィードバック
+                let selectionFeedback = UISelectionFeedbackGenerator()
+                selectionFeedback.selectionChanged()
+                showClearCacheImagesAlert = true 
+            }
             HStack {
                 Text("使用容量")
                 Spacer()
                 Text(byteFormatter.string(fromByteCount: Int64(cacheSizeBytes))).foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder private var testSection: some View {
+        if versionTapCount >= 3 {
+            Section(header: Text("開発者機能")) {
+                HStack {
+                    Label("オフライン状態", systemImage: "wifi.slash")
+                    Spacer()
+                    Text(connectivityManager.isConnected ? "オンライン" : "オフライン")
+                        .foregroundColor(connectivityManager.isConnected ? .green : .red)
+                        .fontWeight(.medium)
+                }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Label("バックグラウンドタスク", systemImage: "clock")
+                        Spacer()
+                    }
+                    if let nextDate = BackgroundTaskManager.shared.getNextScheduledDate() {
+                        Text("次回実行: \(nextDate, style: .relative)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("\(nextDate, formatter: dateTimeFormatter)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("未スケジュール")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("デバッグ通知モード", isOn: .init(
+                        get: { UserDefaults.standard.bool(forKey: "debugNotificationsEnabled") },
+                        set: { newValue in
+                            UserDefaults.standard.set(newValue, forKey: "debugNotificationsEnabled")
+                            // デバッグモード変更時にフラグをリセット
+                            UserDefaults.standard.set(false, forKey: "didNotifyThisOfflineEpisode")
+                            log("デバッグ通知モード: \(newValue ? "有効" : "無効")", category: "DEBUG")
+                        }
+                    ))
+                    Text("有効にするとオンライン状態でもバックグラウンドタスクから通知が送信されます")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                
+                Button {
+                    Task {
+                        await NotificationManager.shared.sendDebugNotification(
+                            title: "通知テスト",
+                            body: "テスト通知が正常に動作しています"
+                        )
+                    }
+                } label: {
+                    HStack {
+                        Label("通知テスト", systemImage: "bell.badge")
+                        Spacer()
+                    }
+                }
+                .foregroundColor(.blue)
+                
+                Button {
+                    Task {
+                        await BackgroundTaskManager.shared.forceExecuteBackgroundTask()
+                    }
+                } label: {
+                    HStack {
+                        Label("バックグラウンドタスク強制実行", systemImage: "play.circle")
+                        Spacer()
+                    }
+                }
+                .foregroundColor(.green)
+                
+                Button {
+                    connectivityManager.showOfflineModalFromNotification()
+                } label: {
+                    HStack {
+                        Label("オフラインモーダルを表示", systemImage: "exclamationmark.triangle")
+                        Spacer()
+                    }
+                }
+                .foregroundColor(.orange)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Button {
+                        BackgroundTaskManager.shared.scheduleNextRefresh(after: 30, isTestMode: true) // 30秒後
+                    } label: {
+                        HStack {
+                            Label("バックグラウンドタスクをテスト", systemImage: "arrow.clockwise")
+                            Spacer()
+                            Text("30秒後")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .foregroundColor(.purple)
+                    
+                    if let testEndTime = testModeEndTime {
+                        HStack {
+                            Text("テストモード終了: \(testEndTime, style: .relative)")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                            Spacer()
+                            Button("停止") {
+                                UserDefaults.standard.removeObject(forKey: "testModeScheduledUntil")
+                                log("テストモードを手動停止", category: "DEBUG")
+                            }
+                            .font(.caption2)
+                            .foregroundColor(.red)
+                        }
+                    }
+                }
+                
+                Button {
+                    collectAndShareLogs()
+                } label: {
+                    HStack {
+                        if isCollectingLogs {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+                                .scaleEffect(0.8)
+                            Text("ログ収集中...")
+                        } else {
+                            Label("ログを共有", systemImage: "square.and.arrow.up")
+                        }
+                        Spacer()
+                    }
+                }
+                .foregroundColor(.blue)
+                .disabled(isCollectingLogs)
+                
+                // 統合リセット機能
+                Button {
+                    showLocalResetAlert = true
+                } label: {
+                    HStack {
+                        if isPerformingLocalReset {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: .orange))
+                                .scaleEffect(0.8)
+                            Text("ローカルリセット中...")
+                        } else {
+                            Label("ローカルリセット", systemImage: "arrow.counterclockwise")
+                        }
+                        Spacer()
+                    }
+                }
+                .foregroundColor(.orange)
+                .disabled(isPerformingLocalReset || isPerformingCloudReset)
+                
+                Button {
+                    showCompleteCloudResetAlert = true
+                } label: {
+                    HStack {
+                        if isPerformingCloudReset {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: .red))
+                                .scaleEffect(0.8)
+                            Text("完全リセット中...")
+                        } else {
+                            Label("クラウドを含めた完全リセット", systemImage: "icloud.slash")
+                        }
+                        Spacer()
+                    }
+                }
+                .foregroundColor(.red)
+                .disabled(isPerformingLocalReset || isPerformingCloudReset)
             }
         }
     }
@@ -253,10 +652,14 @@ struct SettingsView: View {
 
     // MARK: - Actions
     private func clearMessages() {
+        // 触覚フィードバック
+        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+        impactFeedback.impactOccurred()
+        
         do {
             let all = try modelContext.fetch(FetchDescriptor<Message>())
             for m in all { modelContext.delete(m) }
-        } catch { print(error) }
+        } catch { log("Error: \(error)", category: "App") }
     }
 
     private func logout() {
@@ -264,7 +667,7 @@ struct SettingsView: View {
         do {
             let allRooms = try modelContext.fetch(FetchDescriptor<ChatRoom>())
             for room in allRooms { modelContext.delete(room) }
-        } catch { print(error) }
+        } catch { log("Error: \(error)", category: "App") }
         
         clearMessages()
         ImageCacheManager.clearCache()
@@ -275,7 +678,7 @@ struct SettingsView: View {
             do {
                 try await permissionManager.requestNotificationPermission()
             } catch {
-                print("Failed to request notification permission: \(error)")
+                log("Failed to request notification permission: \(error)", category: "App")
             }
         }
     }
@@ -285,17 +688,17 @@ struct SettingsView: View {
             do {
                 // チャット用権限を申請
                 try await permissionManager.requestChatPermissions()
-                print("Chat permissions granted")
+                log("Chat permissions granted", category: "App")
             } catch {
-                print("Failed to request chat permissions: \(error)")
+                log("Failed to request chat permissions: \(error)", category: "App")
             }
             
             do {
                 // デュアルカメラ用権限を申請
                 try await permissionManager.requestDualCameraPermissions()
-                print("Dual camera permissions granted")
+                log("Dual camera permissions granted", category: "App")
             } catch {
-                print("Failed to request dual camera permissions: \(error)")
+                log("Failed to request dual camera permissions: \(error)", category: "App")
             }
             
             // 権限申請後に状態を更新
@@ -310,10 +713,170 @@ struct SettingsView: View {
         }
     }
 
+    private func handleVersionTap() {
+        let now = Date()
+        
+        // 前回のタップから2秒以内かどうかチェック
+        if now.timeIntervalSince(lastVersionTapTime) < 2.0 {
+            versionTapCount += 1
+        } else {
+            versionTapCount = 1
+        }
+        
+        lastVersionTapTime = now
+    }
+    
+    private func clearAllChatRooms() {
+        do {
+            let allRooms = try modelContext.fetch(FetchDescriptor<ChatRoom>())
+            for room in allRooms {
+                modelContext.delete(room)
+            }
+            try modelContext.save()
+        } catch {
+            log("Failed to clear chat rooms: \(error)", category: "App")
+        }
+    }
+    
+    private func resetAppCompletely() {
+        // @AppStorage のリセット
+        hasShownWelcome = false
+        myDisplayName = ""
+        myAvatarData = Data()
+        autoDownloadImages = false
+        photosFavoriteSync = true
+        
+        // 他のファイルの@AppStorageもリセット
+        UserDefaults.standard.removeObject(forKey: "recentEmojis")
+        UserDefaults.standard.removeObject(forKey: "schemaVersion")
+        UserDefaults.standard.removeObject(forKey: "nextBackgroundTaskScheduled")
+        UserDefaults.standard.removeObject(forKey: "debugNotificationsEnabled")
+        UserDefaults.standard.removeObject(forKey: "didNotifyThisOfflineEpisode")
+        UserDefaults.standard.removeObject(forKey: "lastOnlineAt")
+        UserDefaults.standard.removeObject(forKey: "showOfflineModal")
+        
+        // チャットデータの削除
+        clearAllChatRooms()
+        clearMessages()
+        
+        // 画像キャッシュの削除
+        ImageCacheManager.clearCache()
+        cacheSizeBytes = 0
+        
+        // UI状態のリセット
+        selectedImage = nil
+        tempDisplayName = ""
+        versionTapCount = 0
+        
+        // 触覚フィードバック
+        let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
+        impactFeedback.impactOccurred()
+        
+        // 設定画面を閉じる
+        dismiss()
+        
+        log("アプリ完全初期化: 全ての設定とデータをリセットしました", category: "DEBUG")
+        log("ウェルカムモーダルを表示するにはアプリを再起動してください", category: "DEBUG")
+    }
+
     private func syncProfileToCloudKit() {
         myDisplayName = tempDisplayName
         Task {
             await CKSync.saveProfile(name: myDisplayName, avatarData: myAvatarData)
+        }
+    }
+    
+    // MARK: - CloudKit Reset Functions
+    
+    private func performCompleteReset() {
+        Task {
+            await MainActor.run {
+                isPerformingReset = true
+            }
+            
+            do {
+                // 本番環境かどうかを確認
+                let isProduction = await CloudKitChatManager.shared.checkIsProductionEnvironment()
+                if isProduction {
+                    // 本番環境の場合は確認ダイアログを表示
+                    await MainActor.run {
+                        isPerformingReset = false
+                        showProductionResetConfirm = true
+                    }
+                    return
+                }
+                
+                // 開発環境での完全リセット実行
+                try await CloudKitChatManager.shared.performCompleteReset(bypassSafetyCheck: false)
+                
+                await MainActor.run {
+                    isPerformingReset = false
+                    resetAppCompletely() // アプリローカルデータもリセット
+                }
+                
+                log("CloudKit完全リセットが完了しました", category: "DEBUG")
+                
+            } catch {
+                await MainActor.run {
+                    isPerformingReset = false
+                    resetErrorMessage = "リセットに失敗しました: \(error.localizedDescription)"
+                    log("CloudKit完全リセット失敗: \(error)", category: "ERROR")
+                }
+            }
+        }
+    }
+    
+    private func performProductionEmergencyReset() {
+        Task {
+            await MainActor.run {
+                isPerformingReset = true
+            }
+            
+            do {
+                // 本番環境での強制リセット実行
+                try await CloudKitChatManager.shared.performCompleteReset(bypassSafetyCheck: true)
+                
+                await MainActor.run {
+                    isPerformingReset = false
+                    resetAppCompletely() // アプリローカルデータもリセット
+                }
+                
+                log("本番環境でのCloudKit緊急リセットが完了しました", category: "DEBUG")
+                
+            } catch {
+                await MainActor.run {
+                    isPerformingReset = false
+                    resetErrorMessage = "緊急リセットに失敗しました: \(error.localizedDescription)"
+                    log("本番環境CloudKit緊急リセット失敗: \(error)", category: "ERROR")
+                }
+            }
+        }
+    }
+    
+    private func performEmergencyReset() {
+        Task {
+            await MainActor.run {
+                isPerformingReset = true
+            }
+            
+            do {
+                // 緊急リセット実行（エラー状況の詳細を取得）
+                try await CloudKitChatManager.shared.performEmergencyReset(reason: "ユーザーリクエスト")
+                
+                await MainActor.run {
+                    isPerformingReset = false
+                    resetAppCompletely() // アプリローカルデータもリセット
+                }
+                
+                log("CloudKit緊急リセットが完了しました", category: "DEBUG")
+                
+            } catch {
+                await MainActor.run {
+                    isPerformingReset = false
+                    resetErrorMessage = "緊急リセットに失敗しました: \(error.localizedDescription)"
+                    log("CloudKit緊急リセット失敗: \(error)", category: "ERROR")
+                }
+            }
         }
     }
 
@@ -435,6 +998,195 @@ struct SettingsView: View {
         f.countStyle = .file
         return f
     }
+    
+    private var dateTimeFormatter: DateFormatter {
+        let f = DateFormatter()
+        f.dateStyle = .short
+        f.timeStyle = .medium
+        f.locale = Locale.current
+        return f
+    }
+    
+    // MARK: - Log Sharing
+    
+    private func collectAndShareLogs() {
+        Task {
+            await MainActor.run {
+                isCollectingLogs = true
+            }
+            
+            // ログを収集
+            if let fileURL = await LogCollector.shared.collectLogsAsFile() {
+                await MainActor.run {
+                    logFileURL = fileURL
+                    isCollectingLogs = false
+                    showLogShareSheet = true
+                }
+            } else {
+                await MainActor.run {
+                    isCollectingLogs = false
+                    // エラーハンドリング（必要に応じて）
+                    log("ログファイルの作成に失敗しました", category: "SettingsView")
+                }
+            }
+        }
+    }
 
     // Image cache helpers removed in favour of global ImageCacheManager
-} 
+
+    // MARK: - 統合リセット機能
+    /// ローカルリセット：CloudKitデータに触れずにローカルキャッシュと設定のみクリア
+    private func performLocalReset() {
+        Task {
+            await MainActor.run {
+                isPerformingLocalReset = true
+            }
+            
+            do {
+                // 1. CloudKitChatManagerのローカルリセット
+                try await CloudKitChatManager.shared.performLocalReset()
+                
+                // 2. ローカルSwiftDataメッセージを削除
+                await MainActor.run {
+                    clearMessages()
+                }
+                
+                // 3. 画像キャッシュをクリア
+                ImageCacheManager.clearCache()
+                
+                await MainActor.run {
+                    isPerformingLocalReset = false
+                    log("ローカルリセットが完了しました", category: "SettingsView")
+                }
+                
+            } catch {
+                await MainActor.run {
+                    isPerformingLocalReset = false
+                    log("ローカルリセットエラー: \(error)", category: "SettingsView")
+                }
+            }
+        }
+    }
+    
+    /// クラウドを含めた完全リセット：CloudKitデータを含む全データを削除
+    private func performCompleteCloudReset() {
+        Task {
+            await MainActor.run {
+                isPerformingCloudReset = true
+            }
+            
+            do {
+                // 1. CloudKitChatManagerの完全クラウドリセット
+                try await CloudKitChatManager.shared.performCompleteCloudReset()
+                
+                // 2. ローカルアプリデータも完全初期化
+                await MainActor.run {
+                    resetAppCompletely()
+                    isPerformingCloudReset = false
+                    log("完全クラウドリセットが完了しました", category: "SettingsView")
+                }
+                
+            } catch {
+                await MainActor.run {
+                    isPerformingCloudReset = false
+                    log("完全クラウドリセットエラー: \(error)", category: "SettingsView")
+                }
+            }
+        }
+    }
+    }
+    
+    // MARK: - 画像ダウンロード設定案内ハーフモーダル
+struct ImageDownloadModalView: View {
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // ドラッグインジケーター
+            RoundedRectangle(cornerRadius: 2.5)
+                .fill(Color(.systemGray4))
+                .frame(width: 36, height: 5)
+                .padding(.top, 12)
+                .padding(.bottom, 20)
+            
+            VStack(spacing: 24) {
+                // アイコン
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 50))
+                    .foregroundColor(.accentColor)
+                
+                // タイトル
+                Text("個別設定をご利用ください")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundColor(.primary)
+                
+                // 説明文
+                VStack(spacing: 16) {
+                    Text("画像の自動ダウンロード設定は、相手ごとに個別で設定できるようになりました。")
+                        .font(.body)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                    
+                    Text("各チャット画面から相手のプロフィールを開いて設定してください。")
+                        .font(.body)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 20)
+                
+                // 分かりましたボタン
+                Button {
+                    dismiss()
+                } label: {
+                    Text("分かりました")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(Color.accentColor)
+                        .cornerRadius(12)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 40)
+        }
+        .background(Color(.systemBackground))
+        .cornerRadius(20, corners: [.topLeft, .topRight])
+        .shadow(color: Color.black.opacity(0.15), radius: 20, x: 0, y: -2)
+    }
+}
+
+// 画像ダウンロード設定案内ハーフモーダル表示用のオーバーレイ
+struct ImageDownloadModalOverlay: View {
+    @Binding var isPresented: Bool
+    
+    var body: some View {
+        ZStack {
+            if isPresented {
+                // 背景のディミング
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea(.all, edges: .all)
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            isPresented = false
+                        }
+                    }
+                
+                // モーダル本体
+                VStack {
+                    Spacer()
+                    ImageDownloadModalView()
+                        .onDisappear {
+                            isPresented = false
+                        }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: isPresented)
+    }
+}

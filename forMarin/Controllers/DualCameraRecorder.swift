@@ -46,6 +46,8 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
     @Published private(set) var state: State = .idle
     @Published var timerText: String = "00:00"
     @Published var isFlipped: Bool = false
+    @Published var currentZoomFactor: Double = 0.5
+    @Published var availableZoomFactors: [Double] = [1.0] // デフォルト値
     
     // プレビュー用の合成画像
     @Published var previewImage: CGImage?
@@ -55,6 +57,10 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
 
     // MARK: - Private Vars
     private let session = AVCaptureMultiCamSession()
+    
+    // カメラデバイス参照（ズーム制御用）
+    private var backCameraDevice: AVCaptureDevice?
+    private var frontCameraDevice: AVCaptureDevice?
     
     // 各出力は初期化時に生成
     private let backVideoOutput = AVCaptureVideoDataOutput()
@@ -141,11 +147,11 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
     /// 失敗時は例外送出。
     func startSession() async throws {
         guard state == .idle else { return }
-        // print("DualCameraRecorder: Starting session...")
+        // log("Starting session...", category: "DualCameraRecorder")
         
         // マルチカムサポート確認
         let isMultiCamSupported = AVCaptureMultiCamSession.isMultiCamSupported
-        // print("DualCameraRecorder: Multi-cam supported = \(isMultiCamSupported)")
+        // log("Multi-cam supported = \(isMultiCamSupported)", category: "DualCameraRecorder")
         
         if !isMultiCamSupported {
             // マルチカム非対応の場合はエラーを投げる（後でシングルカム実装も検討）
@@ -154,7 +160,7 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
         
         // カメラ権限チェック（チャット画面で既に申請済みのはず）
         let videoStatus = AVCaptureDevice.authorizationStatus(for: .video)
-        // print("DualCameraRecorder: Video auth status = \(videoStatus.rawValue)")
+        // log("Video auth status = \(videoStatus.rawValue)", category: "DualCameraRecorder")
         
         guard videoStatus == .authorized else {
             throw NSError(domain: "DualCameraRecorder", code: -2, userInfo: [NSLocalizedDescriptionKey: "カメラの権限が必要です。設定アプリで権限を許可してください。"])
@@ -170,7 +176,7 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
                     return
                 }
                 
-                // print("DualCameraRecorder: About to start session...")
+                // log("About to start session...", category: "DualCameraRecorder")
                 self.session.startRunning()
                 dcLogger.debug("startRunning() called, isRunning = \(self.session.isRunning)")
                 self.dumpSessionStatus(context: "after startRunning")
@@ -188,7 +194,12 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
         await MainActor.run {
             state = .previewing
         }
-        // print("DualCameraRecorder: State changed to previewing")
+        
+        // デフォルトズームを設定（calculateAvailableZoomFactorsで決定された値）
+        let defaultZoom = await MainActor.run { currentZoomFactor }
+        setZoomFactor(defaultZoom)
+        
+        // log("State changed to previewing", category: "DualCameraRecorder")
     }
 
     private func configureSession() throws {
@@ -204,8 +215,15 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
             throw NSError(domain: "DualCameraRecorder", code: -4, userInfo: [NSLocalizedDescriptionKey: "カメラが取得できません"])
         }
         
-        // print("DualCameraRecorder: Back camera = \(backCam.localizedName), Front camera = \(frontCam.localizedName)")
-        // print("DualCameraRecorder: Back camera connected = \(backCam.isConnected), Front camera connected = \(frontCam.isConnected)")
+        // デバイス参照を保存（ズーム制御用）
+        backCameraDevice = backCam
+        frontCameraDevice = frontCam
+        
+        // 利用可能なズーム倍率を計算
+        calculateAvailableZoomFactors(for: backCam)
+        
+        // log("Back camera = \(backCam.localizedName), Front camera = \(frontCam.localizedName)", category: "DualCameraRecorder")
+        // log("Back camera connected = \(backCam.isConnected), Front camera connected = \(frontCam.isConnected)", category: "DualCameraRecorder")
 
         // --- マルチカム対応フォーマット選択 (420f, ≤30fps) ---
         func selectMultiCam30fpsFormat(device: AVCaptureDevice) throws {
@@ -222,7 +240,7 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
             device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
             device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
             device.unlockForConfiguration()
-            // print("DualCameraRecorder: set \(device.localizedName) format=\(format) 30fps")
+            // log("set \(device.localizedName) format=\(format) 30fps", category: "DualCameraRecorder")
         }
 
         try selectMultiCam30fpsFormat(device: backCam)
@@ -236,14 +254,14 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
         session.addInput(backInput)
         session.addInput(frontInput)
         
-        // print("DualCameraRecorder: Added camera inputs")
+        // log("Added camera inputs", category: "DualCameraRecorder")
 
         // --- Audio Input ---
         if let audioDevice = AVCaptureDevice.default(for: .audio) {
             let audioInput = try AVCaptureDeviceInput(device: audioDevice)
             if session.canAddInput(audioInput) {
                 session.addInput(audioInput)
-                // print("DualCameraRecorder: Added audio input")
+                // log("Added audio input", category: "DualCameraRecorder")
             }
         }
 
@@ -266,7 +284,7 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
         session.addOutput(backVideoOutput)
         session.addOutput(frontVideoOutput)
         
-        // print("DualCameraRecorder: Added video outputs")
+        // log("Added video outputs", category: "DualCameraRecorder")
         
         // ★ AVCaptureSession が自動生成する connection を利用する（iOS 17 以降はこちらが安定）
         if let backConn = backVideoOutput.connection(with: .video) {
@@ -294,15 +312,15 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
         audioOutput.setSampleBufferDelegate(self, queue: processingQueue)
         if session.canAddOutput(audioOutput) {
             session.addOutput(audioOutput)
-            // print("DualCameraRecorder: Added audio output")
+            // log("Added audio output", category: "DualCameraRecorder")
         }
 
         session.commitConfiguration()
-        // print("DualCameraRecorder: Session configuration completed")
+        // log("Session configuration completed", category: "DualCameraRecorder")
 
                   // connection 状態を確認
           for (_, _) in session.connections.enumerated() {
-              // print("DualCameraRecorder: conn[\(idx)] active=\(c.isActive) enabled=\(c.isEnabled) outputs=\(c.output != nil ? 1 : 0)")
+              // log("conn[\(idx)] active=\(c.isActive) enabled=\(c.isEnabled) outputs=\(c.output != nil ? 1 : 0)", category: "DualCameraRecorder")
           }
     }
 
@@ -459,6 +477,58 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
     func flipPIP() {
         isFlipped.toggle()
     }
+    
+    /// デバイスが対応するズーム倍率を計算
+    private func calculateAvailableZoomFactors(for device: AVCaptureDevice) {
+        let minZoom = device.minAvailableVideoZoomFactor
+        let maxZoom = device.maxAvailableVideoZoomFactor
+        
+        // 一般的なズーム倍率の候補
+        let candidateFactors: [Double] = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
+        
+        // デバイスがサポートする範囲内の倍率を選択
+        let supportedFactors = candidateFactors.filter { factor in
+            factor >= minZoom && factor <= maxZoom
+        }
+        
+        // 最低でも1.0は含める
+        let finalFactors = supportedFactors.isEmpty ? [1.0] : supportedFactors
+        
+        Task { @MainActor in
+            availableZoomFactors = finalFactors
+            
+            // デフォルトズーム倍率を更新（0.5が利用可能なら0.5、そうでなければ最初の倍率）
+            let defaultZoom = finalFactors.contains(0.5) ? 0.5 : finalFactors.first ?? 1.0
+            currentZoomFactor = defaultZoom
+        }
+        
+        log("Device zoom range: \(minZoom) - \(maxZoom)", category: "DualCameraRecorder")
+        log("Available zoom factors: \(finalFactors)", category: "DualCameraRecorder")
+    }
+    
+    /// ズームファクターを設定する（アウトカメラのみ）
+    func setZoomFactor(_ factor: Double) {
+        guard let device = backCameraDevice else { return }
+        
+        do {
+            try device.lockForConfiguration()
+            
+            // デバイスがサポートするズーム範囲内に収める
+            let clampedFactor = max(device.minAvailableVideoZoomFactor, 
+                                   min(factor, device.maxAvailableVideoZoomFactor))
+            
+            device.videoZoomFactor = clampedFactor
+            device.unlockForConfiguration()
+            
+            Task { @MainActor in
+                currentZoomFactor = clampedFactor
+            }
+            
+            log("Zoom factor set to \(clampedFactor)", category: "DualCameraRecorder")
+        } catch {
+            log("Failed to set zoom factor: \(error)", category: "DualCameraRecorder")
+        }
+    }
 
     private func cleanup() {
         session.stopRunning()
@@ -479,11 +549,11 @@ extension DualCameraRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         // デバッグ: フレーム受信確認
         if output === backVideoOutput {
-            // print("DualCameraRecorder: Received back camera frame")
+            // log("Received back camera frame", category: "DualCameraRecorder")
         } else if output === frontVideoOutput {
-            // print("DualCameraRecorder: Received front camera frame")
+            // log("Received front camera frame", category: "DualCameraRecorder")
         } else if output === audioOutput {
-            // print("DualCameraRecorder: Received audio frame")
+            // log("Received audio frame", category: "DualCameraRecorder")
         }
         
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
@@ -498,7 +568,7 @@ extension DualCameraRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
     }
 
     private func handleFront(_ sample: CMSampleBuffer) {
-        // print("DualCameraRecorder: Processing front camera frame")
+        // log("Processing front camera frame", category: "DualCameraRecorder")
         guard let buf = CMSampleBufferGetImageBuffer(sample) else { return }
         let frontImage = CIImage(cvPixelBuffer: buf)
         latestFrontImage = frontImage
@@ -510,7 +580,7 @@ extension DualCameraRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
             // プレビュー更新（録画中でなくても）
             if state == .previewing || state == .recording {
                 if let cgImage = ciContext.createCGImage(output, from: output.extent) {
-                    // print("DualCameraRecorder: Updating preview image from front camera")
+                    // log("Updating preview image from front camera", category: "DualCameraRecorder")
                     Task { @MainActor in
                         self.previewImage = cgImage
                     }
@@ -525,7 +595,7 @@ extension DualCameraRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
     }
 
     private func handleBack(_ sample: CMSampleBuffer) {
-        // print("DualCameraRecorder: Processing back camera frame")
+        // log("Processing back camera frame", category: "DualCameraRecorder")
         guard let baseBuf = CMSampleBufferGetImageBuffer(sample) else { return }
         let backImage = CIImage(cvPixelBuffer: baseBuf)
         latestBackImage = backImage
@@ -540,7 +610,7 @@ extension DualCameraRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
         // プレビュー更新（録画中でなくても）
         if state == .previewing || state == .recording {
             if let cgImage = ciContext.createCGImage(output, from: output.extent) {
-                // print("DualCameraRecorder: Updating preview image from back camera")
+                // log("Updating preview image from back camera", category: "DualCameraRecorder")
                 Task { @MainActor in
                     self.previewImage = cgImage
                 }
@@ -580,7 +650,7 @@ extension DualCameraRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
             }
             w.startSession(atSourceTime: time)
             didStartSession = true
-            // print("DualCameraRecorder: writer startSession at PTS \(time.value)")
+            // log("writer startSession at PTS \(time.value)", category: "DualCameraRecorder")
             recordingStartTime = Date()
             // このフレームの append はスキップして次フレームから書き込み
             return
@@ -596,9 +666,9 @@ extension DualCameraRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
         ciContext.render(ciImage, to: buffer)
 
         if adaptor.append(buffer, withPresentationTime: time) {
-            // print("DualCameraRecorder: frame appended at \(time.value)/\(time.timescale)")
+            // log("frame appended at \(time.value)/\(time.timescale)", category: "DualCameraRecorder")
         } else {
-            print("DualCameraRecorder: FAILED to append frame at \(time.value)/\(time.timescale)")
+            log("FAILED to append frame at \(time.value)/\(time.timescale)", category: "DualCameraRecorder")
         }
     }
 

@@ -6,7 +6,7 @@ extension ChatView {
     @ViewBuilder 
     func EditingOverlay(message: Message) -> some View {
         ZStack(alignment: .bottomTrailing) {
-            Color.black.opacity(0.4).ignoresSafeArea()
+            Color.black.opacity(0.4).ignoresSafeArea(.all, edges: .all)
 
             VStack(alignment: .leading, spacing: 12) {
                 Text("メッセージを編集")

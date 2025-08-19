@@ -138,7 +138,7 @@ final class P2PController: NSObject, ObservableObject {
         
         // 有効期限が切れていない場合、相手がオンライン
         if expires > Date() {
-            print("Partner is online, starting local camera")
+            log("Partner is online, starting local camera", category: "App")
             startLocalCameraWhenPartnerOnline()
         }
     }

@@ -57,20 +57,19 @@ struct CalendarWithImagesView: View {
                                     .background(
                                         GeometryReader { weekGeometry in
                                             Color.clear
-                                                .preference(key: WeekOffsetPreferenceKey.self, 
-                                                          value: [index: weekGeometry.frame(in: .named("calendar")).midY])
+                                                .onChange(of: weekGeometry.frame(in: .global).midY) { _, yPosition in
+                                                    updateCurrentMonthFromWeekPosition(
+                                                        weekIndex: index,
+                                                        yPosition: yPosition,
+                                                        geometry: geometry
+                                                    )
+                                                }
                                         }
                                     )
                                     .id("week-\(index)")
                                 }
                             }
                             .coordinateSpace(name: "calendar")
-                        }
-                        .onPreferenceChange(WeekOffsetPreferenceKey.self) { offsets in
-                            updateCurrentMonth(from: offsets, geometry: geometry)
-                        }
-                        .onPreferenceChange(DayOffsetPreferenceKey.self) { dayOffsets in
-                            updateCurrentMonthFromDay(dayOffsets: dayOffsets, geometry: geometry)
                         }
                         .onAppear {
                             if !isDataLoaded {
@@ -139,7 +138,7 @@ struct CalendarWithImagesView: View {
     // MARK: - データ読み込み
     
     private func loadCalendarData() {
-        print("CalendarWithImagesView: Loading calendar data...")
+        log("Loading calendar data...", category: "CalendarWithImagesView")
         
         // 画像データをキャッシュ
         var imagesCache: [Date: [UIImage]] = [:]
@@ -178,7 +177,7 @@ struct CalendarWithImagesView: View {
         }
         cachedAnniversariesByDate = anniversariesCache
         
-        print("CalendarWithImagesView: Cached \(imagesCache.count) days with images, \(anniversariesCache.count) days with anniversaries")
+        log("Cached \(imagesCache.count) days with images, \(anniversariesCache.count) days with anniversaries", category: "CalendarWithImagesView")
     }
     
     private func shouldShowAnniversary(_ anniversary: Anniversary, on date: Date) -> Bool {
@@ -270,62 +269,31 @@ struct CalendarWithImagesView: View {
         }
     }
     
-    private func updateCurrentMonth(from offsets: [Int: CGFloat], geometry: GeometryProxy) {
-        // 週ベースの月判定は残しておく（フォールバック用）
+    
+    
+    private func updateCurrentMonthFromWeekPosition(weekIndex: Int, yPosition: CGFloat, geometry: GeometryProxy) {
         let screenHeight = geometry.size.height
-        let centerPosition = screenHeight * 0.5 // 画面中央の位置
+        let targetPosition = screenHeight * 0.65 // 画面の65%の位置で判定
         
-        // 画面中央に最も近い週を検索（週の中心位置で判定）
-        let targetWeekIndex = offsets.min { abs($0.value - centerPosition) < abs($1.value - centerPosition) }?.key
+        // 判定位置付近の週のみ処理（パフォーマンス向上）
+        guard abs(yPosition - targetPosition) < screenHeight * 0.3 else { return }
         
-        // 画面中央に最も近い週の最初の日付の月を現在の表示月とする
-        if let weekIndex = targetWeekIndex,
-           weekIndex < allWeeks.count,
-           let firstDate = allWeeks[weekIndex].weeks.first?.compactMap({ $0 }).first {
-            
-            let calendar = Calendar.current
-            let monthStart = calendar.dateInterval(of: .month, for: firstDate)?.start ?? firstDate
-            
-            if !calendar.isDate(currentDisplayMonth, equalTo: monthStart, toGranularity: .month) {
-                DispatchQueue.main.async {
-                    currentDisplayMonth = monthStart
-                }
-            }
+        // 週の中央の日付を取得
+        guard weekIndex < allWeeks.count,
+              let weekDates = allWeeks[weekIndex].weeks.first else { return }
+        
+        let validDates = weekDates.compactMap({ $0 })
+        let centerDate = validDates.count > 3 ? validDates[3] : validDates.first
+        guard let centerDate = centerDate else { return }
+        
+        let calendar = Calendar.current
+        let monthStart = calendar.dateInterval(of: .month, for: centerDate)?.start ?? centerDate
+        
+        if !calendar.isDate(currentDisplayMonth, equalTo: monthStart, toGranularity: .month) {
+            currentDisplayMonth = monthStart
         }
     }
     
-    private func updateCurrentMonthFromDay(dayOffsets: [String: CGFloat], geometry: GeometryProxy) {
-        let screenHeight = geometry.size.height
-        let centerPosition = screenHeight * 0.5 // 画面中央の位置
-        
-        // 画面中央に最も近い日を検索
-        let targetDateKey = dayOffsets.min { abs($0.value - centerPosition) < abs($1.value - centerPosition) }?.key
-        
-        if let dateKey = targetDateKey,
-           let date = dateFromKey(dateKey) {
-            
-            let calendar = Calendar.current
-            let monthStart = calendar.dateInterval(of: .month, for: date)?.start ?? date
-            
-            if !calendar.isDate(currentDisplayMonth, equalTo: monthStart, toGranularity: .month) {
-                DispatchQueue.main.async {
-                    currentDisplayMonth = monthStart
-                }
-            }
-        }
-    }
-    
-    private func dateKey(for date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
-    }
-    
-    private func dateFromKey(_ key: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.date(from: key)
-    }
     
     private func hasAnniversary(on date: Date) -> Bool {
         anniversaries.contains { anniversary in
@@ -399,13 +367,6 @@ struct WeekRowView: View {
                         onTap: { selectedDate = date },
                         onImageTap: onImageTap
                     )
-                    .background(
-                        GeometryReader { dayGeometry in
-                            Color.clear
-                                .preference(key: DayOffsetPreferenceKey.self,
-                                          value: [formatDateKey(date): dayGeometry.frame(in: .named("calendar")).midY])
-                        }
-                    )
                     .opacity(getOpacityForDate(date))
                 } else {
                     Color.clear
@@ -447,32 +408,11 @@ struct WeekRowView: View {
         Calendar.current.isDate(date1, inSameDayAs: date2)
     }
     
-    private func formatDateKey(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
-    }
 }
 
 
 
-// MARK: - Preference Key for tracking scroll position
-struct WeekOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: [Int: CGFloat] = [:]
-    
-    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
-        value.merge(nextValue()) { _, new in new }
-    }
-}
 
-// MARK: - Preference Key for tracking day positions
-struct DayOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGFloat] = [:]
-    
-    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
-        value.merge(nextValue()) { _, new in new }
-    }
-}
 
 // MARK: - Calendar Day Cell With Images
 struct CalendarDayWithImages: View {

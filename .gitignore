@@ -50,6 +50,8 @@ iOSInjectionProject/
 # Logs
 *.log
 
+.crush/
+
 # Environment variables
 .env
 .env.local

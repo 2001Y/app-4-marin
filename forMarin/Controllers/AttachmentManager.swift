@@ -39,7 +39,7 @@ extension AttachmentManager {
         
         guard let data = optimizedImage.jpegData(compressionQuality: 0.9) else { return nil }
         let url = makeFileURL(ext: "jpg")
-        do { try data.write(to: url); return url } catch { print("[AttachmentManager] save error", error); return nil }
+        do { try data.write(to: url); return url } catch { log("save error - error: \(error)", category: "AttachmentManager"); return nil }
     }
     
     /// Saves video file to cache directory and returns file URL.
@@ -50,7 +50,7 @@ extension AttachmentManager {
             try FileManager.default.copyItem(at: videoURL, to: dstURL)
             return dstURL
         } catch {
-            print("[AttachmentManager] video save error", error)
+            log("video save error - error: \(error)", category: "AttachmentManager")
             return nil
         }
     }
@@ -60,17 +60,17 @@ extension AttachmentManager {
         // ファイルサイズをチェック
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: videoURL.path),
               let fileSize = attributes[.size] as? Int64 else {
-            print("[AttachmentManager] Could not get file size")
+            log("Could not get file size", category: "AttachmentManager")
             return videoURL
         }
         
         let maxSize: Int64 = 50 * 1024 * 1024 // 50MB
         if fileSize <= maxSize {
-            print("[AttachmentManager] Video size (\(fileSize / 1024 / 1024)MB) is within limits, no compression needed")
+            log("Video size (\(fileSize / 1024 / 1024)MB) is within limits, no compression needed", category: "AttachmentManager")
             return videoURL
         }
         
-        print("[AttachmentManager] Video size (\(fileSize / 1024 / 1024)MB) exceeds limit, attempting compression")
+        log("Video size (\(fileSize / 1024 / 1024)MB) exceeds limit, attempting compression", category: "AttachmentManager")
         
         // 圧縮処理（簡易版 - 実際の実装では AVAssetExportSession を使用）
         // ここでは一旦元のファイルを返す（圧縮処理は後で実装）

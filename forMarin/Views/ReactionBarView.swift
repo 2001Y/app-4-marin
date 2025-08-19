@@ -13,7 +13,8 @@ struct ReactionBarView: View {
     
     var body: some View {
         HStack(spacing: 4) {
-            if isMine {
+            if !isMine {
+                // 相手のメッセージは右側にリアクション表示
                 Spacer()
             }
             
@@ -35,11 +36,12 @@ struct ReactionBarView: View {
                 }
             }
             
-            if !isMine {
+            if isMine {
+                // 自分のメッセージは左側にリアクション表示
                 Spacer()
             }
         }
         .padding(.horizontal, 12)
-        .padding(.top, -4)
+        .padding(.top, -12) // リアクションエリアの高さ(約24pt)の半分上に移動
     }
 } 

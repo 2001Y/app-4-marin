@@ -3,29 +3,32 @@ import PhotosUI
 import SwiftData
 
 struct ProfileDetailView: View {
-    let partnerName: String
+    let chatRoom: ChatRoom
     let partnerAvatar: UIImage?
     let roomID: String
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    @Query private var anniversaries: [Anniversary]
 
+    @State private var anniversaries: [Anniversary] = []
     @State private var showAddSheet: Bool = false
     @State private var newTitle: String = ""
     @State private var newDate: Date = Date()
     @State private var newRepeatType: RepeatType = .none
 
-    init(partnerName: String, partnerAvatar: UIImage?, roomID: String) {
-        self.partnerName = partnerName
+    var partnerName: String { chatRoom.displayName ?? chatRoom.remoteUserID }
+
+    init(chatRoom: ChatRoom, partnerAvatar: UIImage?) {
+        self.chatRoom = chatRoom
         self.partnerAvatar = partnerAvatar
-        self.roomID = roomID
-        _anniversaries = Query(filter: #Predicate<Anniversary> { $0.roomID == roomID }, sort: \Anniversary.date)
+        self.roomID = chatRoom.roomID
     }
 
     var body: some View {
         NavigationStack {
             List {
                 profileHeader
+
+                settingsSection
 
                 Section(header: Text("記念日・目標日")) {
                     ForEach(anniversaries) { ann in
@@ -61,6 +64,9 @@ struct ProfileDetailView: View {
             .navigationTitle("プロフィール")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("閉じる") { dismiss() } } }
             .sheet(isPresented: $showAddSheet) { addSheet }
+            .onAppear {
+                loadAnniversaries()
+            }
         }
     }
 
@@ -127,6 +133,22 @@ struct ProfileDetailView: View {
         }
     }
 
+    private func loadAnniversaries() {
+        let descriptor = FetchDescriptor<Anniversary>(
+            sortBy: [SortDescriptor(\.date)]
+        )
+        do {
+            let allAnniversaries = try modelContext.fetch(descriptor)
+            let currentRoomID = self.roomID
+            anniversaries = allAnniversaries.filter { anniversary in
+                return anniversary.roomID == currentRoomID
+            }
+        } catch {
+            log("Failed to load anniversaries: \(error)", category: "App")
+            anniversaries = []
+        }
+    }
+
     private func save() {
         let ann = Anniversary(roomID: roomID, 
                             title: newTitle.trimmingCharacters(in: .whitespaces), 
@@ -142,11 +164,59 @@ struct ProfileDetailView: View {
         newTitle = ""
         newDate = Date()
         newRepeatType = .none
+        loadAnniversaries() // リストを更新
     }
 
     private func delete(_ ann: Anniversary) {
         modelContext.delete(ann)
         if let rec = ann.ckRecordName { Task { await CKSync.deleteAnniversary(recordName: rec) } }
+        loadAnniversaries() // リストを更新
+    }
+    
+    private func shareChat() {
+        Task {
+            guard let viewController = InvitationManager.shared.getCurrentViewController() else {
+                log("Could not get current view controller", category: "ProfileDetailView")
+                return
+            }
+            
+            // まず既存の招待URLを再共有を試行
+            await InvitationManager.shared.reshareExistingInvitation(
+                roomID: roomID,
+                from: viewController
+            )
+            
+            // エラーが発生した場合は新しい招待を作成
+            if InvitationManager.shared.lastError != nil {
+                log("No existing share found, creating new invitation", category: "ProfileDetailView")
+                await InvitationManager.shared.createAndShareInvitation(
+                    for: chatRoom.remoteUserID,
+                    from: viewController
+                )
+            }
+        }
+    }
+
+    private var settingsSection: some View {
+        Section(header: Text("設定")) {
+            Toggle("画像を自動ダウンロード", isOn: Binding(
+                get: { chatRoom.autoDownloadImages },
+                set: { newValue in
+                    chatRoom.autoDownloadImages = newValue
+                    try? modelContext.save()
+                }
+            ))
+            
+            Button(action: shareChat) {
+                HStack {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundColor(.blue)
+                    Text("チャットを招待")
+                        .foregroundColor(.blue)
+                    Spacer()
+                }
+            }
+        }
     }
 
     private var dateFormatter: DateFormatter {

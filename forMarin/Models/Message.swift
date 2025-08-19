@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import CloudKit
 
 @Model
 final class Message {
@@ -49,5 +50,126 @@ final class Message {
         self.reactionEmoji = reactionEmoji
         self.assetPath = assetPath
         self.ckRecordName = ckRecordName
+    }
+}
+
+// MARK: - CloudKit Extensions
+extension Message {
+    static let recordType = "CD_Message"
+    
+    /// Converts this Message to a CKRecord for CloudKit synchronization
+    var cloudKitRecord: CKRecord {
+        let recordID = CKRecord.ID(recordName: ckRecordName ?? UUID().uuidString)
+        let record = CKRecord(recordType: Message.recordType, recordID: recordID)
+        
+        record["roomID"] = roomID as CKRecordValue
+        record["senderID"] = senderID as CKRecordValue
+        record["body"] = (body ?? "") as CKRecordValue
+        record["createdAt"] = createdAt as CKRecordValue
+        record["isSent"] = isSent as CKRecordValue
+        record["reactions"] = (reactionEmoji ?? "") as CKRecordValue
+        
+        // Handle asset attachment
+        if let assetPath = assetPath, FileManager.default.fileExists(atPath: assetPath) {
+            let assetURL = URL(fileURLWithPath: assetPath)
+            record["asset"] = CKAsset(fileURL: assetURL)
+        }
+        
+        return record
+    }
+    
+    /// Creates a Message from a CKRecord
+    convenience init?(from record: CKRecord) {
+        guard record.recordType == Message.recordType,
+              let roomID = record["roomID"] as? String,
+              let senderID = record["senderID"] as? String,
+              let createdAt = record["createdAt"] as? Date else {
+            return nil
+        }
+        
+        let body = record["body"] as? String
+        let isSent = record["isSent"] as? Bool ?? true
+        let reactions = record["reactions"] as? String
+        var assetPath: String?
+        
+        // Handle asset download
+        if let asset = record["asset"] as? CKAsset,
+           let fileURL = asset.fileURL {
+            let localURL = AttachmentManager.makeFileURL(ext: fileURL.pathExtension)
+            do {
+                if !FileManager.default.fileExists(atPath: localURL.path) {
+                    try FileManager.default.copyItem(at: fileURL, to: localURL)
+                }
+                assetPath = localURL.path
+            } catch {
+                log("Failed to copy asset: \(error)", category: "Message")
+            }
+        }
+        
+        self.init(
+            roomID: roomID,
+            senderID: senderID,
+            body: body,
+            assetPath: assetPath,
+            ckRecordName: record.recordID.recordName,
+            createdAt: createdAt,
+            isSent: isSent,
+            reactionEmoji: reactions
+        )
+    }
+    
+    /// Updates this Message with data from a CKRecord (for conflict resolution)
+    func update(from record: CKRecord) {
+        guard record.recordType == Message.recordType else { return }
+        
+        if let body = record["body"] as? String {
+            self.body = body
+        }
+        
+        if let reactions = record["reactions"] as? String {
+            self.reactionEmoji = reactions
+        }
+        
+        if let isSent = record["isSent"] as? Bool {
+            self.isSent = isSent
+        }
+        
+        // Update record name if needed
+        if ckRecordName != record.recordID.recordName {
+            ckRecordName = record.recordID.recordName
+        }
+        
+        // Handle asset updates
+        if let asset = record["asset"] as? CKAsset,
+           let fileURL = asset.fileURL {
+            let localURL = AttachmentManager.makeFileURL(ext: fileURL.pathExtension)
+            do {
+                if !FileManager.default.fileExists(atPath: localURL.path) {
+                    try FileManager.default.copyItem(at: fileURL, to: localURL)
+                    assetPath = localURL.path
+                }
+            } catch {
+                log("Failed to update asset: \(error)", category: "Message")
+            }
+        }
+    }
+    
+    /// Validates if the message is ready for CloudKit sync
+    var isValidForSync: Bool {
+        return !roomID.isEmpty && !senderID.isEmpty && (body != nil || assetPath != nil)
+    }
+    
+    /// Creates a conflict-free record name based on message properties
+    func generateRecordName() -> String {
+        if let existingName = ckRecordName {
+            return existingName
+        }
+        
+        // Generate deterministic record name from message properties
+        let timestamp = Int(createdAt.timeIntervalSince1970 * 1000)
+        let recordName = "\(roomID)_\(senderID)_\(timestamp)_\(id.uuidString.prefix(8))"
+        
+        self.ckRecordName = recordName
+        return recordName
     }
 } 

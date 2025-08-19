@@ -35,6 +35,9 @@ struct DualCamRecorderView: View {
     @State private var previewImage: UIImage?
     @State private var previewVideoURL: URL?
     @State private var videoPlayer: AVPlayer?
+    
+    // ズーム管理
+    @State private var selectedZoom: Double = 0.5
 
     private var dragProgress: CGFloat {
         let dy = abs(dragState.height)
@@ -105,8 +108,8 @@ struct DualCamRecorderView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
                                 .background(Color.purple.opacity(0.5)) // デバッグ用背景色
                                 .onAppear {
-                                    print("DualCamRecorderView: VideoPlayer appeared with URL: \(videoURL)")
-                                    print("DualCamRecorderView: Video file exists: \(FileManager.default.fileExists(atPath: videoURL.path))")
+                                    log("VideoPlayer appeared with URL: \(videoURL)", category: "DualCamRecorderView")
+                                    log("Video file exists: \(FileManager.default.fileExists(atPath: videoURL.path))", category: "DualCamRecorderView")
                                     player.play()
                                 }
                                 .onDisappear {
@@ -148,6 +151,17 @@ struct DualCamRecorderView: View {
                 .frame(width: previewWidth, height: previewHeight)
 
                 Spacer()
+
+                // ズーム選択UI（プレビューモードでないときのみ表示）
+                if !isInPreviewMode && !recorder.availableZoomFactors.isEmpty {
+                    ZoomSelectorView(
+                        selectedZoom: $selectedZoom,
+                        availableZooms: recorder.availableZoomFactors
+                    ) { zoom in
+                        handleZoomChange(zoom)
+                    }
+                    .padding(.bottom, 20)
+                }
 
                 // 録画タイマー（録画中のみ表示）
                 if recorder.state == .recording {
@@ -247,11 +261,11 @@ struct DualCamRecorderView: View {
         .task {
             Task {
                 do {
-                    // print("DualCamRecorderView: Starting recorder session...")
+                    // log("Starting recorder session...", category: "DualCamRecorderView")
                     try await recorder.startSession()
-                    // print("DualCamRecorderView: Session started successfully")
+                    // log("Session started successfully", category: "DualCamRecorderView")
                 } catch {
-                    print("DualCamRecorderView: Failed to start session: \(error)")
+                    log("Failed to start session: \(error)", category: "DualCamRecorderView")
                     errorMessage = error.localizedDescription
                     showErrorAlert = true
                 }
@@ -259,6 +273,9 @@ struct DualCamRecorderView: View {
         }
         .onChange(of: recorder.state) { _, newState in
             // 録画終了時の処理は削除（isVideoModeをリセットしない）
+        }
+        .onChange(of: recorder.currentZoomFactor) { _, newZoom in
+            selectedZoom = newZoom
         }
         // エラーダイアログ
         .alert("エラー", isPresented: $showErrorAlert) {
@@ -273,29 +290,29 @@ struct DualCamRecorderView: View {
     // MARK: - プレビューモード管理
     
     private func enterPreviewMode(with url: URL, isVideo: Bool) {
-        // print("DualCamRecorderView: Entering preview mode, isVideo: \(isVideo), URL: \(url)")
-        // print("DualCamRecorderView: File exists: \(FileManager.default.fileExists(atPath: url.path))")
+        // log("Entering preview mode, isVideo: \(isVideo), URL: \(url)", category: "DualCamRecorderView")
+        // log("File exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DualCamRecorderView")
         // let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-        // print("DualCamRecorderView: File size: \(fileSize)")
+        // log("File size: \(fileSize)", category: "DualCamRecorderView")
         
         if isVideo {
             previewVideoURL = url
             previewImage = nil
             videoPlayer = AVPlayer(url: url)
-            // print("DualCamRecorderView: Set previewVideoURL to: \(url)")
-            // print("DualCamRecorderView: Created AVPlayer for video")
+            // log("Set previewVideoURL to: \(url)", category: "DualCamRecorderView")
+            // log("Created AVPlayer for video", category: "DualCamRecorderView")
         } else {
             previewImage = UIImage(contentsOfFile: url.path)
             previewVideoURL = nil
             videoPlayer = nil
-            print("DualCamRecorderView: Set previewImage, size: \(previewImage?.size ?? .zero)")
+            log("Set previewImage, size: \(previewImage?.size ?? .zero)", category: "DualCamRecorderView")
         }
         isInPreviewMode = true
-        // print("DualCamRecorderView: Preview mode entered, isInPreviewMode: \(isInPreviewMode)")
+        // log("Preview mode entered, isInPreviewMode: \(isInPreviewMode)", category: "DualCamRecorderView")
     }
     
     private func exitPreviewMode() {
-        print("DualCamRecorderView: Exiting preview mode")
+        log("Exiting preview mode", category: "DualCamRecorderView")
         
         // 動画プレビューを閉じた場合はチャットに戻る
         if previewVideoURL != nil {
@@ -313,23 +330,23 @@ struct DualCamRecorderView: View {
     }
     
     private func handleSend() {
-        // print("DualCamRecorderView: handleSend called. isInPreviewMode: \(isInPreviewMode)")
+        // log("handleSend called. isInPreviewMode: \(isInPreviewMode)", category: "DualCamRecorderView")
         if let videoURL = previewVideoURL {
-            // print("DualCamRecorderView: Sending video: \(videoURL)")
+            // log("Sending video: \(videoURL)", category: "DualCamRecorderView")
             saveAndPostVideo(url: videoURL)
             dismiss()
         } else if let image = previewImage {
-            print("DualCamRecorderView: Sending image.")
+            log("Sending image.", category: "DualCamRecorderView")
             Task {
                 if let photoURL = saveImageToTempFile(image) {
                     saveAndPostPhoto(url: photoURL)
                     dismiss()
                 } else {
-                    print("DualCamRecorderView: Failed to save image to temp file for sending.")
+                    log("Failed to save image to temp file for sending.", category: "DualCamRecorderView")
                 }
             }
         } else {
-            print("DualCamRecorderView: handleSend called but no videoURL or image found.")
+            log("handleSend called but no videoURL or image found.", category: "DualCamRecorderView")
         }
     }
     
@@ -366,13 +383,13 @@ struct DualCamRecorderView: View {
     }
     
     private func saveAndPostVideo(url: URL) {
-        print("[DEBUG] DualCamRecorderView: saveAndPostVideo called for URL: \(url)")
-        print("[DEBUG] DualCamRecorderView: File exists: \(FileManager.default.fileExists(atPath: url.path))")
+        log("DualCamRecorderView: saveAndPostVideo called for URL: \(url)", category: "DEBUG")
+        log("DualCamRecorderView: File exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DEBUG")
         
         // ファイルサイズをチェック
         if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
            let fileSize = attributes[.size] as? Int64 {
-            print("[DEBUG] DualCamRecorderView: Video file size: \(fileSize) bytes (\(Double(fileSize) / 1024 / 1024) MB)")
+            log("DualCamRecorderView: Video file size: \(fileSize) bytes (\(Double(fileSize) / 1024 / 1024) MB)", category: "DEBUG")
         }
         
         // 写真ライブラリへ保存 (失敗しても送信は継続)
@@ -381,17 +398,17 @@ struct DualCamRecorderView: View {
                 try await PHPhotoLibrary.shared().performChanges {
                     PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
                 }
-                print("[DEBUG] DualCamRecorderView: Video saved to photo library.")
+                log("DualCamRecorderView: Video saved to photo library.", category: "DEBUG")
             } catch {
-                print("[DEBUG] DualCamRecorderView: Failed to save video to photo library: \(error.localizedDescription)")
+                log("DualCamRecorderView: Failed to save video to photo library: \(error.localizedDescription)", category: "DEBUG")
             }
         }
         // ChatView へ通知
-        print("[DEBUG] DualCamRecorderView: Posting .didFinishDualCamRecording notification")
+        log("DualCamRecorderView: Posting .didFinishDualCamRecording notification", category: "DEBUG")
         NotificationCenter.default.post(name: .didFinishDualCamRecording,
                                         object: nil,
                                         userInfo: ["videoURL": url])
-        print("[DEBUG] DualCamRecorderView: Posted .didFinishDualCamRecording notification.")
+        log("DualCamRecorderView: Posted .didFinishDualCamRecording notification.", category: "DEBUG")
     }
     
     private func saveAndPostPhoto(url: URL) {
@@ -427,5 +444,11 @@ struct DualCamRecorderView: View {
         } else {
             return 1.0
         }
+    }
+    
+    // ズーム変更ハンドラ
+    private func handleZoomChange(_ zoom: Double) {
+        log("Zoom changed to \(zoom)", category: "DualCamRecorderView")
+        recorder.setZoomFactor(zoom)
     }
 } 

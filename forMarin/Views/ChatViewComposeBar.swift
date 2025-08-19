@@ -27,12 +27,6 @@ extension ChatView {
                 Image(systemName: "photo.on.rectangle.angled")
                     .font(.system(size: 24))
                     .foregroundColor(.accentColor)
-                    .overlay(
-                        Image(systemName: "video")
-                            .font(.system(size: 10))
-                            .foregroundColor(.accentColor)
-                            .offset(x: 8, y: -8)
-                    )
             }
             .buttonStyle(.plain)
             .onChange(of: photosPickerItems) { _, _ in sendSelectedMedia() }

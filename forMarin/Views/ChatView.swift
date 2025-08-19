@@ -8,13 +8,15 @@ import PhotosUI
 import CloudKit
 import AVKit
 
+
+
 struct ChatView: View {
     let chatRoom: ChatRoom
     @Environment(\.dismiss) var dismiss
     
     // In a production app roomID should be deterministic hash of both users.
     var roomID: String { chatRoom.roomID }
-    let myID: String = UIDevice.current.identifierForVendor?.uuidString ?? "me"
+    @State var myID: String = ""
 
     // 相手ユーザー ID をヘッダーに表示
     var remoteUserID: String { chatRoom.remoteUserID }
@@ -22,8 +24,6 @@ struct ChatView: View {
     // 最近使った絵文字を保存（最大3件）
     // デフォルトで 3 つの絵文字をプリセット（初回起動時のみ表示用）
     @AppStorage("recentEmojis") var recentEmojisString: String = "😀,👍,🎉"
-    // ユーザー設定: 受信画像を写真ライブラリへ自動保存するか
-    @AppStorage("autoDownloadImages") var autoDownloadImages: Bool = false
 
     // MCEmojiPicker 表示フラグ
     @State var isEmojiPickerShown: Bool = false
@@ -36,22 +36,22 @@ struct ChatView: View {
         recentEmojisString.split(separator: ",").map(String.init)
     }
 
-    @Query var messages: [Message]
+    // MessageStore for real-time sync
+    @State var messageStore: MessageStore?
     
     // Anniversary countdown (dynamic)  
     @Query var anniversaries: [Anniversary]
     
+    // Messages from MessageStore
+    var messages: [Message] {
+        messageStore?.messages ?? []
+    }
+    
     init(chatRoom: ChatRoom) {
         self.chatRoom = chatRoom
-        let roomID = chatRoom.roomID
         
-        self._messages = Query(filter: #Predicate<Message> { message in
-            message.roomID == roomID
-        }, sort: \.createdAt)
-        
-        self._anniversaries = Query(filter: #Predicate<Anniversary> { anniversary in
-            anniversary.roomID == roomID
-        }, sort: \.date)
+        // Use a simple query without predicate to avoid macro issues
+        self._anniversaries = Query(sort: \.date)
     }
     
     @Environment(\.modelContext) var modelContext
@@ -68,6 +68,7 @@ struct ChatView: View {
     // --- Image preview ---
     @State var previewImages: [UIImage] = []
     @State var previewVideos: [URL]? = nil
+    @State var previewMediaItems: [MediaItem] = []
     @State var previewStartIndex: Int = 0
     @State var isPreviewShown: Bool = false
 
@@ -91,9 +92,14 @@ struct ChatView: View {
     
     @State var showProfileSheet: Bool = false
     
+    // Filtered anniversaries for current room
+    var roomAnniversaries: [Anniversary] {
+        anniversaries.filter { $0.roomID == roomID }
+    }
+    
     var nextAnniversary: (anniversary: Anniversary, nextDate: Date)? {
         let today = Date()
-        let sortedByNextOccurrence = anniversaries.compactMap { anniversary in
+        let sortedByNextOccurrence = roomAnniversaries.compactMap { anniversary in
             (anniversary: anniversary, nextDate: anniversary.nextOccurrence(from: today))
         }.sorted { $0.nextDate < $1.nextDate }
         
@@ -156,6 +162,19 @@ struct ChatView: View {
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 HStack {
+                    #if DEBUG
+                    Button(action: {
+                        log("Manual database check requested", category: "DEBUG")
+                        messageStore?.debugPrintEntireDatabase()
+                        messageStore?.debugSearchForMessage(containing: "たああ")
+                        messageStore?.debugSearchForMessage(containing: "たあああ")
+                        messageStore?.refresh()
+                    }) {
+                        Image(systemName: "magnifyingglass.circle")
+                            .foregroundColor(.blue)
+                    }
+                    #endif
+                    
                     FaceTimeAudioButton(callee: remoteUserID)
                     FaceTimeButton(callee: remoteUserID)
                 }
@@ -168,17 +187,31 @@ struct ChatView: View {
             }
         }
         .fullScreenCover(isPresented: $isPreviewShown) {
-            FullScreenPreviewView(
-                images: previewImages,
-                                  startIndex: previewStartIndex,
-                onDismiss: { isPreviewShown = false },
-                namespace: heroNS,
-                geometryIDs: previewImages.enumerated().map { index, _ in
-                    // 単一画像の場合はassetPath、複数画像の場合はindexベースのID
-                    previewImages.count == 1 ? heroImageID : "preview_\(index)"
-                },
-                videos: previewVideos
-            )
+            if !previewMediaItems.isEmpty {
+                // 画像・動画混在プレビュー
+                FullScreenPreviewView(
+                    images: [], // 空配列（mediaItemsを使用）
+                    startIndex: previewStartIndex,
+                    onDismiss: { isPreviewShown = false },
+                    namespace: heroNS,
+                    geometryIDs: previewMediaItems.enumerated().map { index, _ in
+                        "preview_\(index)"
+                    },
+                    mediaItems: previewMediaItems
+                )
+            } else {
+                // 従来の画像のみプレビュー
+                FullScreenPreviewView(
+                    images: previewImages,
+                    startIndex: previewStartIndex,
+                    onDismiss: { isPreviewShown = false },
+                    namespace: heroNS,
+                    geometryIDs: previewImages.enumerated().map { index, _ in
+                        // 単一画像の場合はassetPath、複数画像の場合はindexベースのID
+                        previewImages.count == 1 ? heroImageID : "preview_\(index)"
+                    }
+                )
+            }
         }
         .overlay {
             if showHero, let img = heroImage {
@@ -205,45 +238,98 @@ struct ChatView: View {
             DualCamRecorderView()
         }
         .sheet(isPresented: $showProfileSheet) {
-            ProfileDetailView(partnerName: partnerName.isEmpty ? remoteUserID : partnerName, partnerAvatar: partnerAvatar, roomID: roomID)
+            ProfileDetailView(chatRoom: chatRoom, partnerAvatar: partnerAvatar)
         }
         .onChange(of: pickedEmoji) { newValue, _ in
             handleEmojiSelection(newValue)
         }
         .onAppear {
+            // Initialize MessageStore with Environment's modelContext if not already initialized
+            if messageStore == nil {
+                messageStore = MessageStore(modelContext: modelContext, roomID: roomID)
+                log("ChatView: Initialized MessageStore with Environment modelContext", category: "DEBUG")
+                log("ChatView: MessageStore ModelContext: \(ObjectIdentifier(modelContext))", category: "DEBUG")
+                
+                // Force refresh to ensure UI-DB sync
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    messageStore?.refresh()
+                    log("ChatView: Auto-refresh triggered after MessageStore initialization", category: "DEBUG")
+                }
+            } else {
+                // MessageStore already exists, just refresh
+                messageStore?.refresh()
+                log("ChatView: Refreshing existing MessageStore", category: "DEBUG")
+                log("ChatView: MessageStore ModelContainer: \(ObjectIdentifier(modelContext.container))", category: "DEBUG")
+            }
+            
             handleViewAppearance()
             requestChatPermissions()
+            
+            // CloudKit UserIDを取得してmyIDに設定
+            Task {
+                if let userID = CloudKitChatManager.shared.currentUserID {
+                    myID = userID
+                    log("ChatView: myID set to CloudKit userID: \(userID)", category: "DEBUG")
+                } else {
+                    // CloudKitChatManagerが初期化中の場合は待つ
+                    while !CloudKitChatManager.shared.isInitialized {
+                        try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒待機
+                    }
+                    if let userID = CloudKitChatManager.shared.currentUserID {
+                        myID = userID
+                        log("ChatView: myID set to CloudKit userID (after init): \(userID)", category: "DEBUG")
+                    } else {
+                        // フォールバック: デバイスIDを使用
+                        myID = UIDevice.current.identifierForVendor?.uuidString ?? "unknown-device"
+                        log("ChatView: myID fallback to device ID: \(myID)", category: "DEBUG")
+                    }
+                }
+            }
         }
-        .onChange(of: messages.count) { _, _ in
-            if autoDownloadImages {
+        .onChange(of: messages.count) { _, newCount in
+            // 統合されたメッセージ数変更処理
+            if chatRoom.autoDownloadImages {
                 autoDownloadNewImages()
             }
+            handleMessagesCountChange(newCount)
         }
         .onDisappear {
             P2PController.shared.close()
         }
-        .onChange(of: messages.count) { _, newCount in
-            handleMessagesCountChange(newCount)
-        }
         .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamRecording)) { notif in
-            print("[DEBUG] ChatView: Received .didFinishDualCamRecording notification")
+            log("ChatView: Received .didFinishDualCamRecording notification", category: "DEBUG")
             if let url = notif.userInfo?["videoURL"] as? URL {
-                print("[DEBUG] ChatView: Video URL from notification: \(url)")
-                print("[DEBUG] ChatView: Video file exists: \(FileManager.default.fileExists(atPath: url.path))")
+                log("ChatView: Video URL from notification: \(url)", category: "DEBUG")
+                log("ChatView: Video file exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DEBUG")
                 insertVideoMessage(url)
             } else {
-                print("[DEBUG] ChatView: No video URL found in notification userInfo")
+                log("ChatView: No video URL found in notification userInfo", category: "DEBUG")
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamPhoto)) { notif in
-            print("[DEBUG] ChatView: Received .didFinishDualCamPhoto notification")
+            log("ChatView: Received .didFinishDualCamPhoto notification", category: "DEBUG")
             if let url = notif.userInfo?["photoURL"] as? URL {
-                print("[DEBUG] ChatView: Photo URL from notification: \(url)")
-                print("[DEBUG] ChatView: Photo file exists: \(FileManager.default.fileExists(atPath: url.path))")
+                log("ChatView: Photo URL from notification: \(url)", category: "DEBUG")
+                log("ChatView: Photo file exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DEBUG")
                 insertPhotoMessage(url)
             } else {
-                print("[DEBUG] ChatView: No photo URL found in notification userInfo")
+                log("ChatView: No photo URL found in notification userInfo", category: "DEBUG")
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RequestDatabaseDump"))) { notif in
+            log("ChatView: Received RequestDatabaseDump notification", category: "DEBUG")
+            if let source = notif.userInfo?["source"] as? String {
+                log("ChatView: Database dump requested by: \(source)", category: "DEBUG")
+            }
+            
+            // MessageStoreのデバッグ機能を実行
+            messageStore?.debugPrintEntireDatabase()
+            messageStore?.debugSearchForMessage(containing: "たああ")
+            messageStore?.debugSearchForMessage(containing: "たあああ")
+            messageStore?.debugSearchForMessage(containing: "メインからサブ")
+            messageStore?.debugSearchForMessage(containing: "サブからメイン")
+            messageStore?.debugSearchForMessage(containing: "サブからのテスト")
+            messageStore?.debugSearchForMessage(containing: "メインからのテスト")
         }
         // 動画プレイヤー解除時に他アプリのオーディオを止めない
         .onChange(of: isVideoPlayerShown) { _, newVal in
@@ -389,7 +475,7 @@ struct ChatView: View {
         
         CalendarWithImagesView(
             imagesByDate: imagesByDate,
-            anniversaries: anniversaries,
+            anniversaries: roomAnniversaries,
             onImageTap: { images, startIndex in
                 previewImages = images
                 previewStartIndex = startIndex
@@ -439,7 +525,7 @@ struct ChatView: View {
     private func monthCalendarView(imagesByDate: [Date: [Message]]) -> some View {
         CalendarWithImagesView(
             imagesByDate: imagesByDate,
-            anniversaries: anniversaries,
+            anniversaries: roomAnniversaries,
             onImageTap: { images, startIndex in
                 previewImages = images
                 previewStartIndex = startIndex
@@ -452,7 +538,7 @@ struct ChatView: View {
     private func yearCalendarView(imagesByDate: [Date: [Message]]) -> some View {
         YearCalendarView(
             imagesByDate: imagesByDate,
-            anniversaries: anniversaries,
+            anniversaries: roomAnniversaries,
             onImageTap: { images, startIndex in
                 previewImages = images
                 previewStartIndex = startIndex
@@ -561,7 +647,7 @@ struct ChatView: View {
             }
             return nil
         }
-        previewImages = images
+        previewImages = images.compactMap { $0 }
         previewStartIndex = imageMessages.firstIndex(of: message) ?? 0
         isPreviewShown = true
     }
@@ -572,9 +658,9 @@ struct ChatView: View {
         Task {
             do {
                 try await PermissionManager.shared.requestChatPermissions()
-                print("[DEBUG] Chat permissions granted successfully")
+                log("Chat permissions granted successfully", category: "DEBUG")
             } catch {
-                print("[DEBUG] Chat permissions denied: \(error.localizedDescription)")
+                log("Chat permissions denied: \(error.localizedDescription)", category: "DEBUG")
                 // 権限が拒否されても、チャット画面は表示を継続
                 // 必要な機能が制限されることをユーザーに後で通知
             }

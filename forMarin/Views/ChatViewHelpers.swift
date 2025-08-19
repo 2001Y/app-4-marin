@@ -10,29 +10,27 @@ extension ChatView {
     
     // MARK: - Actions
     func sendMessage(_ text: String) {
-        let message = Message(roomID: roomID,
-                              senderID: myID,
-                              body: text,
-                              createdAt: .now,
-                              isSent: false)
-        modelContext.insert(message)
+        // Use MessageStore for sending messages
+        guard let messageStore = messageStore else {
+            log("ChatView: MessageStore not initialized, cannot send message", category: "DEBUG")
+            return
+        }
         
-        // ChatRoomの最終メッセージを更新
+        messageStore.sendMessage(text, senderID: myID)
+        
+        // Update ChatRoom's last message info
         chatRoom.lastMessageText = text
         chatRoom.lastMessageDate = Date()
-        
-        Task { @MainActor in
-            if let rec = try? await CKSync.saveMessage(message) {
-                message.ckRecordName = rec
-            }
-            message.isSent = true
-        }
     }
 
     // 編集も含めた送信コミット関数
     func commitSend(with content: String) {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        
+        // 触覚フィードバック
+        let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+        impactFeedback.impactOccurred()
 
         if let target = editingMessage {
             // 既存メッセージを編集
@@ -62,13 +60,17 @@ extension ChatView {
         let items = photosPickerItems
         photosPickerItems = []
 
-        print("[DEBUG] sendSelectedMedia: Processing \(items.count) items")
+        // 触覚フィードバック
+        let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+        impactFeedback.impactOccurred()
+
+        log("sendSelectedMedia: Processing \(items.count) items", category: "DEBUG")
 
         // 各メディアを個別メッセージとして即時送信
         Task { @MainActor in
             for (index, item) in items.enumerated() {
-                print("[DEBUG] sendSelectedMedia: Processing item \(index + 1)")
-                print("[DEBUG] sendSelectedMedia: Supported content types: \(item.supportedContentTypes)")
+                log("sendSelectedMedia: Processing item \(index + 1)", category: "DEBUG")
+                log("sendSelectedMedia: Supported content types: \(item.supportedContentTypes)", category: "DEBUG")
                 
                 // 動画か画像かを判定
                 var isVideo = item.supportedContentTypes.contains(.movie) || 
@@ -77,17 +79,17 @@ extension ChatView {
                              item.supportedContentTypes.contains(UTType.video) ||
                              item.supportedContentTypes.contains(UTType.quickTimeMovie) ||
                              item.supportedContentTypes.contains(UTType.mpeg4Movie)
-                print("[DEBUG] sendSelectedMedia: Is video? \(isVideo)")
+                log("sendSelectedMedia: Is video? \(isVideo)", category: "DEBUG")
                 
                 // 追加の判定: ファイル拡張子ベース
                 if !isVideo {
                     // 動画判定が失敗した場合、ファイル拡張子で再判定
                     for contentType in item.supportedContentTypes {
-                        print("[DEBUG] sendSelectedMedia: Content type: \(contentType)")
+                        log("sendSelectedMedia: Content type: \(contentType)", category: "DEBUG")
                         if contentType.preferredFilenameExtension?.lowercased() == "mov" ||
                            contentType.preferredFilenameExtension?.lowercased() == "mp4" ||
                            contentType.preferredFilenameExtension?.lowercased() == "m4v" {
-                            print("[DEBUG] sendSelectedMedia: Detected video by file extension")
+                            log("sendSelectedMedia: Detected video by file extension", category: "DEBUG")
                             isVideo = true
                             break
                         }
@@ -96,47 +98,47 @@ extension ChatView {
                 
                 if isVideo {
                     // 動画の場合
-                    print("[DEBUG] sendSelectedMedia: Attempting to load video URL")
+                    log("sendSelectedMedia: Attempting to load video URL", category: "DEBUG")
                     do {
                         // まず URL として読み込みを試行
                         if let videoURL = try await item.loadTransferable(type: URL.self) {
-                            print("[DEBUG] sendSelectedMedia: Successfully loaded video URL: \(videoURL)")
-                            print("[DEBUG] sendSelectedMedia: Video file exists: \(FileManager.default.fileExists(atPath: videoURL.path))")
+                            log("sendSelectedMedia: Successfully loaded video URL: \(videoURL)", category: "DEBUG")
+                            log("sendSelectedMedia: Video file exists: \(FileManager.default.fileExists(atPath: videoURL.path))", category: "DEBUG")
                             
                             // ファイルサイズを明示的に取得
                             if let attributes = try? FileManager.default.attributesOfItem(atPath: videoURL.path),
                                let fileSize = attributes[.size] as? Int64 {
-                                print("[DEBUG] sendSelectedMedia: Video file size: \(fileSize) bytes (\(Double(fileSize) / 1024 / 1024) MB)")
+                                log("sendSelectedMedia: Video file size: \(fileSize) bytes (\(Double(fileSize) / 1024 / 1024) MB)", category: "DEBUG")
                             } else {
-                                print("[DEBUG] sendSelectedMedia: Video file size: unknown")
+                                log("sendSelectedMedia: Video file size: unknown", category: "DEBUG")
                             }
                             
                             insertVideoMessage(videoURL)
                         } else {
-                            print("[DEBUG] sendSelectedMedia: URL loading failed, trying Data method")
+                            log("sendSelectedMedia: URL loading failed, trying Data method", category: "DEBUG")
                             
                             // URL での読み込みが失敗した場合、Data として読み込んで一時ファイルに保存
                             if let videoData = try await item.loadTransferable(type: Data.self) {
-                                print("[DEBUG] sendSelectedMedia: Successfully loaded video as Data: \(videoData.count) bytes")
+                                log("sendSelectedMedia: Successfully loaded video as Data: \(videoData.count) bytes", category: "DEBUG")
                                 
                                 // データの先頭バイトをチェックしてファイル形式を推定
                                 let header = videoData.prefix(12)
-                                print("[DEBUG] sendSelectedMedia: Video data header: \(header.map { String(format: "%02X", $0) }.joined())")
+                                log("sendSelectedMedia: Video data header: \(header.map { String(format: "%02X", $0) }.joined())", category: "DEBUG")
                                 
                                 // ファイル拡張子を決定
                                 let fileExtension: String
                                 if header.starts(with: [0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70]) {
                                     fileExtension = "mp4"
-                                    print("[DEBUG] sendSelectedMedia: Detected MP4 format")
+                                    log("sendSelectedMedia: Detected MP4 format", category: "DEBUG")
                                 } else if header.starts(with: [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]) {
                                     fileExtension = "mp4"
-                                    print("[DEBUG] sendSelectedMedia: Detected MP4 format (variant)")
+                                    log("sendSelectedMedia: Detected MP4 format (variant)", category: "DEBUG")
                                 } else if header.starts(with: [0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70]) {
                                     fileExtension = "m4v"
-                                    print("[DEBUG] sendSelectedMedia: Detected M4V format")
+                                    log("sendSelectedMedia: Detected M4V format", category: "DEBUG")
                                 } else {
                                     fileExtension = "mov"
-                                    print("[DEBUG] sendSelectedMedia: Assuming MOV format")
+                                    log("sendSelectedMedia: Assuming MOV format", category: "DEBUG")
                                 }
                                 
                                 // 一時ファイルに保存
@@ -146,69 +148,54 @@ extension ChatView {
                                 
                                 do {
                                     try videoData.write(to: tempURL)
-                                    print("[DEBUG] sendSelectedMedia: Saved video data to temp file: \(tempURL)")
-                                    print("[DEBUG] sendSelectedMedia: Temp file exists: \(FileManager.default.fileExists(atPath: tempURL.path))")
+                                    log("sendSelectedMedia: Saved video data to temp file: \(tempURL)", category: "DEBUG")
+                                    log("sendSelectedMedia: Temp file exists: \(FileManager.default.fileExists(atPath: tempURL.path))", category: "DEBUG")
                                     insertVideoMessage(tempURL)
                                 } catch {
-                                    print("[DEBUG] sendSelectedMedia: Failed to save video data to temp file: \(error)")
+                                    log("sendSelectedMedia: Failed to save video data to temp file: \(error)", category: "DEBUG")
                                 }
                             } else {
-                                print("[DEBUG] sendSelectedMedia: Failed to load video as Data")
+                                log("sendSelectedMedia: Failed to load video as Data", category: "DEBUG")
                             }
                         }
                     } catch {
-                        print("[DEBUG] sendSelectedMedia: Error loading video URL: \(error)")
+                        log("sendSelectedMedia: Error loading video URL: \(error)", category: "DEBUG")
                     }
                 } else {
                     // 画像の場合
-                    print("[DEBUG] sendSelectedMedia: Attempting to load image data")
+                    log("sendSelectedMedia: Attempting to load image data", category: "DEBUG")
                     do {
                         guard let data = try await item.loadTransferable(type: Data.self),
                               let image = UIImage(data: data) else { 
-                            print("[DEBUG] sendSelectedMedia: Failed to load image data")
+                            log("sendSelectedMedia: Failed to load image data", category: "DEBUG")
                             continue 
                         }
                         
-                        print("[DEBUG] sendSelectedMedia: Successfully loaded image data")
+                        log("sendSelectedMedia: Successfully loaded image data", category: "DEBUG")
                         
                         // Save to local cache
                         guard let localURL = AttachmentManager.saveImageToCache(image) else { 
-                            print("[DEBUG] sendSelectedMedia: Failed to save image to cache")
+                            log("sendSelectedMedia: Failed to save image to cache", category: "DEBUG")
                             continue 
                         }
                         
-                        print("[DEBUG] sendSelectedMedia: Successfully saved image to cache: \(localURL)")
+                        log("sendSelectedMedia: Successfully saved image to cache: \(localURL)", category: "DEBUG")
                         
-                        // Create message immediately
-                        let message = Message(roomID: roomID,
-                                            senderID: myID,
-                                            body: nil,
-                                            assetPath: localURL.path,
-                                            createdAt: .now,
-                                            isSent: false)
-                        modelContext.insert(message)
+                        // Use MessageStore for sending image messages
+                        guard let messageStore = messageStore else {
+                            log("ChatView: MessageStore not initialized, cannot send image", category: "DEBUG")
+                            continue
+                        }
                         
-                        print("[DEBUG] sendSelectedMedia: Created image message with ID: \(message.id)")
+                        messageStore.sendImageMessage(image, senderID: myID)
+                        
+                        log("sendSelectedMedia: Sent image message via MessageStore", category: "DEBUG")
                         
                         // ChatRoomの最終メッセージを更新
                         chatRoom.lastMessageText = "📷 写真"
                         chatRoom.lastMessageDate = Date()
-                        
-                        // Upload to CloudKit in background
-                        Task {
-                            print("[DEBUG] sendSelectedMedia: Starting CloudKit upload for image")
-                            if let recName = try? await CKSync.saveImageMessage(image, roomID: roomID, senderID: myID) {
-                                await MainActor.run {
-                                    message.ckRecordName = recName
-                                    message.isSent = true
-                                    print("[DEBUG] sendSelectedMedia: Successfully uploaded image to CloudKit: \(recName)")
-                                }
-                            } else {
-                                print("[DEBUG] sendSelectedMedia: Failed to upload image to CloudKit")
-                            }
-                        }
                     } catch {
-                        print("[DEBUG] sendSelectedMedia: Error processing image: \(error)")
+                        log("sendSelectedMedia: Error processing image: \(error)", category: "DEBUG")
                     }
                 }
             }
@@ -224,81 +211,45 @@ extension ChatView {
     }
 
     func insertVideoMessage(_ url: URL) {
-        print("[DEBUG] insertVideoMessage: Starting with URL: \(url)")
-        print("[DEBUG] insertVideoMessage: File exists: \(FileManager.default.fileExists(atPath: url.path))")
+        log("insertVideoMessage: Starting with URL: \(url)", category: "DEBUG")
+        log("insertVideoMessage: File exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DEBUG")
+        
+        guard let messageStore = messageStore else {
+            log("ChatView: MessageStore not initialized, cannot send video", category: "DEBUG")
+            return
+        }
         
         // 動画圧縮チェック
         let processedURL = AttachmentManager.compressVideoIfNeeded(url) ?? url
-        print("[DEBUG] insertVideoMessage: Using processed URL: \(processedURL)")
+        log("insertVideoMessage: Using processed URL: \(processedURL)", category: "DEBUG")
         
-        // 永続領域へコピー
-        let dstURL = AttachmentManager.makeFileURL(ext: processedURL.pathExtension)
-        print("[DEBUG] insertVideoMessage: Destination URL: \(dstURL)")
+        // Use MessageStore for sending video messages
+        messageStore.sendVideoMessage(processedURL, senderID: myID)
         
-        do {
-            try FileManager.default.copyItem(at: processedURL, to: dstURL)
-            print("[DEBUG] insertVideoMessage: Successfully copied video to destination")
-        } catch {
-            print("[DEBUG] insertVideoMessage: Failed to copy video: \(error)")
-            return
-        }
-
-        let message = Message(roomID: roomID,
-                              senderID: myID,
-                              body: nil,
-                              assetPath: dstURL.path,
-                              createdAt: .now,
-                              isSent: false)
-        modelContext.insert(message)
-        
-        print("[DEBUG] insertVideoMessage: Created video message with ID: \(message.id)")
-        
-        // ChatRoomの最終メッセージを更新
+        // Update ChatRoom's last message info
         chatRoom.lastMessageText = "🎥 動画"
         chatRoom.lastMessageDate = Date()
         
-        Task { @MainActor in
-            print("[DEBUG] insertVideoMessage: Starting CloudKit upload")
-            do {
-                if let recName = try await CKSync.saveVideo(dstURL, roomID: roomID, senderID: myID) {
-                    message.ckRecordName = recName
-                    print("[DEBUG] insertVideoMessage: Successfully uploaded video to CloudKit: \(recName)")
-                } else {
-                    print("[DEBUG] insertVideoMessage: CloudKit upload returned nil record name")
-                }
-                message.isSent = true
-                print("[DEBUG] insertVideoMessage: Video message marked as sent")
-            } catch {
-                print("[DEBUG] insertVideoMessage: Failed to save video to CloudKit: \(error)")
-                message.isSent = false
-            }
-        }
+        log("insertVideoMessage: Video message sent via MessageStore", category: "DEBUG")
     }
     
     func insertPhotoMessage(_ url: URL) {
-        // 永続領域へコピー
-        let dstURL = AttachmentManager.makeFileURL(ext: url.pathExtension)
-        try? FileManager.default.copyItem(at: url, to: dstURL)
-
-        let message = Message(roomID: roomID,
-                              senderID: myID,
-                              body: nil,
-                              assetPath: dstURL.path,
-                              createdAt: .now,
-                              isSent: false)
-        modelContext.insert(message)
+        guard let messageStore = messageStore else {
+            log("ChatView: MessageStore not initialized, cannot send photo", category: "DEBUG")
+            return
+        }
         
-        // ChatRoomの最終メッセージを更新
-        chatRoom.lastMessageText = "📷 写真"
-        chatRoom.lastMessageDate = Date()
-        
-        Task { @MainActor in
-            if let image = UIImage(contentsOfFile: dstURL.path) {
-                if let recName = try? await CKSync.saveImageMessage(image, roomID: roomID, senderID: myID) {
-                    message.ckRecordName = recName
-                }
-            }
-            message.isSent = true
+        // Load image and send via MessageStore
+        if let image = UIImage(contentsOfFile: url.path) {
+            messageStore.sendImageMessage(image, senderID: myID)
+            
+            // Update ChatRoom's last message info
+            chatRoom.lastMessageText = "📷 写真"
+            chatRoom.lastMessageDate = Date()
+            
+            log("insertPhotoMessage: Photo message sent via MessageStore", category: "DEBUG")
+        } else {
+            log("insertPhotoMessage: Failed to load image from URL: \(url)", category: "DEBUG")
         }
     }
 
@@ -307,25 +258,18 @@ extension ChatView {
         guard let target = editingMessage else { return }
         let trimmed = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { editingMessage = nil; return }
-
-        target.body = trimmed
-        target.isSent = false
-        Task { @MainActor in
-            do {
-                if let recName = target.ckRecordName {
-                    try await CKSync.updateMessageBody(recordName: recName, newBody: trimmed)
-                } else {
-                    let recordName = try await CKSync.saveMessage(target)
-                    target.ckRecordName = recordName
-                }
-                target.isSent = true
-            } catch {
-                print("Failed to save message: \(error)")
-                // エラー時は再送信可能にする
-                target.isSent = false
-            }
+        
+        guard let messageStore = messageStore else {
+            log("ChatView: MessageStore not initialized, cannot update message", category: "DEBUG")
+            editingMessage = nil
+            return
         }
+
+        // Use MessageStore for updating messages
+        messageStore.updateMessage(target, newBody: trimmed)
         editingMessage = nil
+        
+        log("commitInlineEdit: Message updated via MessageStore", category: "DEBUG")
     }
 
     func autoDownloadNewImages() {
@@ -341,7 +285,7 @@ extension ChatView {
                     if !UserDefaults.standard.bool(forKey: "downloaded_\(imageName)") {
                         UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
                         UserDefaults.standard.set(true, forKey: "downloaded_\(imageName)")
-                        print("[DEBUG] Auto-downloaded image: \(imageName)")
+                        log("Auto-downloaded image: \(imageName)", category: "DEBUG")
                     }
                 }
             }
@@ -381,7 +325,7 @@ extension ChatView {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             if settings.authorizationStatus == .notDetermined {
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-                    print("[DEBUG] notification permission granted = \(granted)")
+                    log("notification permission granted = \(granted)", category: "DEBUG")
                 }
             }
         }
@@ -390,11 +334,25 @@ extension ChatView {
             recentEmojisString = "😀,👍,🎉"
         }
         P2PController.shared.startIfNeeded(roomID: roomID, myID: myID)
-        CKSync.modelContext = modelContext
 
-        print("[DEBUG] ChatView appeared. messages = \(messages.count)")
+        // Refresh MessageStore for real-time sync
+        messageStore?.refresh()
+        log("ChatView appeared. MessageStore refreshed", category: "DEBUG")
         
-        if autoDownloadImages {
+        // デバッグ：ビュー表示時にDB全体をチェック
+        #if DEBUG
+        if let store = messageStore {
+            log("=== ChatView: Full DB Debug Check ===", category: "DEBUG")
+            store.debugPrintEntireDatabase()
+            
+            // 特定のメッセージを検索
+            store.debugSearchForMessage(containing: "たああ")
+            store.debugSearchForMessage(containing: "たあああ")
+            log("=== End ChatView Debug Check ===", category: "DEBUG")
+        }
+        #endif
+        
+        if chatRoom.autoDownloadImages {
             autoDownloadNewImages()
         }
         Task {
@@ -410,12 +368,12 @@ extension ChatView {
         // チュートリアルメッセージの表示判定
         if messages.isEmpty {
             let partner = remoteUserID.isEmpty ? "Partner" : remoteUserID
-            print("[DEBUG] Seeding tutorial messages for roomID: \(roomID), myID: \(myID), partner: \(partner)")
+            log("Seeding tutorial messages for roomID: \(roomID), myID: \(myID), partner: \(partner)", category: "DEBUG")
             TutorialDataSeeder.seed(into: modelContext,
                                     roomID: roomID,
                                     myID: myID,
                                     partnerID: partner)
-            print("[DEBUG] Tutorial seeding completed")
+            log("Tutorial seeding completed", category: "DEBUG")
         }
     }
     
@@ -443,20 +401,69 @@ extension ChatView {
                     ForEach(groupedMessages, id: \.id) { group in
                         if group.isImageGroup {
                             imageGroupBubble(for: group)
+                                .id(group.messages.last?.id) // ID for scroll targeting
                         } else {
                             ForEach(group.messages) { message in
                                 bubble(for: message)
+                                    .id(message.id) // ID for scroll targeting
                             }
                         }
                     }
                 }
+                .animation(.easeInOut(duration: 0.2), value: messages.count)
             }
             .scrollDismissesKeyboard(.interactively)
             .dismissKeyboardOnDrag()
-            .onChange(of: messages.last?.id) { _, id in
-                if let id { proxy.scrollTo(id, anchor: .bottom) }
+            .onChange(of: messages.count) { _, _ in
+                // 新しいメッセージのスクロールを最適化
+                if let lastMessage = messages.last {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                    }
+                }
             }
         }
+    }
+    
+
+    
+    // MARK: - Helper Functions
+    private func isImageFile(_ assetPath: String) -> Bool {
+        let ext = URL(fileURLWithPath: assetPath).pathExtension.lowercased()
+        return ["jpg", "jpeg", "png", "heic", "heif", "gif"].contains(ext)
+    }
+    
+    private func isVideoFile(_ assetPath: String) -> Bool {
+        let ext = URL(fileURLWithPath: assetPath).pathExtension.lowercased()
+        return ["mov", "mp4", "m4v", "avi"].contains(ext)
+    }
+    
+    // MARK: - Media Group Helpers
+    @ViewBuilder
+    private func mediaThumbnailView(mediaItem: MediaItem, mediaPath: String, index: Int, groupId: UUID) -> some View {
+        switch mediaItem {
+        case .image(let image):
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 120, height: 120)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .matchedGeometryEffect(id: "\(mediaPath)_group_\(index)_\(groupId)", in: heroNS)
+        case .video(let videoURL):
+            VideoThumbnailView(videoURL: videoURL)
+                .frame(width: 120, height: 120)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .matchedGeometryEffect(id: "\(mediaPath)_group_\(index)_\(groupId)", in: heroNS)
+        }
+    }
+    
+    private func handleMediaGroupTap(allMedia: [(MediaItem, String, Message)], startIndex: Int) {
+        // 画像・動画混在プレビューを起動
+        let mediaItems = allMedia.map { $0.0 }
+        previewMediaItems = mediaItems
+        previewStartIndex = startIndex
+        isPreviewShown = true
     }
     
     // MARK: - Message Grouping
@@ -474,23 +481,25 @@ extension ChatView {
         var lastMessageTime: Date = Date.distantPast
         
         for message in messages {
-            let isImage = message.assetPath != nil
+            let isImage = message.assetPath != nil && isImageFile(message.assetPath!)
+            let isVideo = message.assetPath != nil && isVideoFile(message.assetPath!)
+            let isMedia = isImage || isVideo
             let timeDiff = message.createdAt.timeIntervalSince(lastMessageTime)
             let isSameSender = message.senderID == lastSenderID
             let isWithinTimeWindow = timeDiff < 180 // 3分以内
             
-            if isImage && isSameSender && isWithinTimeWindow && !currentImageGroup.isEmpty {
-                // 既存の画像グループに追加
+            if isMedia && isSameSender && isWithinTimeWindow && !currentImageGroup.isEmpty {
+                // 既存のメディアグループに追加（画像・動画混在）
                 currentImageGroup.append(message)
-            } else if isImage {
-                // 新しい画像グループを開始（まず既存グループを完了）
+            } else if isMedia {
+                // 新しいメディアグループを開始（まず既存グループを完了）
                 if !currentImageGroup.isEmpty {
                     groups.append(MessageGroup(messages: currentImageGroup, isImageGroup: true, senderID: currentImageGroup.first?.senderID ?? ""))
                     currentImageGroup = []
                 }
                 currentImageGroup.append(message)
             } else {
-                // テキストメッセージの場合、画像グループを完了して単独メッセージを追加
+                // テキストメッセージの場合、メディアグループを完了して単独メッセージを追加
                 if !currentImageGroup.isEmpty {
                     groups.append(MessageGroup(messages: currentImageGroup, isImageGroup: true, senderID: currentImageGroup.first?.senderID ?? ""))
                     currentImageGroup = []
@@ -510,22 +519,23 @@ extension ChatView {
         return groups
     }
     
-    // MARK: - Image Group Bubble
+    // MARK: - Media Group Bubble (Image + Video)
     @ViewBuilder
     func imageGroupBubble(for group: MessageGroup) -> some View {
-        let allImages = group.messages.compactMap { message -> (UIImage, String, Message)? in
+        let allMedia = group.messages.compactMap { message -> (MediaItem, String, Message)? in
             if let assetPath = message.assetPath {
-                // ファイル拡張子をチェックして、画像ファイルのみを処理
                 let ext = URL(fileURLWithPath: assetPath).pathExtension.lowercased()
                 if ["jpg", "jpeg", "png", "heic", "heif", "gif"].contains(ext),
                    let image = UIImage(contentsOfFile: assetPath) {
-                    return (image, assetPath, message)
+                    return (.image(image), assetPath, message)
+                } else if ["mov", "mp4", "m4v", "avi"].contains(ext) {
+                    return (.video(URL(fileURLWithPath: assetPath)), assetPath, message)
                 }
             }
             return nil
         }
         
-        if allImages.isEmpty {
+        if allMedia.isEmpty {
             EmptyView()
         } else {
             VStack(alignment: group.senderID == myID ? .trailing : .leading, spacing: 4) {
@@ -536,21 +546,13 @@ extension ChatView {
                 
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 8) {
-                        ForEach(Array(allImages.enumerated()), id: \.offset) { index, imageData in
-                            let (image, imagePath, _) = imageData
+                        ForEach(Array(allMedia.enumerated()), id: \.offset) { index, mediaData in
+                            let (mediaItem, mediaPath, _) = mediaData
                             Button {
-                                // 全ての画像でプレビューを起動
-                                previewImages = allImages.map { $0.0 }
-                                previewStartIndex = index
-                                isPreviewShown = true
+                                // 全てのメディアでプレビューを起動
+                                handleMediaGroupTap(allMedia: allMedia, startIndex: index)
                             } label: {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: 120, height: 120)
-                                    .clipped()
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    .matchedGeometryEffect(id: "\(imagePath)_group_\(index)_\(group.id)", in: heroNS)
+                                mediaThumbnailView(mediaItem: mediaItem, mediaPath: mediaPath, index: index, groupId: group.id)
                             }
                         }
                     }
@@ -585,6 +587,10 @@ extension ChatView {
             // EmojisReactionKit for partner image groups
             if group.senderID != myID, let firstMessage = group.messages.first {
                 ReactionKitWrapperView(message: firstMessage) { emoji in
+                    // 触覚フィードバック
+                    let impactFeedback = UIImpactFeedbackGenerator(style: .light)
+                    impactFeedback.impactOccurred()
+                    
                     // Add reaction to all messages in group
                     for message in group.messages {
                         var reactions = message.reactionEmoji ?? ""
@@ -592,7 +598,7 @@ extension ChatView {
                         message.reactionEmoji = reactions
                         // Sync to CloudKit
                         if let recName = message.ckRecordName {
-                            Task { try? await CKSync.updateReaction(recordName: recName, emoji: reactions) }
+                            Task { try? await CKSync.addReaction(recordName: recName, emoji: emoji) }
                         }
                     }
                     updateRecentEmoji(emoji)

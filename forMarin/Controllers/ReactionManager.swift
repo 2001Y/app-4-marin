@@ -36,7 +36,16 @@ class ReactionManager: ObservableObject {
         
         do {
             // CloudKitでリアクションを追加
-            try await CloudKitChatManager.shared.addReactionToMessage(recordName: recordName, emoji: emoji)
+            guard let currentUserID = CloudKitChatManager.shared.currentUserID else {
+                log("Cannot add reaction: user not authenticated", category: "ReactionManager")
+                return false
+            }
+            try await CloudKitChatManager.shared.addReactionToMessage(
+                messageRecordName: recordName,
+                roomID: message.roomID,
+                emoji: emoji,
+                userID: currentUserID
+            )
             
             // 使用頻度を更新
             incrementEmojiUsage(emoji)

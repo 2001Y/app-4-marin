@@ -25,10 +25,16 @@ extension Error {
 @available(iOS 17.0, *)
 @MainActor
 class MessageSyncService: NSObject, ObservableObject {
+
+    // Reaction update key for Hashable Set
+    private struct ReactionKey: Hashable {
+        let roomID: String
+        let messageRecordName: String
+    }
     static let shared = MessageSyncService()
     
-    private let container = CKContainer(identifier: "iCloud.forMarin-test")
-    private let privateDB: CKDatabase
+    let container = CKContainer(identifier: "iCloud.forMarin-test")
+    let privateDB: CKDatabase
     private let sharedDB: CKDatabase
     
     // Combine Publishers for reactive updates
@@ -36,6 +42,8 @@ class MessageSyncService: NSObject, ObservableObject {
     let messageDeleted = PassthroughSubject<String, Never>()
     let syncError = PassthroughSubject<Error, Never>()
     let syncStatusChanged = PassthroughSubject<Bool, Never>()
+    // Reactions updated for a specific message in a specific room
+    let reactionsUpdated = PassthroughSubject<(roomID: String, messageRecordName: String), Never>()
     
     // Queue for offline messages
     private var offlineMessageQueue: [Message] = []
@@ -89,9 +97,8 @@ class MessageSyncService: NSObject, ObservableObject {
     // MARK: - CKSyncEngine Setup
     
     private func setupSyncEngine() {
-        // For iOS 17+, we'll use a simpler approach initially
-        // CKSyncEngine requires more complex delegate implementation
-        log("Using legacy CloudKit sync for now", category: "MessageSyncService")
+        // iOS 17+ 前提: シンプルなDBサブスクリプション＋差分同期パイプライン
+        log("Using CloudKit DB subscriptions + delta sync (iOS17+)", category: "MessageSyncService")
         
         // パフォーマンス最適化：保存されたトークンを復元
         loadPersistedTokens()
@@ -293,37 +300,115 @@ class MessageSyncService: NSObject, ObservableObject {
         log("🔧 Maintenance cleanup completed (no strategy cache in new implementation)", category: "MessageSyncService")
     }
     
+    /// 🌟 [IDEAL UPLOAD] メッセージ送信（長時間実行アップロード対応）
     func sendMessage(_ message: Message) {
         guard !isSyncDisabled else {
             log("🛑 Sync is disabled, skipping message send", category: "MessageSyncService")
             return
         }
         
-        Task {
-            do {
-                let record = createCKRecord(from: message)
-                let savedRecord = try await privateDB.save(record)
-                await MainActor.run {
-                    message.ckRecordName = savedRecord.recordID.recordName
-                    message.isSent = true
+        // 🌟 [IDEAL UPLOAD] async実行で長時間実行アップロード対応
+        self.sendMessageAsync(message)
+    }
+    
+    /// 🌟 [IDEAL UPLOAD] 非同期メッセージ送信実装
+    private func sendMessageAsync(_ message: Message) {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.performMessageSend(message)
+        }
+    }
+    
+    /// 🌟 [IDEAL UPLOAD] メッセージ送信の実際の実装
+    private func performMessageSend(_ message: Message) async {
+        do {
+            // 送信先DBとゾーンを解決（オーナー=private / 参加者=shared）
+            let (targetDB, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: message.roomID)
+            let record = createCKRecord(from: message, zoneID: zoneID)
+            
+            // 🌟 [IDEAL UPLOAD] 添付ファイルがある場合は長時間実行アップロードを使用
+            let hasAttachment = record["attachment"] as? CKAsset != nil
+            let savedRecord: CKRecord
+            
+            if hasAttachment {
+                log("📤 [IDEAL UPLOAD] Using CKModifyRecordsOperation.isLongLived for large asset", category: "MessageSyncService")
+                savedRecord = try await performLongLivedUpload(record, in: targetDB)
+            } else {
+                savedRecord = try await targetDB.save(record)
+            }
+            await MainActor.run {
+                message.ckRecordName = savedRecord.recordID.recordName
+                message.isSent = true
+                
+                // CKAssetがある場合はログを出力
+                if let _ = record["attachment"] as? CKAsset {
+                    log("✅ [IDEAL UPLOAD] Message with attachment sent successfully: \(message.id)", category: "MessageSyncService")
+                } else {
                     log("Message sent successfully: \(message.id)", category: "MessageSyncService")
                 }
-            } catch {
-                await MainActor.run {
-                    // スキーマ関連のエラーかチェック
-                    if let ckError = error as? CKError, ckError.code == .invalidArguments {
-                        if ckError.localizedDescription.contains("Unknown field") {
-                            log("⚠️ Schema not ready for message send, message will be queued: \(ckError.localizedDescription)", category: "MessageSyncService")
-                            message.isSent = false
-                            // MessageStoreでリトライされるようにエラーを送信しない
-                            return
-                        }
+            }
+        } catch {
+            await MainActor.run {
+                // スキーマ関連のエラーかチェック
+                if let ckError = error as? CKError, ckError.code == .invalidArguments {
+                    if ckError.localizedDescription.contains("Unknown field") {
+                        log("⚠️ Schema not ready for message send, message will be queued: \(ckError.localizedDescription)", category: "MessageSyncService")
+                        message.isSent = false
+                        // MessageStoreでリトライされるようにエラーを送信しない
+                        return
                     }
-                    
-                    syncError.send(error)
-                    log("Failed to send message: \(error)", category: "MessageSyncService")
+                }
+                
+                syncError.send(error)
+                log("Failed to send message: \(error)", category: "MessageSyncService")
+            }
+        }
+    }
+    
+    /// 🌟 [IDEAL UPLOAD] 長時間実行アップロード実装
+    private func performLongLivedUpload(_ record: CKRecord, in database: CKDatabase) async throws -> CKRecord {
+        return try await withCheckedThrowingContinuation { continuation in
+            let operation = CKModifyRecordsOperation(recordsToSave: [record], recordIDsToDelete: nil)
+            operation.qualityOfService = .userInitiated
+            
+            // 長時間実行を有効にする（iOS 11+の推奨方法）
+            operation.configuration.isLongLived = true
+            operation.savePolicy = .allKeys
+            
+            var savedRecord: CKRecord?
+            
+            operation.perRecordSaveBlock = { recordID, result in
+                switch result {
+                case .success(let record):
+                    savedRecord = record
+                case .failure(let error):
+                    log("❌ [IDEAL UPLOAD] Record save failed: \(error)", category: "MessageSyncService")
                 }
             }
+            
+            operation.modifyRecordsResultBlock = { result in
+                switch result {
+                case .success():
+                    if let record = savedRecord {
+                        log("✅ [IDEAL UPLOAD] Long-lived operation completed successfully", category: "MessageSyncService")
+                        continuation.resume(returning: record)
+                    } else {
+                        let error = CloudKitChatError.recordSaveFailed
+                        log("❌ [IDEAL UPLOAD] No record returned from long-lived operation", category: "MessageSyncService")
+                        continuation.resume(throwing: error)
+                    }
+                case .failure(let error):
+                    log("❌ [IDEAL UPLOAD] Long-lived operation failed: \(error)", category: "MessageSyncService")
+                    continuation.resume(throwing: error)
+                }
+            }
+            
+            // オペレーションの進捗追跡
+            operation.perRecordProgressBlock = { record, progress in
+                log("⏳ [IDEAL UPLOAD] Upload progress for \(record.recordID.recordName): \(Int(progress * 100))%", category: "MessageSyncService")
+            }
+            
+            log("⏳ [IDEAL UPLOAD] Starting long-lived upload operation", category: "MessageSyncService")
+            database.add(operation)
         }
     }
     
@@ -340,14 +425,22 @@ class MessageSyncService: NSObject, ObservableObject {
         
         Task {
             do {
-                let recordID = CKRecord.ID(recordName: recordName)
-                let record = try await privateDB.record(for: recordID)
+                // ゾーンを解決してRecordIDを構築
+                let (_, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: message.roomID)
+                let recordID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
+                // フェッチは両DBで試行
+                let record: CKRecord
+                if let rec = try? await privateDB.record(for: recordID) { record = rec } else { record = try await sharedDB.record(for: recordID) }
                 
-                // Update record fields
-                record["body"] = (message.body ?? "") as CKRecordValue
-                record["reactions"] = (message.reactionEmoji ?? "") as CKRecordValue
+                // Update record fields（reactions/isSentはCloudKitに保存しない）
+                record["text"] = (message.body ?? "") as CKRecordValue
                 
-                _ = try await privateDB.save(record)
+                // 保存も該当DBへ
+                if (try? await privateDB.record(for: recordID)) != nil {
+                    _ = try await privateDB.save(record)
+                } else {
+                    _ = try await sharedDB.save(record)
+                }
                 await MainActor.run {
                     message.isSent = true
                     log("Message updated successfully: \(message.id)", category: "MessageSyncService")
@@ -369,8 +462,13 @@ class MessageSyncService: NSObject, ObservableObject {
         
         Task {
             do {
-                let recordID = CKRecord.ID(recordName: recordName)
-                try await privateDB.deleteRecord(withID: recordID)
+                let (_, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: message.roomID)
+                let recordID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
+                if (try? await privateDB.record(for: recordID)) != nil {
+                    try await privateDB.deleteRecord(withID: recordID)
+                } else {
+                    try await sharedDB.deleteRecord(withID: recordID)
+                }
                 
                 await MainActor.run {
                     messageDeleted.send(message.id.uuidString)
@@ -474,8 +572,8 @@ class MessageSyncService: NSObject, ObservableObject {
             for record in deduplicatedRecords {
                 let recordRoomID = record["roomID"] as? String ?? "unknown"
                 let recordSenderID = record["senderID"] as? String ?? "unknown"
-                let recordBody = record["body"] as? String ?? "empty"
-                let recordCreatedAt = record["createdAt"] as? Date ?? Date()
+                let recordBody = record["text"] as? String ?? "empty"
+                let recordCreatedAt = record["timestamp"] as? Date ?? Date()
                 let recordName = record.recordID.recordName
                 
                 // 重複チェック：最近同期したレコードかどうか
@@ -546,8 +644,8 @@ class MessageSyncService: NSObject, ObservableObject {
                 predicate = NSPredicate(format: "createdAt > %@", oneWeekAgo as NSDate)
             }
             
-            let query = CKQuery(recordType: "CD_Message", predicate: predicate)
-            query.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
+            let query = CKQuery(recordType: "Message", predicate: predicate)
+            query.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
             
             let (results, _) = try await privateDB.records(matching: query, inZoneWith: nil)
             let records = results.compactMap { try? $0.1.get() }
@@ -566,8 +664,8 @@ class MessageSyncService: NSObject, ObservableObject {
         log("🔍 Querying Private DB shared zones...", category: "MessageSyncService")
         
         do {
-            // 1. 全ての共有ゾーンを取得
-            let zones = try await privateDB.allRecordZones()
+            // 1. 共有DBの全てのゾーンを取得
+            let zones = try await sharedDB.allRecordZones()
             let sharedZones = zones.filter { zone in
                 // 共有ゾーンの特定（_defaultではなく、カスタムゾーン）
                 !zone.zoneID.zoneName.hasPrefix("_") && zone.zoneID.zoneName != "_defaultZone"
@@ -577,9 +675,9 @@ class MessageSyncService: NSObject, ObservableObject {
             
             var allRecords: [CKRecord] = []
             
-            // 2. 各共有ゾーンでメッセージを検索
+            // 2. 各共有ゾーンでメッセージを検索（Shared DBを使用）
             for zone in sharedZones {
-                let zoneRecords = await querySpecificZone(zoneID: zone.zoneID, roomID: roomID)
+                let zoneRecords = await querySpecificZone(database: sharedDB, zoneID: zone.zoneID, roomID: roomID)
                 allRecords.append(contentsOf: zoneRecords)
             }
             
@@ -593,7 +691,7 @@ class MessageSyncService: NSObject, ObservableObject {
     }
     
     /// 特定のゾーンでメッセージを検索
-    private func querySpecificZone(zoneID: CKRecordZone.ID, roomID: String?) async -> [CKRecord] {
+    private func querySpecificZone(database: CKDatabase, zoneID: CKRecordZone.ID, roomID: String?) async -> [CKRecord] {
         do {
             let predicate: NSPredicate
             if let roomID = roomID {
@@ -604,10 +702,10 @@ class MessageSyncService: NSObject, ObservableObject {
                 predicate = NSPredicate(format: "createdAt > %@", oneWeekAgo as NSDate)
             }
             
-            let query = CKQuery(recordType: "CD_Message", predicate: predicate)
-            query.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
+            let query = CKQuery(recordType: "Message", predicate: predicate)
+            query.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
             
-            let (results, _) = try await privateDB.records(matching: query, inZoneWith: zoneID)
+            let (results, _) = try await database.records(matching: query, inZoneWith: zoneID)
             let records = results.compactMap { try? $0.1.get() }
             
             log("📂 Zone \(zoneID.zoneName) query completed with \(records.count) records", category: "MessageSyncService")
@@ -656,6 +754,7 @@ class MessageSyncService: NSObject, ObservableObject {
             
             // 永続化されたShared DB変更トークンを使用
             let dbChangesOp = CKFetchDatabaseChangesOperation(previousServerChangeToken: sharedDBChangeToken)
+            dbChangesOp.qualityOfService = .userInitiated
             
             var changedZoneIDs: [CKRecordZone.ID] = []
             
@@ -707,34 +806,52 @@ class MessageSyncService: NSObject, ObservableObject {
                 zoneID: CKFetchRecordZoneChangesOperation.ZoneConfiguration(
                     previousServerChangeToken: zoneToken,
                     resultsLimit: nil,
-                    desiredKeys: nil
+                    // 🌟 [IDEAL DESIREDKEYS]
+                    // Include message fields and reaction fields we care about
+                    desiredKeys: ["roomID", "senderID", "text", "timestamp", "messageRef", "emoji"]
                 )
             ]
         )
+        zoneChangesOp.qualityOfService = .userInitiated
         
         // Simplified direct async implementation
         var fetchedRecords: [CKRecord] = []
-        let semaphore = DispatchSemaphore(value: 0)
+        var affectedReactions: Set<ReactionKey> = [] // set of affected (roomID, messageRecordName)
         
         zoneChangesOp.recordWasChangedBlock = { recordID, result in
             switch result {
             case .success(let record):
-                // roomIDフィルタリング
-                if let targetRoomID = roomID {
-                    let recordRoomID = record["roomID"] as? String ?? ""
-                    if recordRoomID == targetRoomID {
-                        fetchedRecords.append(record)
+                if record.recordType == "MessageReaction" {
+                    if let messageRef = record["messageRef"] as? CKRecord.Reference {
+                        let rid = messageRef.recordID.zoneID.zoneName
+                        let msgName = messageRef.recordID.recordName
+                        // ルーム指定がある場合はそのルームのみ
+                        if let targetRoomID = roomID {
+                            if targetRoomID == rid { affectedReactions.insert(ReactionKey(roomID: rid, messageRecordName: msgName)) }
+                        } else {
+                            affectedReactions.insert(ReactionKey(roomID: rid, messageRecordName: msgName))
+                        }
                     }
                 } else {
-                    fetchedRecords.append(record)
+                    // Message等は従来通り収集
+                    if let targetRoomID = roomID {
+                        let recordRoomID = record["roomID"] as? String ?? ""
+                        if recordRoomID == targetRoomID { fetchedRecords.append(record) }
+                    } else {
+                        fetchedRecords.append(record)
+                    }
                 }
             case .failure(let error):
                 log("⚠️ Error fetching record \(recordID.recordName): \(error)", category: "MessageSyncService")
             }
         }
         
-        zoneChangesOp.recordWithIDWasDeletedBlock = { recordID, recordType in
+        zoneChangesOp.recordWithIDWasDeletedBlock = { [weak self] recordID, recordType in
             log("🗑️ Record deleted from Shared zone \(zoneID.zoneName): \(recordID.recordName)", category: "MessageSyncService")
+            // Reaction削除時はゾーン単位で再同期（対象特定不可のため）
+            if recordType == "MessageReaction" {
+                Task { try? await self?.performQuery(roomID: zoneID.zoneName) }
+            }
         }
         
         zoneChangesOp.recordZoneChangeTokensUpdatedBlock = { [weak self] zoneID, newToken, data in
@@ -753,23 +870,21 @@ class MessageSyncService: NSObject, ObservableObject {
             }
         }
         
-        zoneChangesOp.fetchRecordZoneChangesResultBlock = { result in
-            switch result {
-            case .failure(let error):
-                log("❌ Shared zone \(zoneID.zoneName) fetch failed: \(error)", category: "MessageSyncService")
-            case .success:
-                log("📂 Shared zone \(zoneID.zoneName) fetch completed with \(fetchedRecords.count) records", category: "MessageSyncService")
-            }
-            semaphore.signal()
-        }
-        
-        sharedDB.add(zoneChangesOp)
-        
         return await withCheckedContinuation { continuation in
-            DispatchQueue.global().async {
-                semaphore.wait()
+            zoneChangesOp.fetchRecordZoneChangesResultBlock = { [weak self] result in
+                switch result {
+                case .failure(let error):
+                    log("❌ Shared zone \(zoneID.zoneName) fetch failed: \(error)", category: "MessageSyncService")
+                case .success:
+                    log("📂 Shared zone \(zoneID.zoneName) fetch completed with \(fetchedRecords.count) records", category: "MessageSyncService")
+                }
+                // 影響のあったメッセージのみReactions更新イベントを発行
+                for key in affectedReactions {
+                    self?.reactionsUpdated.send((roomID: key.roomID, messageRecordName: key.messageRecordName))
+                }
                 continuation.resume(returning: fetchedRecords)
             }
+            sharedDB.add(zoneChangesOp)
         }
     }
     
@@ -782,8 +897,12 @@ class MessageSyncService: NSObject, ObservableObject {
                 predicate = NSPredicate(value: true)
             }
             
-            let query = CKQuery(recordType: "CD_Message", predicate: predicate)
+            let query = CKQuery(recordType: "Message", predicate: predicate)
             let queryOperation = CKQueryOperation(query: query)
+            queryOperation.qualityOfService = .userInitiated
+            // 🌟 [IDEAL DESIREDKEYS] Exclude attachment for list performance - fetch individually when needed
+            // 'timestamp' が未定義のレコードでも動作するよう desiredKeys は任意
+            queryOperation.desiredKeys = ["roomID", "senderID", "text", "timestamp"]
             
             var fetchedRecords: [CKRecord] = []
             
@@ -825,6 +944,9 @@ class MessageSyncService: NSObject, ObservableObject {
     private func continueFetchFromDatabase(cursor: CKQueryOperation.Cursor, database: CKDatabase, databaseName: String) async throws -> [CKRecord] {
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[CKRecord], Error>) in
             let continueOperation = CKQueryOperation(cursor: cursor)
+            continueOperation.qualityOfService = .userInitiated
+            // 🌟 [IDEAL DESIREDKEYS] Exclude attachment for list performance - fetch individually when needed
+            continueOperation.desiredKeys = ["roomID", "senderID", "text", "timestamp"]
             
             var continuedRecords: [CKRecord] = []
             
@@ -861,21 +983,20 @@ class MessageSyncService: NSObject, ObservableObject {
     
     // MARK: - Record Conversion
     
-    private func createCKRecord(from message: Message) -> CKRecord {
-        let recordID = CKRecord.ID(recordName: message.ckRecordName ?? UUID().uuidString)
-        let record = CKRecord(recordType: "CD_Message", recordID: recordID)
+    private func createCKRecord(from message: Message, zoneID: CKRecordZone.ID) -> CKRecord {
+        let recordID = CKRecord.ID(recordName: message.ckRecordName ?? UUID().uuidString, zoneID: zoneID)
+        let record = CKRecord(recordType: "Message", recordID: recordID)
         
         record["roomID"] = message.roomID as CKRecordValue
         record["senderID"] = message.senderID as CKRecordValue
-        record["body"] = (message.body ?? "") as CKRecordValue
-        record["createdAt"] = message.createdAt as CKRecordValue
-        record["reactions"] = (message.reactionEmoji ?? "") as CKRecordValue
+        record["text"] = (message.body ?? "") as CKRecordValue
+        record["timestamp"] = message.createdAt as CKRecordValue
         
         // Handle asset path for images/videos
         if let assetPath = message.assetPath {
             let assetURL = URL(fileURLWithPath: assetPath)
             if FileManager.default.fileExists(atPath: assetPath) {
-                record["asset"] = CKAsset(fileURL: assetURL)
+                record["attachment"] = CKAsset(fileURL: assetURL)
             }
         }
         
@@ -883,19 +1004,18 @@ class MessageSyncService: NSObject, ObservableObject {
     }
     
     private func createMessage(from record: CKRecord) -> Message? {
-        guard record.recordType == "CD_Message",
+        guard record.recordType == "Message",
               let roomID = record["roomID"] as? String,
-              let senderID = record["senderID"] as? String,
-              let createdAt = record["createdAt"] as? Date else {
+              let senderID = record["senderID"] as? String else {
             return nil
         }
+        let createdAt = (record["timestamp"] as? Date) ?? (record.creationDate ?? Date())
         
-        let body = record["body"] as? String
-        let reactions = record["reactions"] as? String
+        let body = record["text"] as? String
         var assetPath: String?
         
         // Handle asset download
-        if let asset = record["asset"] as? CKAsset,
+        if let asset = record["attachment"] as? CKAsset,
            let fileURL = asset.fileURL {
             let localURL = AttachmentManager.makeFileURL(ext: fileURL.pathExtension)
             do {
@@ -906,7 +1026,7 @@ class MessageSyncService: NSObject, ObservableObject {
             }
         }
         
-        return Message(
+        let msg = Message(
             roomID: roomID,
             senderID: senderID,
             body: body,
@@ -914,8 +1034,26 @@ class MessageSyncService: NSObject, ObservableObject {
             ckRecordName: record.recordID.recordName,
             createdAt: createdAt,
             isSent: true,
-            reactionEmoji: reactions
+            reactionEmoji: nil
         )
+        // 正規化リアクションを取得してUIに反映
+        Task { @MainActor in
+            do {
+                let list = try await CloudKitChatManager.shared.getReactionsForMessage(
+                    messageRecordName: record.recordID.recordName,
+                    roomID: roomID
+                )
+                var builder = ""
+                let grouped = Dictionary(grouping: list, by: { $0.emoji })
+                for (emoji, items) in grouped {
+                    builder += String(repeating: emoji, count: items.count)
+                }
+                msg.reactionEmoji = builder
+            } catch {
+                // 応答なしは無視
+            }
+        }
+        return msg
     }
     
     // MARK: - Offline Support
@@ -947,32 +1085,4 @@ class MessageSyncService: NSObject, ObservableObject {
     }
 }
 
-// MARK: - Legacy Support
-
-class LegacyMessageSyncService: MessageSyncService {
-    // Fallback implementation for iOS < 17.0
-    // Uses traditional CKQuerySubscription approach
-    
-    override init() {
-        super.init()
-        log("Using legacy CloudKit implementation", category: "LegacyMessageSyncService")
-    }
-    
-    // Override methods to use traditional CloudKit APIs
-    override func sendMessage(_ message: Message) {
-        // Use existing CKSync implementation
-        Task {
-            do {
-                let recordName = try await CKSync.saveMessage(message)
-                await MainActor.run {
-                    message.ckRecordName = recordName
-                    message.isSent = true
-                }
-            } catch {
-                await MainActor.run {
-                    syncError.send(error)
-                }
-            }
-        }
-    }
-}
+// iOS 17+ 前提のため、レガシー実装は削除

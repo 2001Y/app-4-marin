@@ -50,7 +50,7 @@ class URLManager: ObservableObject {
     
     // MARK: - チャット作成処理
     
-    /// 招待URLからチャットを作成
+    /// 招待URLからチャットを作成（ゾーン名=roomID を先に確定し、そのroomIDで全体を駆動）
     func createChatFromInvite(userID: String, modelContext: ModelContext) async -> ChatRoom? {
         do {
             // 統一ユーザーIDを取得
@@ -78,9 +78,20 @@ class URLManager: ObservableObject {
                 return existingRoom
             }
             
-            // 新しいチャットルームを作成
-            let newRoom = ChatRoom(remoteUserID: userID, displayName: nil, myUserID: myUserID)
-            log("📝 Created ChatRoom with ID: \(newRoom.id), roomID: \(newRoom.roomID)", category: "URLManager")
+            // ゾーン名（roomID）を先に確定
+            let roomID = "chat-\(UUID().uuidString.prefix(8))"
+
+            // CloudKit側にカスタムゾーン + ChatSession + CKShare(Zone Share) を作成
+            do {
+                _ = try await CloudKitChatManager.shared.createSharedChatRoom(roomID: roomID, invitedUserID: userID)
+            } catch {
+                log("❌ Failed to create shared chat room in CloudKit: \(error)", category: "URLManager")
+                return nil
+            }
+
+            // ローカルのチャットルームを作成（roomID=zoneName）
+            let newRoom = ChatRoom(roomID: roomID, remoteUserID: userID, displayName: nil)
+            log("📝 Created ChatRoom with ID: \(newRoom.id), roomID(zoneName): \(newRoom.roomID)", category: "URLManager")
             
             modelContext.insert(newRoom)
             

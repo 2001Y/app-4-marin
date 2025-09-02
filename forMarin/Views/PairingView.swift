@@ -6,6 +6,8 @@ import AVFoundation
 struct PairingView: View {
     @State private var showWelcomeModal = false
     @State private var showInviteModal = false
+    @State private var showNameSheet = false
+    @State private var showQRScanner = false
     @Environment(\.modelContext) private var modelContext
     var onChatCreated: (ChatRoom) -> Void
     var onDismiss: (() -> Void)?
@@ -139,14 +141,8 @@ struct PairingView: View {
                             // 触覚フィードバック
                             let impactFeedback = UIImpactFeedbackGenerator(style: .light)
                             impactFeedback.impactOccurred()
-                            
-                            if showWelcomeModalOnAppear {
-                                // 設定からの呼び出し時はページを閉じる
-                                onDismiss?()
-                            } else {
-                                // 招待モーダルを表示
-                                showInviteModal = true
-                            }
+                            // 名前入力のハーフモーダルを表示
+                            showNameSheet = true
                         } label: {
                             Text("はじめる")
                                 .font(.system(size: 16, weight: .semibold))
@@ -173,18 +169,17 @@ struct PairingView: View {
                         }
                         .padding(.bottom, 20)
                         
-                        // 招待URLで始めるボタン
+                        // 招待をされる（QR読取）
                         Button {
                             // 触覚フィードバック
                             let impactFeedback = UIImpactFeedbackGenerator(style: .light)
                             impactFeedback.impactOccurred()
-                            
-                            showInviteModal = true
+                            showQRScanner = true
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "person.badge.plus")
+                                Image(systemName: "qrcode.viewfinder")
                                     .font(.system(size: 16))
-                                Text("招待URLで開始")
+                                Text("招待をされる")
                                     .font(.system(size: 15, weight: .medium))
                             }
                             .foregroundColor(.secondary)
@@ -203,6 +198,15 @@ struct PairingView: View {
         .colorScheme(.light)
         .sheet(isPresented: $showInviteModal) {
             InviteModalView(onChatCreated: onChatCreated)
+        }
+        .sheet(isPresented: $showNameSheet) {
+            NameInputSheet(isPresented: $showNameSheet)
+        }
+        .sheet(isPresented: $showQRScanner) {
+            QRScannerSheet(isPresented: $showQRScanner) {
+                // 受諾後にアップデート
+                MessageSyncService.shared.checkForUpdates()
+            }
         }
         .onAppear {
             if showWelcomeModalOnAppear {
@@ -399,4 +403,3 @@ struct FeatureItem {
     let number: String
     let title: String
 }
-

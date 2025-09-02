@@ -64,7 +64,7 @@ class UserIDManager: ObservableObject {
             log("Successfully initialized with CloudKit UserID: \(cloudKitUserID)", category: "UserIDManager")
             
         } catch {
-            log("CloudKit UserID fetch failed: \(error)", category: "UserIDManager")
+            log("⚠️ [AUTO FIX] CloudKit UserID fetch failed: \(error)", category: "UserIDManager")
             log("CloudKit is required - no fallback to device ID", category: "UserIDManager")
             
             initializationError = error

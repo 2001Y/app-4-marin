@@ -38,11 +38,10 @@ extension ChatView {
             target.isSent = false
             Task { @MainActor in
                 if let recName = target.ckRecordName {
-                    try? await CKSync.updateMessageBody(recordName: recName, newBody: trimmed)
+                    try? await CloudKitChatManager.shared.updateMessage(recordName: recName, roomID: target.roomID, newBody: trimmed)
                 } else {
-                    if let rec = try? await CKSync.saveMessage(target) {
-                        target.ckRecordName = rec
-                    }
+                    try? await CloudKitChatManager.shared.sendMessage(target, to: target.roomID)
+                    target.ckRecordName = target.id.uuidString
                 }
                 target.isSent = true
             }
@@ -206,7 +205,7 @@ extension ChatView {
     func deleteMessage(_ message: Message) {
         modelContext.delete(message)
         if let recName = message.ckRecordName {
-            Task { try? await CKSync.deleteMessage(recordName: recName) }
+            Task { try? await CloudKitChatManager.shared.deleteMessage(recordName: recName, roomID: message.roomID) }
         }
     }
 
@@ -356,40 +355,21 @@ extension ChatView {
             autoDownloadNewImages()
         }
         Task {
-            let (name, avatarData) = await CKSync.fetchProfile(for: remoteUserID)
-            if let name = name {
-                partnerName = name
-            }
-            if let avatarData = avatarData {
-                partnerAvatar = UIImage(data: avatarData)
+            do {
+                let result = try await CloudKitChatManager.shared.fetchProfile(userID: remoteUserID)
+                if let name = result.name { partnerName = name }
+                if let data = result.avatarData { partnerAvatar = UIImage(data: data) }
+            } catch {
+                log("Failed to fetch profile for userID: \(remoteUserID) - \(error)", category: "ChatView")
             }
         }
         
-        // チュートリアルメッセージの表示判定
-        if messages.isEmpty {
-            let partner = remoteUserID.isEmpty ? "Partner" : remoteUserID
-            log("Seeding tutorial messages for roomID: \(roomID), myID: \(myID), partner: \(partner)", category: "DEBUG")
-            TutorialDataSeeder.seed(into: modelContext,
-                                    roomID: roomID,
-                                    myID: myID,
-                                    partnerID: partner)
-            log("Tutorial seeding completed", category: "DEBUG")
-        }
+        // チュートリアルはルーム作成時にCloudKitへ投入済み
     }
     
     func handleMessagesCountChange(_ newCount: Int) {
         guard newCount == 0 else { return }
-        DispatchQueue.main.async {
-            // このルームのチュートリアルフラグをリセット
-            let tutorialKey = "didSeedTutorial_\(roomID)"
-            UserDefaults.standard.set(false, forKey: tutorialKey)
-            
-            let partner = remoteUserID.isEmpty ? "Partner" : remoteUserID
-            TutorialDataSeeder.seed(into: modelContext,
-                                    roomID: roomID,
-                                    myID: myID,
-                                    partnerID: partner)
-        }
+        // チュートリアルの再投入は行わない（CloudKit側で一元化）
     }
     
     // MARK: - Messages View
@@ -598,7 +578,16 @@ extension ChatView {
                         message.reactionEmoji = reactions
                         // Sync to CloudKit
                         if let recName = message.ckRecordName {
-                            Task { try? await CKSync.addReaction(recordName: recName, emoji: emoji) }
+                            Task {
+                                if let userID = CloudKitChatManager.shared.currentUserID {
+                                    try? await CloudKitChatManager.shared.addReactionToMessage(
+                                        messageRecordName: recName,
+                                        roomID: message.roomID,
+                                        emoji: emoji,
+                                        userID: userID
+                                    )
+                                }
+                            }
                         }
                     }
                     updateRecentEmoji(emoji)

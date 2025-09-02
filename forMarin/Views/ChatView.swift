@@ -92,6 +92,11 @@ struct ChatView: View {
     
     @State var showProfileSheet: Bool = false
     
+    // 🌟 [IDEAL SHARING UI] CloudKit共有関連の状態
+    @State private var showCloudSharingController = false
+    @State private var shareToPresent: CKShare?
+    @State private var isLoadingShare = false
+    
     // Filtered anniversaries for current room
     var roomAnniversaries: [Anniversary] {
         anniversaries.filter { $0.roomID == roomID }
@@ -175,6 +180,21 @@ struct ChatView: View {
                     }
                     #endif
                     
+                    // 🌟 [IDEAL SHARING UI] CloudKit共有ボタン
+                    Button(action: {
+                        loadAndShowCloudShare()
+                    }) {
+                        if isLoadingShare {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle())
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "square.and.arrow.up")
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .disabled(isLoadingShare)
+                    
                     FaceTimeAudioButton(callee: remoteUserID)
                     FaceTimeButton(callee: remoteUserID)
                 }
@@ -239,6 +259,18 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showProfileSheet) {
             ProfileDetailView(chatRoom: chatRoom, partnerAvatar: partnerAvatar)
+        }
+        // 🌟 [IDEAL SHARING UI] 拡張版CloudKit共有コントローラー（URL共有ボタン付き）
+        .sheet(isPresented: $showCloudSharingController) {
+            if let shareToPresent = shareToPresent {
+                EnhancedCloudSharingView(
+                    share: shareToPresent,
+                    container: CloudKitChatManager.shared.containerForSharing,
+                    onDismiss: {
+                        showCloudSharingController = false
+                    }
+                )
+            }
         }
         .onChange(of: pickedEmoji) { newValue, _ in
             handleEmojiSelection(newValue)
@@ -663,6 +695,96 @@ struct ChatView: View {
                 log("Chat permissions denied: \(error.localizedDescription)", category: "DEBUG")
                 // 権限が拒否されても、チャット画面は表示を継続
                 // 必要な機能が制限されることをユーザーに後で通知
+            }
+        }
+    }
+    
+    // MARK: - 🌟 [IDEAL SHARING UI] CloudKit共有機能
+    
+    /// 既存のCKShareを取得して共有コントローラーを表示
+    private func loadAndShowCloudShare() {
+        isLoadingShare = true
+        
+        Task {
+            do {
+                // 既存のゾーンとCKShareを取得
+                let ckShare = try await findExistingShare()
+                
+                await MainActor.run {
+                    self.shareToPresent = ckShare
+                    self.isLoadingShare = false
+                    self.showCloudSharingController = true
+                }
+                
+                log("✅ [IDEAL SHARING UI] Loaded existing CKShare for room: \(roomID)", category: "ChatView")
+                
+            } catch {
+                await MainActor.run {
+                    self.isLoadingShare = false
+                }
+                log("❌ [IDEAL SHARING UI] Failed to load CKShare: \(error)", category: "ChatView")
+                
+                // エラー時は新しいCKShareを作成
+                createNewShareIfNeeded()
+            }
+        }
+    }
+    
+    /// 既存のCKShareを検索
+    private func findExistingShare() async throws -> CKShare {
+        let cloudKitManager = CloudKitChatManager.shared
+        
+        // まずPrivate DBでCKShareを検索
+        do {
+            let customZoneID = CKRecordZone.ID(zoneName: roomID)
+            let query = CKQuery(recordType: "cloudkit.share", predicate: NSPredicate(value: true))
+            
+            let (results, _) = try await cloudKitManager.privateDB.records(
+                matching: query,
+                inZoneWith: customZoneID
+            )
+            
+            for (_, result) in results {
+                switch result {
+                case .success(let record):
+                    if let share = record as? CKShare {
+                        return share
+                    }
+                case .failure(_):
+                    continue
+                }
+            }
+        } catch {
+            log("⚠️ [IDEAL SHARING UI] Failed to find existing share in Private DB: \(error)", category: "ChatView")
+        }
+        
+        // 見つからない場合は新しく作成
+        throw CloudKitChatError.shareNotFound
+    }
+    
+    /// 新しいCKShareの作成（既存のものが見つからない場合）
+    private func createNewShareIfNeeded() {
+        Task {
+            do {
+                let cloudKitManager = CloudKitChatManager.shared
+                let ckShare = try await cloudKitManager.createSharedChatRoom(
+                    roomID: roomID,
+                    invitedUserID: "pending"
+                )
+                
+                await MainActor.run {
+                    self.shareToPresent = ckShare
+                    self.isLoadingShare = false
+                    self.showCloudSharingController = true
+                }
+                
+                log("✅ [IDEAL SHARING UI] Created new CKShare for existing room: \(roomID)", category: "ChatView")
+                
+            } catch {
+                await MainActor.run {
+                    self.isLoadingShare = false
+                }
+                log("❌ [IDEAL SHARING UI] Failed to create new CKShare: \(error)", category: "ChatView")
             }
         }
     }

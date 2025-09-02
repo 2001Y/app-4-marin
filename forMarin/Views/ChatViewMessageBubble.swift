@@ -331,7 +331,16 @@ extension ChatView {
                     message.reactionEmoji = reactions
                     updateRecentEmoji(emoji)
                     if let recName = message.ckRecordName {
-                        Task { try? await CKSync.addReaction(recordName: recName, emoji: emoji) }
+                        Task {
+                            if let userID = CloudKitChatManager.shared.currentUserID {
+                                try? await CloudKitChatManager.shared.addReactionToMessage(
+                                    messageRecordName: recName,
+                                    roomID: message.roomID,
+                                    emoji: emoji,
+                                    userID: userID
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -439,7 +448,16 @@ extension ChatView {
                     updateRecentEmoji(emoji)
                     // Sync to CloudKit
                     if let recName = message.ckRecordName {
-                        Task { try? await CKSync.addReaction(recordName: recName, emoji: emoji) }
+                        Task {
+                            if let userID = CloudKitChatManager.shared.currentUserID {
+                                try? await CloudKitChatManager.shared.addReactionToMessage(
+                                    messageRecordName: recName,
+                                    roomID: message.roomID,
+                                    emoji: emoji,
+                                    userID: userID
+                                )
+                            }
+                        }
                     }
                 }
             }

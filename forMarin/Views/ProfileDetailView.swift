@@ -156,7 +156,7 @@ struct ProfileDetailView: View {
                             repeatType: newRepeatType)
         modelContext.insert(ann)
         Task { @MainActor in
-            if let recName = try? await CKSync.saveAnniversary(title: ann.title, date: ann.date, roomID: roomID, repeatType: ann.repeatType) {
+            if let recName = try? await CloudKitChatManager.shared.saveAnniversary(title: ann.title, date: ann.date, roomID: roomID, repeatType: ann.repeatType) {
                 ann.ckRecordName = recName
             }
         }
@@ -169,7 +169,7 @@ struct ProfileDetailView: View {
 
     private func delete(_ ann: Anniversary) {
         modelContext.delete(ann)
-        if let rec = ann.ckRecordName { Task { await CKSync.deleteAnniversary(recordName: rec) } }
+        if let rec = ann.ckRecordName { Task { try? await CloudKitChatManager.shared.deleteAnniversary(recordName: rec) } }
         loadAnniversaries() // リストを更新
     }
     

@@ -26,7 +26,7 @@ extension ChatView {
                 guard trimmed.isEmpty == false else { return }
                 message.body = trimmed
                 if let recName = message.ckRecordName {
-                    Task { try? await CKSync.updateMessageBody(recordName: recName, newBody: trimmed) }
+                    Task { try? await CloudKitChatManager.shared.updateMessage(recordName: recName, roomID: message.roomID, newBody: trimmed) }
                 }
                 editingMessage = nil
             } label: {

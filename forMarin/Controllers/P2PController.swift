@@ -64,12 +64,10 @@ final class P2PController: NSObject, ObservableObject {
 
     // MARK: - Presence
     private func schedulePresence() {
+        // Presence 機能は非推奨のため、タイマーのみ維持（将来のオンライン検知拡張用）
         presenceTimer = Timer.publish(every: 25, on: .main, in: .common)
             .autoconnect()
-            .sink { [weak self] _ in
-                guard let self = self else { return }
-                CKSync.refreshPresence(self.currentRoomID, self.currentMyID)
-            }
+            .sink { _ in /* no-op */ }
     }
 
     // MARK: - PeerConnection setup
@@ -171,7 +169,7 @@ extension P2PController: RTCPeerConnectionDelegate {
 
     nonisolated public func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
         Task {
-            try? await CKSync.saveCandidate(candidate, roomID: P2PController.shared.currentRoomID)
+            // ICE candidate saving to CloudKit is deprecated in this app's architecture
         }
     }
 

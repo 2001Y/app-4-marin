@@ -8,6 +8,7 @@ struct ChatListView: View {
     @Query(sort: \ChatRoom.lastMessageDate, order: .reverse) private var chatRooms: [ChatRoom]
     @Environment(\.modelContext) private var modelContext
     @State private var showInviteModal = false
+    @State private var showQRInvite = false
     var onChatSelected: (ChatRoom) -> Void
     @State private(set) var showingSettings = false
     @State private(set) var selectedChatRoom: ChatRoom?
@@ -90,6 +91,11 @@ struct ChatListView: View {
                     onChatSelected(newRoom)
                 }
             }
+            .sheet(isPresented: $showQRInvite) {
+                InviteModalView { newRoom in
+                    onChatSelected(newRoom)
+                }
+            }
     }
     
     private var chatListContent: some View {
@@ -143,13 +149,13 @@ struct ChatListView: View {
             
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    showInviteModal = true
+                    showQRInvite = true
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "person.badge.plus")
+                    Image(systemName: "square.and.arrow.up")
                         .font(.system(size: 16))
-                    Text("招待URLで開始")
+                    Text("招待する")
                         .font(.system(size: 15, weight: .medium))
                 }
                 .foregroundColor(.secondary)
@@ -167,10 +173,15 @@ struct ChatListView: View {
     private func deleteChatRooms(at offsets: IndexSet) {
         withAnimation(.easeInOut(duration: 0.3)) {
             for index in offsets {
-                modelContext.delete(chatRooms[index])
+                let room = chatRooms[index]
+                // 共有の無効化（オーナーならゾーン削除、参加者なら離脱）
+                Task { await CloudKitChatManager.shared.revokeShareAndDeleteIfNeeded(roomID: room.roomID) }
+                modelContext.delete(room)
             }
         }
     }
+
+    // 共有導線は InviteModalView 経由の共通モーダルに統一
     
     // アバター形状をシャッフル（ユーザーIDに基づいて一貫性を保つ）
     @ViewBuilder

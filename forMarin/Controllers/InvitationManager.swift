@@ -9,7 +9,7 @@ import SwiftUI
 class InvitationManager: NSObject, ObservableObject {
     static let shared = InvitationManager()
     
-    private let container = CKContainer(identifier: "iCloud.forMarin-test")
+    private let container = CloudKitChatManager.shared.containerForSharing
     private let chatManager = CloudKitChatManager.shared
     
     @Published var isShowingShareSheet = false
@@ -34,8 +34,10 @@ class InvitationManager: NSObject, ObservableObject {
         do {
             log("Creating invitation for user: \(remoteUserID)", category: "InvitationManager")
             
-            // 1. 共有チャットルームを作成
-            let (roomRecord, share) = try await chatManager.createSharedChatRoom(with: remoteUserID)
+            // 1. 共有チャットルームを作成（ゾーン名=roomID を先に確定）
+            let roomID = "chat-\(UUID().uuidString.prefix(8))"
+            let share = try await chatManager.createSharedChatRoom(roomID: roomID, invitedUserID: remoteUserID)
+            let roomRecord = try await chatManager.getRoomRecord(roomID: roomID)
             
             // 2. 現在の共有情報を保存
             currentRoomRecord = roomRecord
@@ -65,9 +67,7 @@ class InvitationManager: NSObject, ObservableObject {
             log("Resharing existing invitation for room: \(roomID)", category: "InvitationManager")
             
             // 1. 既存のルームレコードを取得
-            guard let roomRecord = await chatManager.getRoomRecord(for: roomID) else {
-                throw InvitationError.roomNotFound
-            }
+            let roomRecord = try await chatManager.getRoomRecord(roomID: roomID)
             
             // 2. 関連するCKShareを検索
             let share = try await findShareForRoom(roomRecord: roomRecord)
@@ -91,41 +91,14 @@ class InvitationManager: NSObject, ObservableObject {
         }
     }
     
-    /// 招待URLから直接チャットルームに参加
+    /// 招待URLから直接チャットルームに参加（iOS 17+ 前提: モダンAPIのみ）
     func acceptInvitation(from url: URL) async -> Bool {
         do {
             log("Accepting invitation from URL: \(url)", category: "InvitationManager")
-            
-            // 1. CloudKit招待URLからCKShareMetadataを取得
             let metadata = try await container.shareMetadata(for: url)
-            
-            // 2. CKShareを受け入れ（現代的なアプローチ）
-            if #available(iOS 15.0, *) {
-                let share = try await container.accept(metadata)
-                log("Successfully accepted share: \(share.recordID)", category: "InvitationManager")
-                return true
-            } else {
-                // iOS 14以下のフォールバック
-                let acceptShareOperation = CKAcceptSharesOperation(shareMetadatas: [metadata])
-                
-                return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
-                    acceptShareOperation.perShareCompletionBlock = { shareMetadata, share, error in
-                        if let error = error {
-                            log("Failed to accept share: \(error)", category: "InvitationManager")
-                            continuation.resume(returning: false)
-                        } else if share != nil {
-                            log("Successfully accepted share", category: "InvitationManager")
-                            continuation.resume(returning: true)
-                        } else {
-                            log("Unknown result when accepting share", category: "InvitationManager")
-                            continuation.resume(returning: false)
-                        }
-                    }
-                    
-                    container.add(acceptShareOperation)
-                }
-            }
-            
+            let share = try await container.accept(metadata)
+            log("Successfully accepted share: \(share.recordID)", category: "InvitationManager")
+            return true
         } catch {
             log("Failed to accept invitation: \(error)", category: "InvitationManager")
             lastError = error
@@ -141,34 +114,29 @@ class InvitationManager: NSObject, ObservableObject {
         container: CKContainer,
         from viewController: UIViewController
     ) async {
-        let cloudSharingController = UICloudSharingController(
-            share: share,
-            container: container
+        // SwiftUIの統一モーダル（EnhancedCloudSharingView）で表示
+        let hosting = UIHostingController(
+            rootView: EnhancedCloudSharingView(
+                share: share,
+                container: container,
+                onDismiss: { viewController.dismiss(animated: true) }
+            )
         )
-        
-        cloudSharingController.delegate = self
-        cloudSharingController.availablePermissions = [.allowReadWrite]
-        cloudSharingController.modalPresentationStyle = .formSheet
-        
-        // メインスレッドでUI表示
-        viewController.present(cloudSharingController, animated: true)
+        hosting.modalPresentationStyle = .formSheet
+        viewController.present(hosting, animated: true)
     }
     
     /// ルームレコードに関連するCKShareを検索
     private func findShareForRoom(roomRecord: CKRecord) async throws -> CKShare {
-        let shareQuery = CKQuery(
-            recordType: "cloudkit.share",
-            predicate: NSPredicate(format: "rootRecord == %@", roomRecord.recordID)
-        )
-        
-        let (results, _) = try await container.privateCloudDatabase.records(matching: shareQuery)
-        
+        // ゾーン共有に統一: ゾーン内の cloudkit.share を検索
+        let zoneID = roomRecord.recordID.zoneID
+        let query = CKQuery(recordType: "cloudkit.share", predicate: NSPredicate(value: true))
+        let (results, _) = try await container.privateCloudDatabase.records(matching: query, inZoneWith: zoneID)
         for (_, result) in results {
             if let share = try? result.get() as? CKShare {
                 return share
             }
         }
-        
         throw InvitationError.shareNotFound
     }
     
@@ -273,48 +241,4 @@ extension UIViewController {
 
 // MARK: - SwiftUI Integration
 
-struct InvitationView: UIViewControllerRepresentable {
-    let share: CKShare
-    let container: CKContainer
-    @Binding var isPresented: Bool
-    
-    func makeUIViewController(context: Context) -> UICloudSharingController {
-        let controller = UICloudSharingController(share: share, container: container)
-        controller.delegate = context.coordinator
-        controller.availablePermissions = [.allowReadWrite]
-        return controller
-    }
-    
-    func updateUIViewController(_ uiViewController: UICloudSharingController, context: Context) {
-        // 更新処理は不要
-    }
-    
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-    
-    class Coordinator: NSObject, UICloudSharingControllerDelegate {
-        let parent: InvitationView
-        
-        init(_ parent: InvitationView) {
-            self.parent = parent
-        }
-        
-        func cloudSharingControllerDidSaveShare(_ csc: UICloudSharingController) {
-            parent.isPresented = false
-        }
-        
-        func cloudSharingControllerDidStopSharing(_ csc: UICloudSharingController) {
-            parent.isPresented = false
-        }
-        
-        func cloudSharingController(_ csc: UICloudSharingController, failedToSaveShareWithError error: Error) {
-            log("Failed to save share: \(error)", category: "InvitationView")
-            parent.isPresented = false
-        }
-        
-        func itemTitle(for csc: UICloudSharingController) -> String? {
-            return "4-Marin チャット招待"
-        }
-    }
-}
+// InvitationView は未使用のため削除しました（CloudSharingControllerView/EnhancedCloudSharingView を使用）

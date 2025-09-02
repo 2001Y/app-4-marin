@@ -1,54 +1,96 @@
 import SwiftUI
 import SwiftData
+import CloudKit
 
 struct InviteModalView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    @State private var showShareSheet = false
-    @State private var showAirDropSheet = false
-    @State private var myInviteURL = ""
-    @State private var selectedTab = 0
+    
+    // 🌟 [IDEAL SHARING UI] UICloudSharingController関連の状態
+    @State private var showCloudSharingController = false
+    @State private var shareToPresent: CKShare?
+    @State private var isCreatingRoom = false
+    @State private var errorMessage: String?
     
     let onChatCreated: (ChatRoom) -> Void
     
     var body: some View {
         NavigationView {
-            VStack(spacing: 0) {
-                // カスタムヘッダー
+            VStack(spacing: 32) {
+                // ヘッダー
                 VStack(spacing: 12) {
                     Text("4-Marinをはじめよう")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .foregroundColor(.primary)
                     
-                    Text("大切な人と2人だけの特別な空間")
+                    Text("🌟 CloudKitによる安全な招待")
                         .font(.system(size: 16, weight: .medium, design: .rounded))
                         .foregroundColor(.secondary)
                 }
                 .padding(.top, 20)
                 .padding(.horizontal)
                 
-                // タブ選択
-                Picker("", selection: $selectedTab) {
-                    Text("招待を受ける").tag(0)
-                    Text("招待を送る").tag(1)
-                }
-                .pickerStyle(SegmentedPickerStyle())
-                .padding(.horizontal)
-                .padding(.top, 24)
+                Spacer()
                 
-                // タブコンテンツ
-                TabView(selection: $selectedTab) {
-                    // 招待を受ける側
-                    receiveInviteView
-                        .tag(0)
+                // 🌟 [IDEAL SHARING UI] CloudKit招待ボタン
+                VStack(spacing: 16) {
+                    Button {
+                        createChatAndShare()
+                    } label: {
+                        HStack(spacing: 12) {
+                            if isCreatingRoom {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "icloud.and.arrow.up")
+                                    .font(.system(size: 18, weight: .semibold))
+                            }
+                            Text(isCreatingRoom ? "チャットルーム作成中..." : "🌟 CloudKit招待を送信")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .background(
+                            LinearGradient(
+                                gradient: Gradient(colors: [
+                                    Color.blue,
+                                    Color.blue.opacity(0.8)
+                                ]),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .clipShape(Capsule())
+                        .shadow(color: Color.blue.opacity(0.3), radius: 8, x: 0, y: 4)
+                    }
+                    .disabled(isCreatingRoom)
                     
-                    // 招待を送る側
-                    sendInviteView
-                        .tag(1)
+                    Text("理想実装: ゾーン共有によるネイティブ招待")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.blue)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.blue.opacity(0.1))
+                        .clipShape(Capsule())
                 }
-                .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
-                .animation(.easeInOut(duration: 0.3), value: selectedTab)
+                .padding(.horizontal)
+                
+                Spacer()
+                
+                // エラー表示
+                if let errorMessage = errorMessage {
+                    Text(errorMessage)
+                        .foregroundColor(.red)
+                        .padding()
+                        .background(Color.red.opacity(0.1))
+                        .cornerRadius(8)
+                        .padding(.horizontal)
+                }
+                
+                Spacer()
             }
+            .navigationTitle("4-Marin招待")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -59,246 +101,64 @@ struct InviteModalView: View {
                 }
             }
         }
-        .onAppear {
-            generateMyInviteURL()
-        }
-        .sheet(isPresented: $showShareSheet) {
-            ShareSheet(items: [myInviteURL])
-        }
-        .sheet(isPresented: $showAirDropSheet) {
-            AirDropFocusedShareSheet(items: [myInviteURL]) { success in
-                if success {
-                    // AirDrop成功時の処理（現在の実装に合わせて）
-                    dismiss()
-                }
+        // 🌟 [IDEAL SHARING UI] 拡張版CloudKit共有コントローラー（URL共有ボタン付き）
+        .sheet(isPresented: $showCloudSharingController) {
+            if let shareToPresent = shareToPresent {
+                EnhancedCloudSharingView(
+                    share: shareToPresent,
+                    container: CloudKitChatManager.shared.containerForSharing,
+                    onDismiss: {
+                        showCloudSharingController = false
+                        dismiss() // 共有完了時にモーダルも閉じる
+                    }
+                )
             }
         }
     }
     
-    // MARK: - 招待を受ける側のView
-    
-    private var receiveInviteView: some View {
-        VStack(spacing: 32) {
-            Spacer()
-            
-            VStack(spacing: 20) {
-                // アイコン
-                Image(systemName: "link.circle.fill")
-                    .font(.system(size: 60))
-                    .foregroundColor(.blue)
-                
-                VStack(spacing: 12) {
-                    Text("招待リンクをお待ちください")
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                    
-                    Text("大切な人から招待リンクが送られてきたら、\nそのリンクをタップしてください")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(nil)
-                }
-            }
-            
-            // 招待リンクの例
-            VStack(alignment: .leading, spacing: 12) {
-                Text("📱 招待リンクの例：")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.secondary)
-                
-                HStack {
-                    Text("fourmarin://invite?userID=_abc123...")
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundColor(.blue)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.blue.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    
-                    Spacer()
-                }
-            }
-            .padding(.horizontal)
-            
-            Spacer()
-            
-            // 注意事項
-            VStack(alignment: .leading, spacing: 8) {
-                Text("💡 ヒント")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.orange)
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("• リンクをタップすると自動的にチャットが作成されます")
-                    Text("• 相手が4-Marinアプリを使用している必要があります")
-                    Text("• 一度作成されたチャットは永続化されます")
-                }
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .background(Color.orange.opacity(0.1))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal)
-            
-            Spacer()
-        }
-    }
-    
-    // MARK: - 招待を送る側のView
-    
-    private var sendInviteView: some View {
-        VStack(spacing: 32) {
-            Spacer()
-            
-            VStack(spacing: 20) {
-                // アイコン
-                Image(systemName: "person.badge.plus.fill")
-                    .font(.system(size: 60))
-                    .foregroundColor(.green)
-                
-                VStack(spacing: 12) {
-                    Text("大切な人を招待しよう")
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                    
-                    Text("あなたの招待リンクを\n大切な人に送ってください")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(nil)
-                }
-            }
-            
-            // 招待リンク表示
-            VStack(spacing: 16) {
-                Text("あなたの招待リンク")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.primary)
-                
-                VStack(spacing: 12) {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(myInviteURL)
-                            .font(.system(size: 12, weight: .medium, design: .monospaced))
-                            .foregroundColor(.green)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                            .background(Color.green.opacity(0.1))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .frame(maxHeight: 40)
-                    
-                    Button {
-                        UIPasteboard.general.string = myInviteURL
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "doc.on.doc")
-                                .font(.system(size: 14))
-                            Text("コピー")
-                                .font(.system(size: 14, weight: .medium))
-                        }
-                        .foregroundColor(.green)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Color.green.opacity(0.2))
-                        .clipShape(Capsule())
-                    }
-                }
-            }
-            .padding(.horizontal)
-            
-            // 共有ボタン（2つに分割）
-            VStack(spacing: 16) {
-                // AirDrop専用ボタン
-                Button {
-                    showAirDropSheet = true
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "wifi")
-                            .font(.system(size: 18, weight: .semibold))
-                        Text("AirDropで送信")
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
-                    }
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .background(
-                        LinearGradient(
-                            gradient: Gradient(colors: [
-                                Color.blue,
-                                Color.blue.opacity(0.8)
-                            ]),
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .clipShape(Capsule())
-                    .shadow(color: Color.blue.opacity(0.3), radius: 8, x: 0, y: 4)
-                }
-                
-                // その他の共有方法ボタン
-                Button {
-                    showShareSheet = true
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 18, weight: .semibold))
-                        Text("その他の方法で共有")
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
-                    }
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .background(
-                        LinearGradient(
-                            gradient: Gradient(colors: [
-                                Color.green,
-                                Color.green.opacity(0.8)
-                            ]),
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .clipShape(Capsule())
-                    .shadow(color: Color.green.opacity(0.3), radius: 8, x: 0, y: 4)
-                }
-            }
-            .padding(.horizontal)
-            
-            Spacer()
-            
-            // 注意事項
-            VStack(alignment: .leading, spacing: 8) {
-                Text("💡 共有方法")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.green)
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("• AirDropで送信（推奨）")
-                    Text("• メッセージアプリで送信")
-                    Text("• メールで送信")
-                    Text("• その他お好みの方法で")
-                }
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .background(Color.green.opacity(0.1))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal)
-            
-            Spacer()
-        }
-    }
-    
-    // MARK: - Helper Methods
-    
-    private func generateMyInviteURL() {
+    /// 🌟 [IDEAL SHARING UI] チャットルーム作成とCloudKit招待
+    private func createChatAndShare() {
         Task {
-            if let userID = await UserIDManager.shared.getCurrentUserIDAsync() {
+            await MainActor.run {
+                isCreatingRoom = true
+                errorMessage = nil
+            }
+            
+            do {
+                // 1. 一意なroomIDを生成
+                let roomID = "chat-\(UUID().uuidString.prefix(8))"
+                
+                // 2. CloudKitChatManagerを通じてゾーン共有チャットを作成
+                let cloudKitManager = CloudKitChatManager.shared
+                let ckShare = try await cloudKitManager.createSharedChatRoom(
+                    roomID: roomID,
+                    invitedUserID: "pending" // 招待対象は後でCKShareで指定
+                )
+                
+                // 3. ローカルのチャットルームを作成してリストに反映（参加者未承認でも残す）
                 await MainActor.run {
-                    myInviteURL = URLManager.shared.generateInviteURL(userID: userID)
+                    let newRoom = ChatRoom(roomID: roomID, remoteUserID: "", displayName: nil)
+                    modelContext.insert(newRoom)
+                    try? modelContext.save()
+                    onChatCreated(newRoom)
                 }
+
+                await MainActor.run {
+                    // 4. UICloudSharingControllerに必要な情報を設定
+                    self.shareToPresent = ckShare
+                    self.isCreatingRoom = false
+                    // 5. 共有モーダルを表示
+                    self.showCloudSharingController = true
+                }
+                
+                print("🌟 [IDEAL SHARING UI] ChatRoom created and ready for CloudKit sharing: \(roomID)")
+                
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "チャットルーム作成に失敗しました: \(error.localizedDescription)"
+                    self.isCreatingRoom = false
+                }
+                print("❌ [IDEAL SHARING UI] Failed to create chat room: \(error)")
             }
         }
     }

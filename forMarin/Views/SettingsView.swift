@@ -105,6 +105,7 @@ struct SettingsView: View {
             imageSettingsSection
             infoSection
             testSection
+            debugShareAcceptSection
             dangerSection
         }
         .navigationTitle("設定")
@@ -175,15 +176,15 @@ struct SettingsView: View {
             Text("ローカルキャッシュ、画像キャッシュ、設定をクリアします。\nCloudKitのデータは保持されます。")
         }
         
-        .alert("クラウドを含めた完全リセット", isPresented: $showCompleteCloudResetAlert) {
-            Button("完全リセット", role: .destructive) { 
+        .alert("完全初期化（CloudKit含む）", isPresented: $showCompleteCloudResetAlert) {
+            Button("完全初期化", role: .destructive) { 
                 Task { 
-                    performCompleteCloudReset() 
+                    await unifiedResetAll() 
                 } 
             }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("CloudKitを含む全てのデータを削除します。\n⚠️ この操作は取り消せません")
+            Text("CloudKit・ローカルを含む全てのデータを削除します。\n⚠️ この操作は取り消せません")
         }
         .sheet(isPresented: $showPairingView) {
             PairingView(showWelcomeModalOnAppear: true, onChatCreated: { _ in
@@ -412,6 +413,48 @@ struct SettingsView: View {
             }
         }
     }
+
+    // MARK: - Debug: CloudKit共有URL受諾
+    @State private var debugShareURLText: String = ""
+    @State private var isAcceptingShareURL: Bool = false
+    @State private var acceptResultMessage: String = ""
+
+    @ViewBuilder private var debugShareAcceptSection: some View {
+        Section(header: Text("デバッグ: 招待リンクから参加"), footer: Text("CloudKit共有URL（https://www.icloud.com/share/...）を貼り付けて参加を試行します。")) {
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("https://www.icloud.com/share/...", text: $debugShareURLText)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .keyboardType(.URL)
+                    .textFieldStyle(.roundedBorder)
+                
+                HStack {
+                    Button {
+                        Task { await acceptShareFromPastedURL() }
+                    } label: {
+                        HStack {
+                            if isAcceptingShareURL {
+                                ProgressView().scaleEffect(0.8)
+                                Text("参加処理中…")
+                            } else {
+                                Image(systemName: "checkmark.circle")
+                                Text("リンクで参加")
+                            }
+                            Spacer()
+                        }
+                    }
+                    .disabled(debugShareURLText.isEmpty || isAcceptingShareURL)
+                }
+                
+                if !acceptResultMessage.isEmpty {
+                    Text(acceptResultMessage)
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
     
     @ViewBuilder private var imageSettingsSection: some View {
         Section(header: Text("画像設定")) {
@@ -603,25 +646,7 @@ struct SettingsView: View {
                 .foregroundColor(.blue)
                 .disabled(isCollectingLogs)
                 
-                // 統合リセット機能
-                Button {
-                    showLocalResetAlert = true
-                } label: {
-                    HStack {
-                        if isPerformingLocalReset {
-                            ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle(tint: .orange))
-                                .scaleEffect(0.8)
-                            Text("ローカルリセット中...")
-                        } else {
-                            Label("ローカルリセット", systemImage: "arrow.counterclockwise")
-                        }
-                        Spacer()
-                    }
-                }
-                .foregroundColor(.orange)
-                .disabled(isPerformingLocalReset || isPerformingCloudReset)
-                
+                // 統合リセット（CloudKit含む完全初期化）
                 Button {
                     showCompleteCloudResetAlert = true
                 } label: {
@@ -630,15 +655,15 @@ struct SettingsView: View {
                             ProgressView()
                                 .progressViewStyle(CircularProgressViewStyle(tint: .red))
                                 .scaleEffect(0.8)
-                            Text("完全リセット中...")
+                            Text("完全初期化中...")
                         } else {
-                            Label("クラウドを含めた完全リセット", systemImage: "icloud.slash")
+                            Label("完全初期化（CloudKit含む）", systemImage: "trash")
                         }
                         Spacer()
                     }
                 }
                 .foregroundColor(.red)
-                .disabled(isPerformingLocalReset || isPerformingCloudReset)
+                .disabled(isPerformingCloudReset)
             }
         }
     }
@@ -705,11 +730,43 @@ struct SettingsView: View {
             refreshPermissionStatuses()
         }
     }
+
+    // 統合リセット実行
+    private func unifiedResetAll() async {
+        isPerformingCloudReset = true
+        defer { isPerformingCloudReset = false }
+        do {
+            try await CloudKitChatManager.shared.resetAll()
+        } catch {
+            log("Unified reset failed: \(error)", category: "App")
+        }
+    }
     
     private func refreshPermissionStatuses() {
         Task { @MainActor in
             // PermissionManagerの状態を更新
             await permissionManager.updateStatuses()
+        }
+    }
+
+    // 共有URLの受諾（デバッグ）
+    private func acceptShareFromPastedURL() async {
+        guard let url = URL(string: debugShareURLText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            acceptResultMessage = "不正なURLです"
+            return
+        }
+        isAcceptingShareURL = true
+        acceptResultMessage = ""
+        defer { isAcceptingShareURL = false }
+        
+        // アプリ内で受諾を実行
+        let ok = await InvitationManager.shared.acceptInvitation(from: url)
+        if ok {
+            acceptResultMessage = "共有の受諾に成功しました。チャットを読み込みます…"
+            // 受諾後、Shared DBからローカルChatRoomを生成
+            await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
+        } else {
+            acceptResultMessage = "共有の受諾に失敗しました。ログをご確認ください。"
         }
     }
 
@@ -782,7 +839,10 @@ struct SettingsView: View {
     private func syncProfileToCloudKit() {
         myDisplayName = tempDisplayName
         Task {
-            await CKSync.saveProfile(name: myDisplayName, avatarData: myAvatarData)
+            try? await CloudKitChatManager.shared.saveMasterProfile(
+                name: myDisplayName,
+                avatarData: myAvatarData
+            )
         }
     }
     
@@ -796,7 +856,7 @@ struct SettingsView: View {
             
             do {
                 // 本番環境かどうかを確認
-                let isProduction = await CloudKitChatManager.shared.checkIsProductionEnvironment()
+                let isProduction = CloudKitChatManager.shared.checkIsProductionEnvironment()
                 if isProduction {
                     // 本番環境の場合は確認ダイアログを表示
                     await MainActor.run {
@@ -861,7 +921,7 @@ struct SettingsView: View {
             
             do {
                 // 緊急リセット実行（エラー状況の詳細を取得）
-                try await CloudKitChatManager.shared.performEmergencyReset(reason: "ユーザーリクエスト")
+                try await CloudKitChatManager.shared.performEmergencyReset()
                 
                 await MainActor.run {
                     isPerformingReset = false

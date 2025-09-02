@@ -166,182 +166,80 @@ CloudKit スキーマ設計（改訂・完全版）—「1チャット=1ゾー�
 - **ゾーン設計と共有方式**
 
   - **理想**: チャット毎に専用カスタム Zone を作成し、その Zone を CKShare で「ゾーン共有」する。
-  - **現状**: ✅ **修正完了** - 統一ゾーン `SharedRooms` から個別カスタムゾーン + ゾーン共有に変更済み
+  - **現状**: 統一ゾーン `SharedRooms` を使用し、その中に `CD_ChatRoom` と `CD_Message` を格納。共有は `CD_ChatRoom` レコードを root とした「レコード共有」ベース。ゾーン=チャットの 1 対 1 対応になっていない。
   - **所在**: `CloudKitChatManager.createSharedChatRoom`、`CloudKitChatManager.getRoomRecord`、`CloudKitChatManager.createSharedDatabaseSchema`
   - **影響**: データ隔離/購読・差分トークンの粒度が悪化し、退会/削除や将来のゾーン分割移行が複雑化。誤共有・誤取得のリスク増。
-  - **確認ログ**:
-    ```swift
-    ✅ "🌟 [IDEAL ZONE SHARING] Creating custom zone for chat: chat-xxxxx"
-    ✅ "✅ Custom zone created successfully: chat-xxxxx"  
-    ✅ "🌟 [IDEAL ZONE SHARING] Creating CKShare for zone sharing: chat-xxxxx"
-    ✅ "✅ Zone share created and saved successfully"
-    ❌ "⚠️ Using legacy SharedRooms zone" (この警告が出たら未対応)
-    ```
 
 - **レコードタイプ/フィールド命名**
 
   - **理想**: `ChatSession`/`Message`、フィールドは `text`/`attachment`/`senderID`/`timestamp`（必要に応じて `chatRef`）。
-  - **現状**: ✅ **修正完了** - 全レコードタイプとフィールド名を理想仕様に統一済み
+  - **現状**: `CD_ChatRoom`/`CD_Message`、フィールドは `body`/`asset`/`senderID`/`createdAt`/`roomID`、および `reactionEmoji`/`reactions`。`ChatSession` は不在。`participants` をレコード側に保持。
   - **影響**: スキーマ/クエリ/インデックス設計（`lastMessageAt`/`timestamp` の queryable など）が理想と異なる。
-  - **確認ログ**:
-    ```swift
-    ✅ "🌟 [IDEAL FIELDS] ChatSession with ideal field design (no participants)"
-    ✅ "🌟 [IDEAL FIELDS] Message with updated field names (text/timestamp)"  
-    ✅ "✅ Created ChatSession schema record"
-    ✅ "✅ Created Message schema record" 
-    ❌ "⚠️ Legacy field 'body' found - should be 'text'" (この警告が出たら未対応)
-    ❌ "⚠️ Legacy field 'reactions' found - use MessageReaction records instead"
-    ```
 
 - **参加者管理/招待 UI・受け入れフロー**
 
   - **理想**: `UICloudSharingController` を用いた招待・受け入れ。`application(_:userDidAcceptCloudKitShareWith:)` での受け入れハンドラを実装。
-  - **現状**: ❌ **未実装** - ID ベースの `PairingView` 等で接続。`UICloudSharingController` の使用痕跡なし。受け入れハンドラ実装なし（`AppDelegate`/Scene 経路に該当処理なし）。
+  - **現状**: ID ベースの `PairingView` 等で接続。`UICloudSharingController` の使用痕跡なし。受け入れハンドラ実装なし（`AppDelegate`/Scene 経路に該当処理なし）。
   - **所在**: `AppDelegate.swift`（受け入れ処理なし）、`InviteModalView`（UI 連携は未確認だが SharingController の利用は見当たらず）
   - **影響**: 共有受け入れの失敗/未反映や権限不整合が起きやすく、UX と復旧ロジックの負担増。
-  - **確認ログ**:
-    ```swift
-    ✅ "🔗 [IDEAL SHARING UI] Presenting UICloudSharingController"
-    ✅ "✅ Share invitation sent via UICloudSharingController" 
-    ✅ "🎯 [IDEAL SHARING] application(_:userDidAcceptCloudKitShareWith:) called"
-    ✅ "✅ CloudKit share accepted successfully"
-    ❌ "⚠️ Using legacy PairingView instead of UICloudSharingController" 
-    ❌ "⚠️ Share URL opened but no accept handler found"
-    ```
 
 - **CKShare の publicPermission 設定**
 
   - **理想**: 招待制とするため `publicPermission = .none`。
-  - **現状**: ❌ **要確認** - 既定で `publicPermission = .readWrite` を設定。
+  - **現状**: 既定で `publicPermission = .readWrite` を設定。
   - **所在**: `CloudKitChatManager.createSharedChatRoom`、`CloudKitChatManager.createSharedDatabaseSchema`
   - **影響**: 招待制が崩れリンク拡散で不特定多数が参加可能に。個別招待の併用不可・セキュリティ/運用リスク増。
-  - **確認ログ**:
-    ```swift
-    ✅ "🔒 [IDEAL SECURITY] Setting publicPermission = .none for invite-only chat"
-    ✅ "✅ CKShare configured for invite-only access"
-    ❌ "⚠️ publicPermission = .readWrite detected - security risk!" 
-    ❌ "⚠️ Public link sharing enabled - should be invite-only"
-    ```
 
 - **書き込み先データベースの選択（送信経路）**
 
   - **理想**: オーナーは自分の PrivateDB の対象ゾーンへ、参加者は SharedDB へ書き込む。
-  - **現状**: ⚠️ **部分対応** - ゾーン所有者判定ロジックは実装済みだが、実際のDB選択の完全適用は要確認
+  - **現状**: 常に `privateCloudDatabase` に対して保存しており、参加者側の書き込み経路が SharedDB を経由していない。
   - **影響**: 参加者端末での送信互換性に問題が生じる可能性。
   - **所在**: `CloudKitChatManager.sendMessage`、`MessageSyncService.sendMessage`/`updateMessage`/`deleteMessage`
-  - **確認ログ**:
-    ```swift
-    ✅ "📤 [IDEAL DB SELECTION] Using Private DB (owner zone): zoneID"
-    ✅ "📤 [IDEAL DB SELECTION] Using Shared DB (participant zone): zoneID"
-    ✅ "✅ Zone ownership determined correctly"
-    ❌ "⚠️ Always using Private DB - participant DB selection not implemented"
-    ❌ "⚠️ Failed to determine zone ownership for DB selection"
-    ```
 
 - **同期サブスクリプションの粒度**
 
   - **理想**: Shared DB は `CKDatabaseSubscription` のみ。Private DB は `CKDatabaseSubscription`（全ゾーン監視）またはゾーン単位の `CKRecordZoneSubscription`（Private のみ）を選択。
-  - **現状**: ❌ **要確認** - Private/Shared ともに `CKDatabaseSubscription` を使用しつつ、ルーム単位の `CKQuerySubscription` も併用。ゾーン=チャットの前提ではない構成。
+  - **現状**: Private/Shared ともに `CKDatabaseSubscription` を使用しつつ、ルーム単位の `CKQuerySubscription` も併用。ゾーン=チャットの前提ではない構成。
   - **所在**: `CloudKitChatManager.setupSharedDatabaseSubscriptions`、`CloudKitChatManager.setupRoomSubscription`、`MessageStore.setupRoomPushNotifications`
   - **影響**: 通知ノイズや無駄フェッチが増え、電池/帯域コスト上昇。チャット特定・再同期のロジックが複雑化。
-  - **確認ログ**:
-    ```swift
-    ✅ "🔔 [IDEAL SUBSCRIPTION] Setting up CKDatabaseSubscription for Shared DB"
-    ✅ "🔔 [IDEAL SUBSCRIPTION] Setting up CKRecordZoneSubscription for Private zone: zoneID"
-    ✅ "✅ Database subscription configured correctly"
-    ❌ "⚠️ Using CKQuerySubscription - should use zone-based subscriptions"
-    ❌ "⚠️ Multiple subscription types detected - performance impact"
-    ```
 
 - **差分取得 API の使い方**
 
   - **理想**: DB変更一覧→ゾーン差分（`CKFetchDatabaseChangesOperation`→`CKFetchRecordZoneChangesOperation`）を各チャット Zone ごとに `CKServerChangeToken` で厳密に差分取得。
-  - **現状**: ❌ **要確認** - SharedDB では `CKFetchRecordZoneChangesOperation` を使用する一方、PrivateDB 側は複数ゾーンを `CKQuery` で横断取得する実装が中心。
+  - **現状**: SharedDB では `CKFetchRecordZoneChangesOperation` を使用する一方、PrivateDB 側は複数ゾーンを `CKQuery` で横断取得する実装が中心。
   - **影響**: 履歴が多い場合にフルスキャンが増える可能性。
   - **所在**: `MessageSyncService.queryPrivateDatabase`/`querySharedZones`/`fetchRecordsFromSharedZone`
-  - **確認ログ**:
-    ```swift
-    ✅ "🔄 [IDEAL SYNC] Using CKFetchDatabaseChangesOperation"
-    ✅ "🔄 [IDEAL SYNC] Using CKFetchRecordZoneChangesOperation for zone: zoneID"
-    ✅ "💾 [IDEAL SYNC] Server change token saved: tokenHash"
-    ✅ "✅ Incremental sync completed with token"
-    ❌ "⚠️ Using CKQuery for multi-zone fetch - should use zone operations"
-    ❌ "⚠️ No server change token found - full sync required"
-    ```
 
 - **長時間実行アップロード（大容量メディア）**
 
   - **理想**: `CKModifyRecordsOperation.isLongLived = true` によるバックグラウンド継続アップロード。
-  - **現状**: ❌ **未実装** - 直接 `save` を使用し、長時間実行オペレーション未使用。
+  - **現状**: 直接 `save` を使用し、長時間実行オペレーション未使用。
   - **所在**: `MessageSyncService.sendMessage`、`CloudKitChatManager.sendMessage`
   - **影響**: バックグラウンド移行やアプリ終了で送信が中断/失敗し、メディア欠落・再送負荷が発生。
-  - **確認ログ**:
-    ```swift
-    ✅ "📤 [IDEAL UPLOAD] Using CKModifyRecordsOperation.isLongLived for large asset"
-    ✅ "⏳ [IDEAL UPLOAD] Background upload operation started"
-    ✅ "✅ Long-lived operation completed successfully"
-    ❌ "⚠️ Using direct save() for large asset - should use isLongLived"
-    ❌ "⚠️ Upload may fail in background - no long-lived operation"
-    ```
 
 - **desiredKeys によるフィールド最適化**
 
   - **理想**: 一覧フェッチ時は `attachment` を除外し、詳細表示で個別に取得。
-  - **現状**: ✅ **修正完了** - 全てのクエリ操作で desiredKeys を適用済み
+  - **現状**: クエリでの `desiredKeys` 未使用（通知の `desiredKeys` 指定はあり）。
   - **所在**: `MessageSyncService.queryDatabase`/`queryPrivateDatabase`/`querySharedDatabase`
   - **影響**: 不要なアセット転送で表示遅延/帯域浪費。一覧の体感性能が低下。
-  - **確認ログ**:
-    ```swift
-    ✅ "🌟 [IDEAL DESIREDKEYS] Exclude attachment for list performance"
-    ✅ "🌟 [IDEAL] Exclude attachment and legacy reactions for performance"
-    ✅ "⚡ [PERFORMANCE] Using desiredKeys: [roomID, senderID, text, timestamp]"
-    ✅ "📊 Query performance: fetched X records without heavy assets"
-    ❌ "⚠️ Fetching all fields including attachment - performance impact"
-    ```
 
 - **MVVM アーキテクチャの徹底度**
 
   - **理想**: 画面ごとに ViewModel を定義し、UI とデータアクセスを明確分離。
-  - **現状**: ❌ **未実装** - `MessageStore`/各種 *Manager がロジックを担う構成で、View からサービス直呼び出し箇所もあり、ViewModel 分離は部分的。
+  - **現状**: `MessageStore`/各種 *Manager がロジックを担う構成で、View からサービス直呼び出し箇所もあり、ViewModel 分離は部分的。
   - **所在**: `MessageStore`、各種 `*Manager`、各 View からの直接呼び出し箇所
   - **影響**: 関心分離不足によりテスト性/可読性/変更容易性が低下。UI と同期処理のカップリング増。
-  - **確認ログ**:
-    ```swift
-    ✅ "🏗️ [IDEAL MVVM] ChatListViewModel handling UI state"
-    ✅ "🏗️ [IDEAL MVVM] ChatViewModel managing message operations" 
-    ✅ "✅ ViewModel layer properly isolating UI from data layer"
-    ❌ "⚠️ Direct service call from View - should use ViewModel"
-    ❌ "⚠️ UI state managed in View instead of ViewModel"
-    ```
 
 - **インデックス（Queryable）設計**
 
   - **理想**: `lastMessageAt`/`timestamp` に Queryable インデックスを付与。
-  - **現状**: ✅ **修正完了** - ChatSession.lastMessageAt と Message.timestamp にQueryable/Sortableインデックスを設定済み
+  - **現状**: `recordName` に対する queryable 強制作成は試行しているが、上記フィールドのインデックス整備は未実装。
   - **所在**: `CloudKitChatManager.forceCreateQueryableIndexes`
   - **影響**: 最新/未読/ソート系のクエリが重くスケールしない。端末/サーバ負荷とレイテンシ増。
-  - **確認ログ**:
-    ```swift
-    ✅ "🔧 Creating indexes for ChatSession (lastMessageAt - Queryable/Sortable)"
-    ✅ "🔧 Creating indexes for Message (timestamp - Queryable/Sortable)"
-    ✅ "🔧 Creating indexes for MessageReaction (messageRef - Queryable)"
-    ✅ "✅ ChatSession.lastMessageAt equality query succeeded"
-    ✅ "✅ Message.timestamp equality query succeeded"  
-    ❌ "⚠️ Index creation failed for lastMessageAt - queries may be slow"
-    ❌ "⚠️ No sortDescriptor support detected - Sortable index missing"
-    ```
 
 - **その他スキーマ周りの差分**
-  - ✅ **修正完了** - `ChatSession` レコード実装済み（`CD_ChatRoom` から移行）
-  - ✅ **修正完了** - `MessageReaction` レコード実装済み（正規化）
-  - ❌ **要確認** - 共有受け入れ後のゾーン列挙・管理はあるが、ゾーン=チャットの 1 対 1 前提の完全適用は要確認
+  - `ChatSession` レコード不在（`CD_ChatRoom` で代替）。
+  - 共有受け入れ後のゾーン列挙・管理はあるが、ゾーン=チャットの 1 対 1 前提にはなっていない。
   - **影響**: 理想スキーマ前提の最適化/移行手順を適用しづらく、移行・運用コストが増大。
-  - **確認ログ**:
-    ```swift
-    ✅ "🎯 Creating MessageReaction schema (normalized reactions)"
-    ✅ "✅ Created MessageReaction schema record"
-    ✅ "🌟 [IDEAL FIELDS] ChatSession with ideal field design"
-    ✅ "✅ Schema migration from CD_ChatRoom to ChatSession completed"
-    ❌ "⚠️ CD_ChatRoom records still exist - migration incomplete"
-    ❌ "⚠️ Zone-to-chat mapping not 1:1 - shared zone detected"
-    ```

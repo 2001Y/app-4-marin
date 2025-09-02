@@ -164,6 +164,13 @@ struct RootView: View {
                         ChatView(chatRoom: room)
                     }
             }
+            .onChange(of: scenePhase) { newPhase, _ in
+                if newPhase == .active {
+                    Task { @MainActor in
+                        await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
+                    }
+                }
+            }
             // 単一チャットのみ存在する場合、初回起動時に自動遷移
             .onAppear {
                 // ウェルカムモーダルの表示判定
@@ -234,7 +241,8 @@ struct RootView: View {
             }
         }
         .onOpenURL { url in
-            // 招待URLの処理
+            // 🌟 [IDEAL SHARING] CloudKit招待URLとレガシー招待URLの処理
+            log("📩 [IDEAL SHARING] Received URL: \(url)", category: "RootView")
             Task {
                 await handleIncomingURL(url)
             }
@@ -244,30 +252,46 @@ struct RootView: View {
     // MARK: - ルートごとのコンテンツ
     @ViewBuilder
     private var contentView: some View {
-        if chatRooms.isEmpty {
-            // チャットが無い＝ペアリング画面
-            PairingView { newRoom in
-                navigationPath.append(newRoom)
-            }
-        } else {
-            // チャットリスト
-            ChatListView { selected in
-                navigationPath.append(selected)
-            }
+        // 常にチャットリストをルート表示（空の場合はChatListViewが空用コンポーネントを表示）
+        ChatListView { selected in
+            navigationPath.append(selected)
         }
     }
     
     // MARK: - URL Handling
     
-    /// 受信したURLを処理（招待URL）
+    /// 🌟 [IDEAL SHARING] 受信したURLを処理（CloudKit招待URL + レガシー招待URL）
     private func handleIncomingURL(_ url: URL) async {
-        log("Received URL: \(url)", category: "RootView")
+        log("📩 [IDEAL SHARING] Processing incoming URL: \(url)", category: "RootView")
+        log("📩 [IDEAL SHARING] URL scheme: \(url.scheme ?? "nil")", category: "RootView")
+        log("📩 [IDEAL SHARING] URL host: \(url.host ?? "nil")", category: "RootView")
+        log("📩 [IDEAL SHARING] URL path: \(url.path)", category: "RootView")
         
-        // 招待URLかどうかを判定
-        if urlManager.isInviteURL(url) {
+        // CloudKit招待URLかどうかを判定（icloud.comドメイン）
+        if url.host?.contains("icloud.com") == true {
+            await handleCloudKitInviteURL(url)
+        }
+        // レガシー招待URLかどうかを判定
+        else if urlManager.isInviteURL(url) {
             await handleInviteURL(url)
         } else {
-            log("Unknown URL scheme: \(url)", category: "RootView")
+            log("❌ [IDEAL SHARING] Unknown URL scheme: \(url)", category: "RootView")
+        }
+    }
+    
+    /// 🌟 [IDEAL SHARING] CloudKit招待URLを処理
+    private func handleCloudKitInviteURL(_ url: URL) async {
+        log("📩 [IDEAL SHARING] CloudKit invite URL detected: \(url)", category: "RootView")
+        
+        // 期待通りならOSが App/SceneDelegate 経由で受諾を渡すが、
+        // 渡らないケースのためにアプリ内でも受諾を試みる（iOS 17+）。
+        let accepted = await InvitationManager.shared.acceptInvitation(from: url)
+        if accepted {
+            log("✅ [IDEAL SHARING] Accepted CloudKit share via in-app fallback", category: "RootView")
+            // 共有ゾーンからローカルをブートストラップして一覧に反映
+            await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
+        } else {
+            log("⚠️ [IDEAL SHARING] In-app acceptance failed (OS may still complete later)", category: "RootView")
         }
     }
     

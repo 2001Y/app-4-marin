@@ -102,33 +102,13 @@ class OfflineManager: ObservableObject {
         guard isOnline else { return }
         
         Task {
-            do {
-                // Try to sync the message
-                if #available(iOS 17.0, *) {
-                    MessageSyncService.shared.sendMessage(queuedMessage.message)
-                } else {
-                    // Fallback to legacy sync
-                    let _ = try await CKSync.saveMessage(queuedMessage.message)
-                    await MainActor.run {
-                        queuedMessage.message.isSent = true
-                    }
-                }
-                
-                // Remove from queue on success
-                await MainActor.run {
-                    removeFromQueue(queuedMessage)
-                    log("Successfully synced queued message: \(queuedMessage.message.id)", category: "OfflineManager")
-                }
-                
-                // Continue with next message
-                await MainActor.run {
-                    processNextQueuedMessage()
-                }
-                
-            } catch {
-                await MainActor.run {
-                    handleQueuedMessageFailure(queuedMessage, error: error)
-                }
+            // iOS 17+ 前提: 共有ゾーン対応の送信経路のみ使用（非throw）
+            MessageSyncService.shared.sendMessage(queuedMessage.message)
+            // ここでは成功扱いとし、失敗はsyncErrorの購読側で再キュー
+            await MainActor.run {
+                removeFromQueue(queuedMessage)
+                log("Successfully queued send for message: \(queuedMessage.message.id)", category: "OfflineManager")
+                processNextQueuedMessage()
             }
         }
     }

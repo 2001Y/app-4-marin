@@ -65,9 +65,6 @@ class MessageStore: ObservableObject {
         setupSyncSubscriptions()
         loadInitialMessages()
         
-        // 既存のChatRoomが一時的なRoom IDを使用している場合の自動更新
-        checkAndUpdateTemporaryRoomID()
-        
         // 特定のルーム用のPush Notificationサブスクリプションを設定
         setupRoomPushNotifications()
         
@@ -112,6 +109,14 @@ class MessageStore: ObservableObject {
                     self?.isSyncing = isSyncing
                 }
                 .store(in: &cancellables)
+
+            // Subscribe to reaction updates for this room only
+            syncService.reactionsUpdated
+                .filter { $0.roomID == currentRoomID }
+                .sink { [weak self] payload in
+                    self?.refreshReactions(for: payload.messageRecordName)
+                }
+                .store(in: &cancellables)
         }
         
         // Subscribe to offline manager events
@@ -143,20 +148,7 @@ class MessageStore: ObservableObject {
             }
             .store(in: &cancellables)
         
-        // Subscribe to UserID migration notifications
-        NotificationCenter.default.publisher(for: .userIDMigrationRequired)
-            .sink { [weak self] notification in
-                guard let self = self,
-                      let userInfo = notification.userInfo,
-                      let oldUserID = userInfo["oldUserID"] as? String,
-                      let newUserID = userInfo["newUserID"] as? String else {
-                    return
-                }
-                
-                log("🔄 UserID migration detected: \(oldUserID) -> \(newUserID)", category: "MessageStore")
-                self.handleUserIDMigration(oldUserID: oldUserID, newUserID: newUserID)
-            }
-            .store(in: &cancellables)
+        // UserIDマイグレーションは廃止（roomID=zoneName不変のため）
     }
     
     /// 特定のルーム用のPush Notificationサブスクリプションを設定
@@ -337,7 +329,7 @@ class MessageStore: ObservableObject {
         Task {
             do {
                 if let recordName = message.ckRecordName {
-                    try await CKSync.updateMessageBody(recordName: recordName, newBody: newBody)
+                    try await CloudKitChatManager.shared.updateMessage(recordName: recordName, roomID: message.roomID, newBody: newBody)
                     await MainActor.run {
                         message.isSent = true
                     }
@@ -379,7 +371,7 @@ class MessageStore: ObservableObject {
         if let recordName = message.ckRecordName {
             Task {
                 do {
-                    try await CKSync.deleteMessage(recordName: recordName)
+                    try await CloudKitChatManager.shared.deleteMessage(recordName: recordName, roomID: message.roomID)
                     log("Message deleted from CloudKit: \(recordName)", category: "MessageStore")
                 } catch {
                     await MainActor.run {
@@ -417,7 +409,14 @@ class MessageStore: ObservableObject {
         
         Task {
             do {
-                try await CKSync.addReaction(recordName: recordName, emoji: emoji)
+                if let userID = CloudKitChatManager.shared.currentUserID {
+                    try await CloudKitChatManager.shared.addReactionToMessage(
+                        messageRecordName: recordName,
+                        roomID: message.roomID,
+                        emoji: emoji,
+                        userID: userID
+                    )
+                }
                 await MainActor.run {
                     message.isSent = true
                 }
@@ -433,6 +432,28 @@ class MessageStore: ObservableObject {
     
     // MARK: - Private Helpers
     
+    private func refreshReactions(for messageRecordName: String) {
+        let currentRoomID = self.roomID
+        guard let idx = messages.firstIndex(where: { $0.ckRecordName == messageRecordName }) else { return }
+        Task { @MainActor in
+            do {
+                let list = try await CloudKitChatManager.shared.getReactionsForMessage(
+                    messageRecordName: messageRecordName,
+                    roomID: currentRoomID
+                )
+                let grouped = Dictionary(grouping: list, by: { $0.emoji })
+                var builder = ""
+                for (emoji, items) in grouped {
+                    builder += String(repeating: emoji, count: items.count)
+                }
+                messages[idx].reactionEmoji = builder
+                log("🔁 Refreshed reactions for message: \(messageRecordName)", category: "MessageStore")
+            } catch {
+                log("⚠️ Failed to refresh reactions for message: \(messageRecordName) - \(error)", category: "MessageStore")
+            }
+        }
+    }
+
     private func syncToCloudKit(_ message: Message) {
         guard message.isValidForSync else {
             log("Message is not valid for sync: \(message.id)", category: "MessageStore")
@@ -457,7 +478,13 @@ class MessageStore: ObservableObject {
                 let chatManager = CloudKitChatManager.shared
                 
                 // ルームレコードを取得、存在しない場合は作成を試行
-                var roomRecord = await chatManager.getRoomRecord(for: message.roomID)
+                var roomRecord: CKRecord?
+                do {
+                    roomRecord = try await chatManager.getRoomRecord(roomID: message.roomID)
+                } catch {
+                    log("Room record not found for roomID: \(message.roomID)", category: "MessageStore")
+                    roomRecord = nil
+                }
                 
                 if roomRecord == nil {
                     log("No shared room found for roomID: \(message.roomID), attempting to create...", category: "MessageStore")
@@ -494,8 +521,8 @@ class MessageStore: ObservableObject {
                         
                         if let chatRoom = allRooms.first(where: { $0.roomID == message.roomID }) {
                             log("✅ Found local ChatRoom, creating CloudKit shared room for remote user: \(chatRoom.remoteUserID)", category: "MessageStore")
-                            let (createdRoomRecord, _) = try await chatManager.createSharedChatRoom(with: chatRoom.remoteUserID)
-                            roomRecord = createdRoomRecord
+                            let _ = try await chatManager.createSharedChatRoom(roomID: message.roomID, invitedUserID: chatRoom.remoteUserID)
+                            roomRecord = try await chatManager.getRoomRecord(roomID: message.roomID)
                             log("✅ Successfully created shared room for roomID: \(message.roomID)", category: "MessageStore")
                         } else {
                             // 部分一致での検索を試行（デバッグ用）
@@ -527,7 +554,7 @@ class MessageStore: ObservableObject {
                     }
                 }
                 
-                guard let finalRoomRecord = roomRecord else {
+                guard roomRecord != nil else {
                     log("❌ Still no room record available for roomID: \(message.roomID)", category: "MessageStore")
                     await MainActor.run {
                         message.isSent = false
@@ -537,15 +564,15 @@ class MessageStore: ObservableObject {
                 }
                 
                 // 共有ルームにメッセージを送信
-                let recordName = try await chatManager.sendMessage(message, to: finalRoomRecord)
+                try await chatManager.sendMessage(message, to: message.roomID)
                 await MainActor.run {
-                    message.ckRecordName = recordName
+                    message.ckRecordName = message.id.uuidString  // メッセージIDをレコード名として使用
                     message.isSent = true
                     log("Message synced to shared room: \(message.id)", category: "MessageStore")
                     
                     // 特定のメッセージの同期成功を追跡
                     if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-                        log("🎯 TRACKED MESSAGE SUCCESSFULLY SYNCED TO CLOUDKIT: '\(body)' - recordName: \(recordName)", category: "MessageStore")
+                        log("🎯 TRACKED MESSAGE SUCCESSFULLY SYNCED TO CLOUDKIT: '\(body)' - recordName: \(message.id.uuidString)", category: "MessageStore")
                     }
                 }
                 
@@ -588,7 +615,13 @@ class MessageStore: ObservableObject {
                 log("⚠️ Found existing message in memory with same ckRecordName and senderID:", category: "MessageStore")
                 log("📌 Existing - ID: \(existing.id), senderID: \(existing.senderID), body: \(existing.body?.prefix(50) ?? "nil"), createdAt: \(existing.createdAt)", category: "MessageStore")
                 log("📌 New      - ID: \(message.id), senderID: \(message.senderID), body: \(message.body?.prefix(50) ?? "nil"), createdAt: \(message.createdAt)", category: "MessageStore")
-                log("📱 Same message from same sender already exists in UI - no action needed", category: "MessageStore")
+                // 既存メッセージのリアクション表示のみ更新（本文は変わらない想定）
+                if let newReactions = message.reactionEmoji, !newReactions.isEmpty, existing.reactionEmoji != newReactions {
+                    existing.reactionEmoji = newReactions
+                    log("🔁 Updated reaction display for existing message: \(targetRecordName)", category: "MessageStore")
+                } else {
+                    log("📱 Same message from same sender already exists in UI - no action needed", category: "MessageStore")
+                }
                 
                 // 特定のメッセージの重複を詳しくログ
                 if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
@@ -884,138 +917,7 @@ class MessageStore: ObservableObject {
         syncError = MessageStoreError.messageFailed(message.id.uuidString)
     }
     
-    private func handleUserIDMigration(oldUserID: String, newUserID: String) {
-        log("🔄 Starting UserID migration for roomID: \(roomID)", category: "MessageStore")
-        
-        Task { @MainActor in
-            do {
-                // 現在のroomIDに対応するChatRoomを検索
-                let currentRoomID = self.roomID
-                let descriptor = FetchDescriptor<ChatRoom>(
-                    predicate: #Predicate<ChatRoom> { room in
-                        room.roomID == currentRoomID
-                    }
-                )
-                
-                let chatRooms = try modelContext.fetch(descriptor)
-                
-                if let chatRoom = chatRooms.first {
-                    log("🎯 Found ChatRoom to update: remoteUserID=\(chatRoom.remoteUserID), oldRoomID=\(chatRoom.roomID)", category: "MessageStore")
-                    
-                    // Room IDを新しいユーザーIDで更新
-                    chatRoom.updateRoomID(with: newUserID)
-                    
-                    log("✅ Updated ChatRoom roomID: \(chatRoom.roomID)", category: "MessageStore")
-                    
-                    // SwiftDataを保存
-                    try modelContext.save()
-                    
-                    log("💾 Successfully saved updated ChatRoom to SwiftData", category: "MessageStore")
-                    
-                    // UI更新をトリガー
-                    objectWillChange.send()
-                    
-                    // メッセージ同期を再実行（新しいRoom IDでメッセージを取得）
-                    refresh()
-                    
-                } else {
-                    log("⚠️ No ChatRoom found for roomID: \(roomID)", category: "MessageStore")
-                }
-                
-            } catch {
-                log("❌ Failed to handle UserID migration: \(error)", category: "MessageStore")
-                syncError = MessageStoreError.migrationFailed(error.localizedDescription)
-            }
-        }
-    }
-    
-    private func checkAndUpdateTemporaryRoomID() {
-        log("🔍 Checking if ChatRoom uses temporary Room ID", category: "MessageStore")
-        
-        Task { @MainActor in
-            do {
-                // 現在のroomIDに対応するChatRoomを検索
-                let currentRoomID = self.roomID
-                let descriptor = FetchDescriptor<ChatRoom>(
-                    predicate: #Predicate<ChatRoom> { room in
-                        room.roomID == currentRoomID
-                    }
-                )
-                
-                let chatRooms = try modelContext.fetch(descriptor)
-                
-                guard let chatRoom = chatRooms.first else {
-                    log("⚠️ No ChatRoom found for roomID: \(roomID)", category: "MessageStore")
-                    return
-                }
-                
-                // 一時的なRoom IDかどうかをチェック
-                let isTemporaryRoomID = self.isTemporaryRoomID(chatRoom.roomID)
-                
-                if isTemporaryRoomID {
-                    log("⚠️ ChatRoom is using temporary Room ID: \(chatRoom.roomID)", category: "MessageStore")
-                    
-                    // 統一ユーザーIDを取得
-                    if let unifiedUserID = await UserIDManager.shared.getCurrentUserIDAsync() {
-                        log("🔄 Updating ChatRoom with unified UserID: \(unifiedUserID)", category: "MessageStore")
-                        
-                        // Room IDを統一ユーザーIDで更新
-                        chatRoom.updateRoomID(with: unifiedUserID)
-                        
-                        log("✅ Updated ChatRoom roomID from \(roomID) to \(chatRoom.roomID)", category: "MessageStore")
-                        
-                        // SwiftDataを保存
-                        try modelContext.save()
-                        
-                        log("💾 Successfully saved updated ChatRoom to SwiftData", category: "MessageStore")
-                        
-                        // UI更新をトリガー
-                        objectWillChange.send()
-                        
-                        // メッセージ同期を再実行（新しいRoom IDでメッセージを取得）
-                        refresh()
-                        
-                    } else {
-                        log("⚠️ Failed to get unified UserID, cannot update temporary Room ID", category: "MessageStore")
-                    }
-                } else {
-                    log("✅ ChatRoom is using valid Room ID: \(chatRoom.roomID)", category: "MessageStore")
-                }
-                
-            } catch {
-                log("❌ Failed to check and update temporary Room ID: \(error)", category: "MessageStore")
-            }
-        }
-    }
-    
-    /// Room IDが一時的なものかどうかを判定
-    private func isTemporaryRoomID(_ roomID: String) -> Bool {
-        // 一時的なRoom IDの特徴：
-        // 1. デバイスIDが含まれている（UUIDフォーマット）
-        // 2. "unknown-device"が含まれている
-        // 3. HMACで生成された64文字のhex文字列ではない形式
-        
-        // ChatRoom.generateDeterministicRoomIDで生成される正式なRoom IDは64文字のhex文字列
-        let isValidLength = roomID.count == 64
-        let isHexString = roomID.allSatisfy { $0.isHexDigit }
-        
-        if !isValidLength || !isHexString {
-            return true
-        }
-        
-        // 追加の検証：既知の一時的なパターンをチェック
-        if roomID.contains("unknown-device") {
-            return true
-        }
-        
-        // UUIDパターンをチェック（デバイスIDが使われている可能性）
-        let uuidPattern = "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
-        if roomID.range(of: uuidPattern, options: .regularExpression) != nil {
-            return true
-        }
-        
-        return false
-    }
+    // ユーザーIDマイグレーション/一時ID更新のロジックは廃止（roomID=zoneName を不変とする）
     
     // MARK: - Debug Functions
     

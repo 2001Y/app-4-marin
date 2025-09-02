@@ -55,7 +55,7 @@ final class Message {
 
 // MARK: - CloudKit Extensions
 extension Message {
-    static let recordType = "CD_Message"
+    static let recordType = "Message"
     
     /// Converts this Message to a CKRecord for CloudKit synchronization
     var cloudKitRecord: CKRecord {
@@ -64,59 +64,18 @@ extension Message {
         
         record["roomID"] = roomID as CKRecordValue
         record["senderID"] = senderID as CKRecordValue
-        record["body"] = (body ?? "") as CKRecordValue
-        record["createdAt"] = createdAt as CKRecordValue
-        record["isSent"] = isSent as CKRecordValue
-        record["reactions"] = (reactionEmoji ?? "") as CKRecordValue
+        record["text"] = (body ?? "") as CKRecordValue
+        record["timestamp"] = createdAt as CKRecordValue
         
         // Handle asset attachment
         if let assetPath = assetPath, FileManager.default.fileExists(atPath: assetPath) {
             let assetURL = URL(fileURLWithPath: assetPath)
-            record["asset"] = CKAsset(fileURL: assetURL)
+            record["attachment"] = CKAsset(fileURL: assetURL)
         }
         
         return record
     }
     
-    /// Creates a Message from a CKRecord
-    convenience init?(from record: CKRecord) {
-        guard record.recordType == Message.recordType,
-              let roomID = record["roomID"] as? String,
-              let senderID = record["senderID"] as? String,
-              let createdAt = record["createdAt"] as? Date else {
-            return nil
-        }
-        
-        let body = record["body"] as? String
-        let isSent = record["isSent"] as? Bool ?? true
-        let reactions = record["reactions"] as? String
-        var assetPath: String?
-        
-        // Handle asset download
-        if let asset = record["asset"] as? CKAsset,
-           let fileURL = asset.fileURL {
-            let localURL = AttachmentManager.makeFileURL(ext: fileURL.pathExtension)
-            do {
-                if !FileManager.default.fileExists(atPath: localURL.path) {
-                    try FileManager.default.copyItem(at: fileURL, to: localURL)
-                }
-                assetPath = localURL.path
-            } catch {
-                log("Failed to copy asset: \(error)", category: "Message")
-            }
-        }
-        
-        self.init(
-            roomID: roomID,
-            senderID: senderID,
-            body: body,
-            assetPath: assetPath,
-            ckRecordName: record.recordID.recordName,
-            createdAt: createdAt,
-            isSent: isSent,
-            reactionEmoji: reactions
-        )
-    }
     
     /// Updates this Message with data from a CKRecord (for conflict resolution)
     func update(from record: CKRecord) {
@@ -125,14 +84,7 @@ extension Message {
         if let body = record["body"] as? String {
             self.body = body
         }
-        
-        if let reactions = record["reactions"] as? String {
-            self.reactionEmoji = reactions
-        }
-        
-        if let isSent = record["isSent"] as? Bool {
-            self.isSent = isSent
-        }
+        // Reactions/isSent はCloudKitへは保存しない（正規化レコード/ローカル管理）
         
         // Update record name if needed
         if ckRecordName != record.recordID.recordName {

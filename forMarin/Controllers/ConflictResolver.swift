@@ -112,6 +112,7 @@ class ConflictResolver: ObservableObject {
     }
     
     private func resolveMessageWithContentPreservation(local: Message, server: Message) -> Message {
+        // CloudKit正規化リアクションに統一するため、reactionEmojiは統合しない
         // Create a new message that combines the best of both
         let resolved = Message(
             roomID: local.roomID,
@@ -120,11 +121,10 @@ class ConflictResolver: ObservableObject {
             assetPath: local.assetPath ?? server.assetPath,
             ckRecordName: local.ckRecordName ?? server.ckRecordName,
             createdAt: min(local.createdAt, server.createdAt), // Use earlier timestamp
-            isSent: server.isSent, // Server version is authoritative for sent status
-            reactionEmoji: mergeReactions(local: local.reactionEmoji ?? "", server: server.reactionEmoji ?? "")
+            isSent: server.isSent // Server version is authoritative for sent status
         )
         
-        log("Message content preservation completed", category: "ConflictResolver")
+        log("Message content preservation completed (reactions normalized via CloudKit)", category: "ConflictResolver")
         return resolved
     }
     

@@ -1,7 +1,5 @@
-#if canImport(EmojisReactionKit)
-import EmojisReactionKit
-#endif
 import SwiftUI
+import Combine
 import UIKit
 import SwiftData
 import PhotosUI
@@ -14,11 +12,83 @@ enum AssetType {
 }
 
 extension ChatView {
+    // CloudKitベースのリアクション表示（バブル右下/左下）。
+    private struct ReactionOverlay: View {
+        let message: Message
+        let roomID: String
+        let xOffset: CGFloat
+        var onTap: () -> Void
+
+        @State private var items: [(emoji: String, count: Int)] = []
+
+        var body: some View {
+            Group {
+                if !items.isEmpty {
+                    HStack(spacing: 2) {
+                        ForEach(items, id: \.emoji) { item in
+                            HStack(spacing: 2) {
+                                Text(item.emoji)
+                                    .font(.system(size: 14))
+                                if item.count > 1 {
+                                    Text("\(item.count)")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.gray.opacity(0.2))
+                            .clipShape(Capsule())
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { onTap() }
+                    .offset(x: xOffset, y: 12)
+                }
+            }
+            .task {
+                let recordName = message.ckRecordName ?? message.id.uuidString
+                do {
+                    let reactions = try await CloudKitChatManager.shared.getReactionsForMessage(messageRecordName: recordName, roomID: roomID)
+                    let counts = reactions.reduce(into: [String: Int]()) { dict, r in
+                        dict[r.emoji, default: 0] += 1
+                    }
+                    let sorted = counts.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
+                    if sorted.count > 0 { log("ReactionOverlay: loaded count=\(sorted.count) for msg=\(recordName)", category: "ChatView") }
+                    await MainActor.run { self.items = sorted }
+                } catch {
+                    // エラー時は表示しない（ログのみ）
+                    log("ReactionOverlay: fetch failed error=\(error)", category: "ChatView")
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .reactionsUpdated)) { notif in
+                let recName = message.ckRecordName ?? message.id.uuidString
+                if let info = notif.userInfo as? [String: Any], let updated = info["recordName"] as? String, updated == recName {
+                    Task { @MainActor in
+                        do {
+                            let reactions = try await CloudKitChatManager.shared.getReactionsForMessage(messageRecordName: recName, roomID: roomID)
+                            let counts = reactions.reduce(into: [String: Int]()) { dict, r in
+                                dict[r.emoji, default: 0] += 1
+                            }
+                            let sorted = counts.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }
+                            self.items = sorted
+                        } catch {
+                            log("ReactionOverlay: refresh fetch failed error=\(error)", category: "ChatView")
+                        }
+                    }
+                }
+            }
+        }
+    }
     
     // MARK: - Message Bubble Views
     @ViewBuilder 
     func bubble(for message: Message) -> some View {
-        if isMediaMessage(message) {
+        // コンテンツ未確定（text空・asset未着）のメッセージは表示しない（iOS17+のモダン挙動）
+        let hasBody = !(message.body?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if !hasBody && message.assetPath == nil {
+            EmptyView()
+        } else if isMediaMessage(message) {
             mediaBubble(for: message)
         } else {
             textBubble(for: message)
@@ -33,17 +103,12 @@ extension ChatView {
     // アセットの種別を判定
     private func getAssetType(_ assetPath: String) -> AssetType {
         let ext = URL(fileURLWithPath: assetPath).pathExtension.lowercased()
-        log("getAssetType: File extension: '\(ext)' for path: \(assetPath)", category: "DEBUG")
-        
         switch ext {
         case "mov", "mp4", "m4v", "avi":
-            log("getAssetType: Detected as video", category: "DEBUG")
             return .video
         case "jpg", "jpeg", "png", "heic", "heif", "gif":
-            log("getAssetType: Detected as image", category: "DEBUG")
             return .image
         default:
-            log("getAssetType: Unknown extension, defaulting to image", category: "DEBUG")
             return .image // デフォルトは画像として扱う
         }
     }
@@ -169,29 +234,20 @@ extension ChatView {
                             missingMediaPlaceholder(type: .image, message: "メディアパスが無効です")
                         }
                         
-                        // リアクション表示（メディアバブルの右下に相対配置）
-                        if let reactions = message.reactionEmoji, !reactions.isEmpty {
-                            HStack(spacing: 2) {
-                                ForEach(reactions.map { String($0) }.reduce(into: [:]) { dict, emoji in
-                                    dict[emoji, default: 0] += 1
-                                }.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }, id: \.0) { item in
-                                    HStack(spacing: 2) {
-                                        Text(item.0)
-                                            .font(.system(size: 14))
-                                        if item.1 > 1 {
-                                            Text("\(item.1)")
-                                                .font(.system(size: 10))
-                                                .foregroundColor(.secondary)
-                                        }
-                                    }
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.gray.opacity(0.2))
-                                    .clipShape(Capsule())
+                        // リアクション表示（CloudKit集計に置換）
+                        ReactionOverlay(
+                            message: message,
+                            roomID: roomID,
+                            xOffset: 4,
+                            onTap: {
+                                if actionSheetMessage == nil && reactionPickerMessage == nil {
+                                    isTextFieldFocused = false
+                                    reactionPickerMessage = message
+                                } else {
+                                    log("Reaction: skip open (another sheet active)", category: "ChatView")
                                 }
                             }
-                            .offset(x: 4, y: 12) // 右下から少し内側、テキストに被らない位置
-                        }
+                        )
                     }
                     Text(message.createdAt, style: .time)
                         .font(.caption2)
@@ -260,230 +316,171 @@ extension ChatView {
                             missingMediaPlaceholder(type: .image, message: "メディアパスが無効です")
                         }
                         
-                        // リアクション表示（メディアバブルの左下に相対配置）
-                        if let reactions = message.reactionEmoji, !reactions.isEmpty {
-                            HStack(spacing: 2) {
-                                ForEach(reactions.map { String($0) }.reduce(into: [:]) { dict, emoji in
-                                    dict[emoji, default: 0] += 1
-                                }.map { ($0.key, $0.value) }.sorted { $0.1 > $1.1 }, id: \.0) { item in
-                                    HStack(spacing: 2) {
-                                        Text(item.0)
-                                            .font(.system(size: 14))
-                                        if item.1 > 1 {
-                                            Text("\(item.1)")
-                                                .font(.system(size: 10))
-                                                .foregroundColor(.secondary)
-                                        }
-                                    }
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.gray.opacity(0.2))
-                                    .clipShape(Capsule())
+                        // リアクション表示（CloudKit集計に置換）
+                        ReactionOverlay(
+                            message: message,
+                            roomID: roomID,
+                            xOffset: -4,
+                            onTap: {
+                                if actionSheetMessage == nil && reactionPickerMessage == nil {
+                                    isTextFieldFocused = false
+                                    reactionPickerMessage = message
+                                } else {
+                                    log("Reaction: skip open (another sheet active)", category: "ChatView")
                                 }
                             }
-                            .offset(x: -4, y: 12) // 左下から少し内側、テキストに被らない位置
-                        }
+                        )
                     }
                 }
             }
-            .onAppear {
-                // デバッグログをonAppearで出力
-                if let assetPath = message.assetPath {
-                    let assetType = getAssetType(assetPath)
-                    let url = URL(fileURLWithPath: assetPath)
-                    let fileExists = FileManager.default.fileExists(atPath: assetPath)
-                    
-                    log("mediaBubble: Processing message ID: \(message.id)", category: "DEBUG")
-                    log("mediaBubble: Asset path: \(assetPath)", category: "DEBUG")
-                    log("mediaBubble: File extension: \(url.pathExtension)", category: "DEBUG")
-                    log("mediaBubble: Asset type: \(assetType)", category: "DEBUG")
-                    log("mediaBubble: File exists: \(fileExists)", category: "DEBUG")
-                    
-                    switch assetType {
-                    case .image:
-                        log("mediaBubble: Processing as image", category: "DEBUG")
-                        // ファイル拡張子を再チェック
-                        let fileExtension = url.pathExtension.lowercased()
-                        if ["mov", "mp4", "m4v", "avi"].contains(fileExtension) {
-                            log("mediaBubble: WARNING - Video file detected in image processing path!", category: "DEBUG")
-                            log("mediaBubble: Skipping image processing for video file: \(fileExtension)", category: "DEBUG")
-                            log("mediaBubble: Skipping UIImage(contentsOfFile:) for video file: \(fileExtension)", category: "DEBUG")
-                        }
-                    case .video:
-                        log("mediaBubble: Processing as video", category: "DEBUG")
-                    }
-                }
-            }
+            .onAppear { /* no-op: 過剰なログを抑制 */ }
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
-        .background {
-            // リアクション機能（相手のメッセージのみ）
-            if message.senderID != myID {
-                ReactionKitWrapperView(message: message) { emoji in
-                    // 触覚フィードバック
-                    let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-                    impactFeedback.impactOccurred()
-                    
-                    var reactions = message.reactionEmoji ?? ""
-                    reactions.append(emoji)
-                    message.reactionEmoji = reactions
-                    updateRecentEmoji(emoji)
-                    if let recName = message.ckRecordName {
-                        Task {
-                            if let userID = CloudKitChatManager.shared.currentUserID {
-                                try? await CloudKitChatManager.shared.addReactionToMessage(
-                                    messageRecordName: recName,
-                                    roomID: message.roomID,
-                                    emoji: emoji,
-                                    userID: userID
-                                )
-                            }
-                        }
-                    }
-                }
+        .scaleEffect(pressingMessageID == message.id ? 1.03 : 1.0)
+        .shadow(color: Color.primary.opacity(pressingMessageID == message.id ? 0.15 : 0.0), radius: pressingMessageID == message.id ? 8 : 0, y: pressingMessageID == message.id ? 4 : 0)
+        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: pressingMessageID == message.id)
+        .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 20, pressing: { pressing in
+            if pressing {
+                withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) { pressingMessageID = message.id }
+            } else {
+                withAnimation(.spring(response: 0.2, dampingFraction: 0.8)) { if pressingMessageID == message.id { pressingMessageID = nil } }
             }
-        }
+        }, perform: {
+            log("LongPress: message bubble id=\(message.id)", category: "ChatView")
+            isTextFieldFocused = false
+            actionSheetMessage = message
+            actionSheetTargetGroup = nil
+        })
+        .sensoryFeedback(.impact, trigger: pressingMessageID == message.id)
+        .sensoryFeedback(.selection, trigger: actionSheetMessage?.id == message.id)
         .id(message.id)
     }
 
     // Text / reaction bubble
     @ViewBuilder 
     func textBubble(for message: Message) -> some View {
-        let reactionStr = message.reactionEmoji
-        let trimmedBody = message.body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let isEmojiOnly = !trimmedBody.isEmpty && trimmedBody.allSatisfy { char in
-            char.unicodeScalars.allSatisfy { $0.properties.isEmoji }
-        }
-        let emojiCount = message.body?.count ?? 0
-        
-        Group {
-            VStack(alignment: message.senderID == myID ? .trailing : .leading, spacing: 2) {
-                HStack(alignment: .bottom, spacing: 6) {
-                    if message.senderID != myID {
-                        // Left side message
-                        ZStack(alignment: .bottomTrailing) {
-                            if isEmojiOnly && emojiCount <= 3 {
-                                Text(message.body ?? "")
-                                    .font(.system(size: 60))
-                            } else {
-                                Text(message.body ?? "")
-                                    .padding(10)
-                                    .background(Color(.systemGray5))
-                                    .clipShape(RoundedRectangle(cornerRadius: 20))
-                                    .font(.system(size: 15))
-                            }
-                            // リアクションをバブルの右下に相対配置
-                            if let reactionStr {
-                                Text(reactionStr)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
-                                    .background(.ultraThinMaterial)
-                                    .clipShape(Capsule())
-                                    .offset(x: 4, y: 12) // 右下から少し内側、テキストに被らない位置
-                            }
-                        }
-                        Text(message.createdAt, style: .time)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    } else {
-                        // Right side (my) message
-                        Text(message.createdAt, style: .time)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        ZStack(alignment: .bottomLeading) {
-                            if editingMessage?.id == message.id {
-                                TextField("", text: $editingText, axis: .vertical)
-                                    .textFieldStyle(.plain)
-                                    .padding(10)
-                                    .background(Color.accentColor.opacity(0.8))
-                                    .foregroundColor(.white)
-                                    .clipShape(RoundedRectangle(cornerRadius: 20))
-                                    .font(.system(size: 15))
-                                    .focused($editingFieldFocused)
-                                    .onSubmit { commitInlineEdit() }
-                                    .onAppear { editingFieldFocused = true }
-                            } else if isEmojiOnly && emojiCount <= 3 {
-                                Text(message.body ?? "")
-                                    .font(.system(size: 60))
-                            } else {
-                                Text(message.body ?? "")
-                                    .padding(10)
-                                    .background(Color.accentColor.opacity(0.8))
-                                    .foregroundColor(.white)
-                                    .clipShape(RoundedRectangle(cornerRadius: 20))
-                                    .font(.system(size: 15))
-                            }
-                            // リアクションをバブルの左下に相対配置
-                            if let reactionStr {
-                                Text(reactionStr)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
-                                    .background(.ultraThinMaterial)
-                                    .clipShape(Capsule())
-                                    .offset(x: -4, y: 12) // 左下から少し内側、テキストに被らない位置
-                            }
-                        }
-                    }
-                }
+        if let sysText = Message.systemDisplayText(for: message.body) {
+            // システムメッセージは中央・小さく・シンプルに表示
+            Text(sysText)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+                .multilineTextAlignment(.center)
+                .padding(.vertical, 6)
+                .id(message.id)
+        } else {
+            let trimmedBody = message.body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let isEmojiOnly = !trimmedBody.isEmpty && trimmedBody.allSatisfy { char in
+                char.unicodeScalars.allSatisfy { $0.properties.isEmoji }
             }
-        }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
-        .id(message.id)
-        .background {
-            // EmojisReactionKit for partner messages
-            if message.senderID != myID {
-                ReactionKitWrapperView(message: message) { emoji in
-                    // 触覚フィードバック
-                    let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-                    impactFeedback.impactOccurred()
-                    
-                    // Add reaction
-                    var reactions = message.reactionEmoji ?? ""
-                    reactions.append(emoji)
-                    message.reactionEmoji = reactions
-                    updateRecentEmoji(emoji)
-                    // Sync to CloudKit
-                    if let recName = message.ckRecordName {
-                        Task {
-                            if let userID = CloudKitChatManager.shared.currentUserID {
-                                try? await CloudKitChatManager.shared.addReactionToMessage(
-                                    messageRecordName: recName,
-                                    roomID: message.roomID,
-                                    emoji: emoji,
-                                    userID: userID
+            let emojiCount = message.body?.count ?? 0
+            
+            Group {
+                VStack(alignment: message.senderID == myID ? .trailing : .leading, spacing: 2) {
+                    HStack(alignment: .bottom, spacing: 6) {
+                        if message.senderID != myID {
+                            // Left side message
+                            ZStack(alignment: .bottomTrailing) {
+                                if isEmojiOnly && emojiCount <= 3 {
+                                    Text(message.body ?? "")
+                                        .font(.system(size: 60))
+                                } else {
+                                    Text(message.body ?? "")
+                                        .padding(10)
+                                        .background(Color(.systemGray5))
+                                        .clipShape(RoundedRectangle(cornerRadius: 20))
+                                        .font(.system(size: 15))
+                                }
+                                // リアクションをCloudKit集計で表示
+                                ReactionOverlay(
+                                    message: message,
+                                    roomID: roomID,
+                                    xOffset: 4,
+                                    onTap: {
+                                        if actionSheetMessage == nil && reactionPickerMessage == nil {
+                                            isTextFieldFocused = false
+                                            reactionPickerMessage = message
+                                        } else {
+                                            log("Reaction: skip open (another sheet active)", category: "ChatView")
+                                        }
+                                    }
+                                )
+                            }
+                            Text(message.createdAt, style: .time)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        } else {
+                            // Right side (my) message
+                            Text(message.createdAt, style: .time)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            ZStack(alignment: .bottomLeading) {
+                                // 編集は入力欄で行うため、バブル内のインライン編集UIは使用しない
+                                if isEmojiOnly && emojiCount <= 3 {
+                                    Text(message.body ?? "")
+                                        .font(.system(size: 60))
+                                } else {
+                                    Text(message.body ?? "")
+                                        .padding(10)
+                                        .background(Color.accentColor.opacity(0.8))
+                                        .foregroundColor(.white)
+                                        .clipShape(RoundedRectangle(cornerRadius: 20))
+                                        .font(.system(size: 15))
+                                }
+                                // リアクションをCloudKit集計で表示
+                                ReactionOverlay(
+                                    message: message,
+                                    roomID: roomID,
+                                    xOffset: -4,
+                                    onTap: {
+                                        if actionSheetMessage == nil && reactionPickerMessage == nil {
+                                            isTextFieldFocused = false
+                                            reactionPickerMessage = message
+                                        } else {
+                                            log("Reaction: skip open (another sheet active)", category: "ChatView")
+                                        }
+                                    }
                                 )
                             }
                         }
                     }
                 }
             }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
+            .scaleEffect(pressingMessageID == message.id ? 1.03 : 1.0)
+            .shadow(color: Color.primary.opacity(pressingMessageID == message.id ? 0.12 : 0.0), radius: pressingMessageID == message.id ? 6 : 0, y: pressingMessageID == message.id ? 3 : 0)
+            .animation(.spring(response: 0.22, dampingFraction: 0.8), value: pressingMessageID == message.id)
+            // テキストメッセージのワンタップでリアクション一覧を表示（他のシート表示中は抑止）
+            // メッセージ全体はタップ対象にしない（リアクションエリアのみ）
+            .id(message.id)
+            .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 20, pressing: { pressing in
+                if pressing {
+                    withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) { pressingMessageID = message.id }
+                } else {
+                    withAnimation(.spring(response: 0.2, dampingFraction: 0.8)) { if pressingMessageID == message.id { pressingMessageID = nil } }
+                }
+            }, perform: {
+                log("LongPress: text bubble id=\(message.id)", category: "ChatView")
+                // シート提示前にキーボードを閉じて制約衝突を避ける
+                isTextFieldFocused = false
+                actionSheetMessage = message
+                actionSheetTargetGroup = nil
+            })
+            .sensoryFeedback(.impact, trigger: pressingMessageID == message.id)
+            .sensoryFeedback(.selection, trigger: actionSheetMessage?.id == message.id)
+            // 右クリック/長押しのデフォルトメニューは使用しない（ハーフモーダルへ集約）
         }
-        .contextMenu(menuItems: {
-            if message.senderID == myID {
-                Button {
-                    editingMessage = message
-                    editingText = message.body ?? ""
-                } label: {
-                    Label("編集", systemImage: "pencil")
-                }
-                Button(role: .destructive) {
-                    deleteMessage(message)
-                } label: {
-                    Label("削除", systemImage: "trash")
-                }
-            }
-        })
     }
 
     // imageBubble は mediaBubble に統合済み（削除）
     
     // メディアファイル不存在時のプレースホルダー
     @ViewBuilder
-    private func missingMediaPlaceholder(type: AssetType, message: String) -> some View {
+    func missingMediaPlaceholder(type: AssetType, message: String) -> some View {
         VStack(spacing: 8) {
             Image(systemName: type == .image ? "photo" : "video")
                 .font(.system(size: 32))

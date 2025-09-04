@@ -5,8 +5,9 @@ struct DismissKeyboardOnDrag: ViewModifier {
         content.simultaneousGesture(
             DragGesture(minimumDistance: 10, coordinateSpace: .local)
                 .onChanged { value in
-                    // 縦方向 (下方向) のみでキーボードを閉じる。横移動は無視し、ページスワイプを阻害しない。
+                    // 縦方向 (下方向) のみでキーボードを閉じる。横移動は無視し、ページスワイプを妨害しない。
                     if value.translation.height > abs(value.translation.width) && value.translation.height > 0 {
+                        log("Keyboard: dismiss by input drag", category: "ChatView")
                         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                     }
                 }

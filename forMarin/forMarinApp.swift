@@ -144,11 +144,16 @@ struct RootView: View {
     // CloudKit管理
     @StateObject private var cloudKitManager = CloudKitChatManager.shared
     @State private var showCloudKitResetAlert = false
+    // ローディング（OS標準ProgressViewを全画面オーバーレイ表示）
+    @State private var isLoadingOverlayVisible = false
+    @State private var loadingOverlayTitle: String? = nil
     // 環境変数
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.modelContext) private var modelContext
     // URL管理
     @StateObject private var urlManager = URLManager.shared
+    // 特徴ページの初回表示管理
+    @AppStorage("hasSeenFeatures") private var hasSeenFeatures: Bool = false
     
     init() {
         // ウェルカムモーダルの初期表示判定をストレージから読み取り
@@ -164,9 +169,37 @@ struct RootView: View {
                         ChatView(chatRoom: room)
                     }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .openChatRoom)) { notif in
+                // QR読み取りなどからの遷移要求を受け取って対象チャットへ遷移
+                if let room = notif.userInfo?["room"] as? ChatRoom {
+                    navigationPath.append(room)
+                    isLoadingOverlayVisible = false
+                } else if let roomID = notif.userInfo?["roomID"] as? String {
+                    do {
+                        let descriptor = FetchDescriptor<ChatRoom>(
+                            predicate: #Predicate<ChatRoom> { $0.roomID == roomID }
+                        )
+                        if let found = try? modelContext.fetch(descriptor).first {
+                            navigationPath.append(found)
+                            isLoadingOverlayVisible = false
+                        }
+                    }
+                }
+            }
+            // ローディングの表示指示（通知名は生文字列で最小実装）
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("showGlobalLoading"))) { notif in
+                loadingOverlayTitle = (notif.userInfo?["title"] as? String) ?? nil
+                isLoadingOverlayVisible = true
+                log("UI: showGlobalLoading (title=\(loadingOverlayTitle ?? "nil"))", category: "UI")
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("hideGlobalLoading"))) { _ in
+                isLoadingOverlayVisible = false
+                log("UI: hideGlobalLoading", category: "UI")
+            }
             .onChange(of: scenePhase) { newPhase, _ in
                 if newPhase == .active {
                     Task { @MainActor in
+                        await CloudKitChatManager.shared.bootstrapOwnedRooms(modelContext: modelContext)
                         await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
                     }
                 }
@@ -188,14 +221,31 @@ struct RootView: View {
                 isFirstLaunch = false
             }
             
-            // ウェルカムモーダルオーバーレイ
-            WelcomeModalOverlay(isPresented: $showWelcomeModal) {
+            // ウェルカムモーダル（経緯）オーバーレイ
+            WelcomeReasonModalOverlay(isPresented: $showWelcomeModal) {
                 hasShownWelcomeStorage = true
                 shouldShowWelcome = false
             }
             
             // オフラインモーダルオーバーレイ
             OfflineModalOverlay(connectivityManager: connectivityManager)
+
+            // ローディングオーバーレイ（最小・OS標準）
+            if isLoadingOverlayVisible {
+                ZStack {
+                    Color.black.opacity(0.2).ignoresSafeArea()
+                    VStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.large)
+                            .tint(.white)
+                        if let t = loadingOverlayTitle, !t.isEmpty {
+                            Text(t).foregroundStyle(.white).font(.system(size: 13, weight: .medium, design: .rounded))
+                        }
+                    }
+                }
+                .transition(.opacity)
+                .accessibilityLabel(Text(loadingOverlayTitle ?? "読み込み中"))
+            }
         }
         // CloudKitリセットアラート
         .alert("CloudKitデータをリセットしました", isPresented: $showCloudKitResetAlert) {
@@ -247,14 +297,32 @@ struct RootView: View {
                 await handleIncomingURL(url)
             }
         }
+        // グローバルアクセントカラー（iOS 15+ 推奨の .tint）
+        .tint(Color("AccentColor"))
     }
 
     // MARK: - ルートごとのコンテンツ
     @ViewBuilder
     private var contentView: some View {
-        // 常にチャットリストをルート表示（空の場合はChatListViewが空用コンポーネントを表示）
-        ChatListView { selected in
-            navigationPath.append(selected)
+        // 初回は特徴ページをルート表示（名前の有無では判定しない）
+        if hasSeenFeatures == false {
+            FeaturesPage(
+                showWelcomeModalOnAppear: false,
+                onChatCreated: { room in
+                    // チャット作成後にリスト/チャットへ遷移
+                    hasSeenFeatures = true
+                    navigationPath.append(room)
+                },
+                onDismiss: {
+                    // 読み込み完了などの合図でチャットリストへ
+                    hasSeenFeatures = true
+                }
+            )
+        } else {
+            // それ以外はチャットリストをルート表示
+            ChatListView { selected in
+                navigationPath.append(selected)
+            }
         }
     }
     
@@ -290,6 +358,7 @@ struct RootView: View {
             log("✅ [IDEAL SHARING] Accepted CloudKit share via in-app fallback", category: "RootView")
             // 共有ゾーンからローカルをブートストラップして一覧に反映
             await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
+            await MainActor.run { hasSeenFeatures = true }
         } else {
             log("⚠️ [IDEAL SHARING] In-app acceptance failed (OS may still complete later)", category: "RootView")
         }
@@ -308,6 +377,7 @@ struct RootView: View {
         if let newRoom = await urlManager.createChatFromInvite(userID: userID, modelContext: modelContext) {
             await MainActor.run {
                 log("Successfully created chat from invite", category: "RootView")
+                hasSeenFeatures = true
                 // 新しいチャットルームに遷移
                 navigationPath.append(newRoom)
             }

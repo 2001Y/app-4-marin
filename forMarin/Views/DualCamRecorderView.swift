@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AVKit
 import Photos
 
@@ -38,6 +39,11 @@ struct DualCamRecorderView: View {
     
     // ズーム管理
     @State private var selectedZoom: Double = 0.5
+    @State private var dragStartZoom: CGFloat = 1.0
+    @State private var didBeginZoomDrag: Bool = false
+    private let pointsPerDoubling: CGFloat = 160 // ネイティブに近い感度（1オクターブ=~160pt）
+    @State private var pinchBaseline: Double = 1.0
+    @State private var isPinching: Bool = false
 
     private var dragProgress: CGFloat {
         let dy = abs(dragState.height)
@@ -148,7 +154,45 @@ struct DualCamRecorderView: View {
                         }
                     }
                 }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 20)
+                        .onEnded { value in
+                            guard recorder.state == .previewing || recorder.state == .recording else { return }
+                            let dx = value.translation.width
+                            let dy = value.translation.height
+                            let corner: DualCameraRecorder.OverlayCorner
+                            if dx >= 0 && dy >= 0 {
+                                corner = .bottomRight
+                            } else if dx < 0 && dy >= 0 {
+                                corner = .bottomLeft
+                            } else if dx < 0 && dy < 0 {
+                                corner = .topLeft
+                            } else {
+                                corner = .topRight
+                            }
+                            recorder.setOverlayCorner(corner)
+                        }
+                )
                 .frame(width: previewWidth, height: previewHeight)
+                // プレビュー上でのピンチ連続ズーム（終端スナップ＋ハプティクス）
+                .simultaneousGesture(
+                    MagnificationGesture()
+                        .onChanged { scale in
+                            if !isPinching {
+                                pinchBaseline = selectedZoom
+                                isPinching = true
+                            }
+                            let target = clampDisplayZoom(Double(scale) * pinchBaseline)
+                            selectedZoom = target
+                            handleZoomChange(target)
+                        }
+                        .onEnded { _ in
+                            // スナップせず、指を離した倍率で固定
+                            handleZoomChange(selectedZoom)
+                            isPinching = false
+                        }
+                )
 
                 Spacer()
 
@@ -156,7 +200,9 @@ struct DualCamRecorderView: View {
                 if !isInPreviewMode && !recorder.availableZoomFactors.isEmpty {
                     ZoomSelectorView(
                         selectedZoom: $selectedZoom,
-                        availableZooms: recorder.availableZoomFactors
+                        availableZooms: recorder.availableZoomFactors,
+                        minZoom: recorder.minDisplayZoom,
+                        maxZoom: recorder.maxDisplayZoom
                     ) { zoom in
                         handleZoomChange(zoom)
                     }
@@ -274,7 +320,7 @@ struct DualCamRecorderView: View {
         .onChange(of: recorder.state) { _, newState in
             // 録画終了時の処理は削除（isVideoModeをリセットしない）
         }
-        .onChange(of: recorder.currentZoomFactor) { _, newZoom in
+        .onChange(of: recorder.currentDisplayZoom) { _, newZoom in
             selectedZoom = newZoom
         }
         // エラーダイアログ
@@ -448,7 +494,16 @@ struct DualCamRecorderView: View {
     
     // ズーム変更ハンドラ
     private func handleZoomChange(_ zoom: Double) {
-        log("Zoom changed to \(zoom)", category: "DualCamRecorderView")
-        recorder.setZoomFactor(zoom)
+        log("Zoom changed (display) to \(zoom)", category: "DualCamRecorderView")
+        recorder.setDisplayZoom(zoom)
+    }
+    
+    private func clampDisplayZoom(_ z: Double) -> Double {
+        min(max(z, recorder.minDisplayZoom), recorder.maxDisplayZoom)
+    }
+    
+    private func nearestDisplayStop(to z: Double) -> Double {
+        guard !recorder.availableZoomFactors.isEmpty else { return z }
+        return recorder.availableZoomFactors.min(by: { abs($0 - z) < abs($1 - z) }) ?? z
     }
 } 

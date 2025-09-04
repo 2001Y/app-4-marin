@@ -29,36 +29,12 @@ class ReactionManager: ObservableObject {
     
     /// メッセージにリアクション絵文字を追加
     func addReaction(_ emoji: String, to message: Message) async -> Bool {
-        guard let recordName = message.ckRecordName else {
-            log("Cannot add reaction: message has no CloudKit record name", category: "ReactionManager")
-            return false
-        }
-        
-        do {
-            // CloudKitでリアクションを追加
-            guard let currentUserID = CloudKitChatManager.shared.currentUserID else {
-                log("Cannot add reaction: user not authenticated", category: "ReactionManager")
-                return false
-            }
-            try await CloudKitChatManager.shared.addReactionToMessage(
-                messageRecordName: recordName,
-                roomID: message.roomID,
-                emoji: emoji,
-                userID: currentUserID
-            )
-            
-            // 使用頻度を更新
-            incrementEmojiUsage(emoji)
-            updateRecentEmojis(emoji)
-            
-            log("Reaction added successfully: \(emoji)", category: "ReactionManager")
-            return true
-            
-        } catch {
-            log("Failed to add reaction: \(error)", category: "ReactionManager")
-            lastError = error
-            return false
-        }
+        guard let userID = CloudKitChatManager.shared.currentUserID else { return false }
+        await CKSyncEngineManager.shared.queueReaction(messageRecordName: message.ckRecordName ?? message.id.uuidString,
+                                                      roomID: message.roomID,
+                                                      emoji: emoji,
+                                                      userID: userID)
+        return true
     }
     
     // MARK: - Emoji Management
@@ -174,68 +150,4 @@ enum EmojiCategory: String, CaseIterable {
 
 // MARK: - SwiftUI Integration
 
-struct ReactionPickerView: View {
-    let message: Message
-    @State private var selectedCategory: EmojiCategory = .recent
-    @StateObject private var reactionManager = ReactionManager.shared
-    @Environment(\.dismiss) private var dismiss
-    
-    var body: some View {
-        NavigationView {
-            VStack(spacing: 0) {
-                // カテゴリ選択
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(EmojiCategory.allCases, id: \.self) { category in
-                            Button(action: { selectedCategory = category }) {
-                                VStack(spacing: 4) {
-                                    Text(category.icon)
-                                        .font(.title2)
-                                    Text(category.rawValue)
-                                        .font(.caption)
-                                        .foregroundColor(selectedCategory == category ? .blue : .secondary)
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(selectedCategory == category ? Color.blue.opacity(0.1) : Color.clear)
-                                )
-                            }
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-                .padding(.vertical, 8)
-                
-                Divider()
-                
-                // 絵文字グリッド
-                ScrollView {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 8), spacing: 12) {
-                        ForEach(reactionManager.getEmojisByCategory(selectedCategory), id: \.self) { emoji in
-                            Button(action: {
-                                Task {
-                                    let success = await reactionManager.addReaction(emoji, to: message)
-                                    if success {
-                                        dismiss()
-                                    }
-                                }
-                            }) {
-                                Text(emoji)
-                                    .font(.title)
-                                    .frame(width: 44, height: 44)
-                                    .background(Color.gray.opacity(0.1))
-                                    .clipShape(Circle())
-                            }
-                        }
-                    }
-                    .padding()
-                }
-            }
-            .navigationTitle("リアクションを選択")
-            .navigationBarTitleDisplayMode(.inline)
-            .navigationBarItems(trailing: Button("閉じる") { dismiss() })
-        }
-    }
-}
+// 旧 ReactionPickerView は未使用となったため削除

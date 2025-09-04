@@ -30,7 +30,7 @@ final class Message {
     var isSent: Bool = false
 
     // Reaction emoji (e.g. "👍") – optional
-    var reactionEmoji: String?
+    // Deprecated: reactionEmoji was removed (CloudKit normalized reactions)
 
     init(id: UUID = UUID(),
          roomID: String,
@@ -39,15 +39,13 @@ final class Message {
          assetPath: String? = nil,
          ckRecordName: String? = nil,
          createdAt: Date = Date(),
-         isSent: Bool = false,
-         reactionEmoji: String? = nil) {
+         isSent: Bool = false) {
         self.id = id
         self.roomID = roomID
         self.senderID = senderID
         self.body = body
         self.createdAt = createdAt
         self.isSent = isSent
-        self.reactionEmoji = reactionEmoji
         self.assetPath = assetPath
         self.ckRecordName = ckRecordName
     }
@@ -55,11 +53,13 @@ final class Message {
 
 // MARK: - CloudKit Extensions
 extension Message {
+// MessageAttachment はCloudKit上の別レコード（ローカルのSwiftDataモデルは不要）
     static let recordType = "Message"
     
     /// Converts this Message to a CKRecord for CloudKit synchronization
     var cloudKitRecord: CKRecord {
-        let recordID = CKRecord.ID(recordName: ckRecordName ?? UUID().uuidString)
+        // 一貫したレコード名: UUID（id.uuidString）を採用
+        let recordID = CKRecord.ID(recordName: ckRecordName ?? id.uuidString)
         let record = CKRecord(recordType: Message.recordType, recordID: recordID)
         
         record["roomID"] = roomID as CKRecordValue
@@ -80,19 +80,23 @@ extension Message {
     /// Updates this Message with data from a CKRecord (for conflict resolution)
     func update(from record: CKRecord) {
         guard record.recordType == Message.recordType else { return }
-        
-        if let body = record["body"] as? String {
-            self.body = body
+
+        // Align with ideal schema keys: text / attachment / timestamp
+        if let text = record["text"] as? String { self.body = text }
+        if let ts = record["timestamp"] as? Date { self.createdAt = ts }
+        // senderID は理想スキーマでは必須。欠如時のフォールバックは行わない
+        if let sid = record["senderID"] as? String {
+            self.senderID = sid
         }
         // Reactions/isSent はCloudKitへは保存しない（正規化レコード/ローカル管理）
-        
+
         // Update record name if needed
         if ckRecordName != record.recordID.recordName {
             ckRecordName = record.recordID.recordName
         }
         
         // Handle asset updates
-        if let asset = record["asset"] as? CKAsset,
+        if let asset = record["attachment"] as? CKAsset,
            let fileURL = asset.fileURL {
             let localURL = AttachmentManager.makeFileURL(ext: fileURL.pathExtension)
             do {
@@ -113,15 +117,44 @@ extension Message {
     
     /// Creates a conflict-free record name based on message properties
     func generateRecordName() -> String {
-        if let existingName = ckRecordName {
-            return existingName
-        }
-        
-        // Generate deterministic record name from message properties
-        let timestamp = Int(createdAt.timeIntervalSince1970 * 1000)
-        let recordName = "\(roomID)_\(senderID)_\(timestamp)_\(id.uuidString.prefix(8))"
-        
-        self.ckRecordName = recordName
-        return recordName
+        if let existingName = ckRecordName { return existingName }
+        // 送受信の重複排除のため、Engineが使用する id.uuidString と統一
+        self.ckRecordName = id.uuidString
+        return id.uuidString
     }
-} 
+}
+
+// MARK: - System Message Utilities
+extension Message {
+    // システムメッセージの種類：FaceTime登録
+    static let sysFaceTimePrefix = "[SYS:FT_REG]"
+
+    /// システム文（表示用）を返す。対象でない場合はnil
+    static func systemDisplayText(for body: String?) -> String? {
+        guard let body else { return nil }
+        guard body.hasPrefix(sysFaceTimePrefix) else { return nil }
+        // 形式: [SYS:FT_REG]|name=<name>|id=<faceTimeID>
+        let parts = body.components(separatedBy: "|")
+        var name: String? = nil
+        for p in parts {
+            if p.hasPrefix("name=") { name = String(p.dropFirst(5)) }
+        }
+        let dispName = (name?.isEmpty == false) ? name! : "相手"
+        return "\(dispName)さんがFaceTimeを登録しました"
+    }
+
+    /// FaceTime登録システムメッセージ本文を作成
+    static func makeFaceTimeRegisteredBody(name: String, faceTimeID: String) -> String {
+        return "\(sysFaceTimePrefix)|name=\(name)|id=\(faceTimeID)"
+    }
+
+    /// FaceTime登録メッセージからFaceTimeIDを抽出
+    static func extractFaceTimeID(from body: String?) -> String? {
+        guard let body, body.hasPrefix(sysFaceTimePrefix) else { return nil }
+        let parts = body.components(separatedBy: "|")
+        for p in parts {
+            if p.hasPrefix("id=") { return String(p.dropFirst(3)) }
+        }
+        return nil
+    }
+}

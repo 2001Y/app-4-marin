@@ -14,6 +14,12 @@ struct ProfileDetailView: View {
     @State private var newTitle: String = ""
     @State private var newDate: Date = Date()
     @State private var newRepeatType: RepeatType = .none
+    // 編集用
+    @State private var showEditSheet: Bool = false
+    @State private var editingAnniversary: Anniversary?
+    @State private var editTitle: String = ""
+    @State private var editDate: Date = Date()
+    @State private var editRepeatType: RepeatType = .none
 
     var partnerName: String { chatRoom.displayName ?? chatRoom.remoteUserID }
 
@@ -38,7 +44,7 @@ struct ProfileDetailView: View {
                                 HStack {
                                     Text(dateFormatter.string(from: ann.date)).font(.caption).foregroundColor(.secondary)
                                     if ann.repeatType != .none {
-                                        Text("(\(ann.repeatType.displayName))").font(.caption).foregroundColor(.blue)
+                                        Text("(\(ann.repeatType.displayName))").font(.caption).foregroundColor(.accentColor)
                                     }
                                 }
                                 if ann.repeatType != .none {
@@ -50,7 +56,10 @@ struct ProfileDetailView: View {
                             }
                             Spacer()
                         }
+                        .contentShape(Rectangle())
+                        .onTapGesture { beginEdit(ann) }
                         .swipeActions {
+                            Button { beginEdit(ann) } label: { Label("編集", systemImage: "pencil") }
                             Button(role: .destructive) {
                                 delete(ann)
                             } label: { Label("削除", systemImage: "trash") }
@@ -64,6 +73,7 @@ struct ProfileDetailView: View {
             .navigationTitle("プロフィール")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("閉じる") { dismiss() } } }
             .sheet(isPresented: $showAddSheet) { addSheet }
+            .sheet(isPresented: $showEditSheet) { editSheet }
             .onAppear {
                 loadAnniversaries()
             }
@@ -150,15 +160,29 @@ struct ProfileDetailView: View {
     }
 
     private func save() {
-        let ann = Anniversary(roomID: roomID, 
-                            title: newTitle.trimmingCharacters(in: .whitespaces), 
-                            date: newDate, 
-                            repeatType: newRepeatType)
+        let ann = Anniversary(
+            roomID: roomID,
+            title: newTitle.trimmingCharacters(in: .whitespaces),
+            date: newDate,
+            repeatType: newRepeatType
+        )
+        // 先にレコード名を決めてローカルへ反映（Engineで同じIDを使用）
+        let recName = UUID().uuidString
+        ann.ckRecordName = recName
         modelContext.insert(ann)
-        Task { @MainActor in
-            if let recName = try? await CloudKitChatManager.shared.saveAnniversary(title: ann.title, date: ann.date, roomID: roomID, repeatType: ann.repeatType) {
-                ann.ckRecordName = recName
+        
+        // CKSyncEngine 経由で作成をキュー
+        if #available(iOS 17.0, *) {
+            Task { @MainActor in
+                await CKSyncEngineManager.shared.queueAnniversaryCreate(
+                    recordName: recName,
+                    roomID: roomID,
+                    title: ann.title,
+                    date: ann.date
+                )
             }
+        } else {
+            // ENGINE_ONLY 運用のため通常到達しない
         }
         showAddSheet = false
         newTitle = ""
@@ -167,9 +191,91 @@ struct ProfileDetailView: View {
         loadAnniversaries() // リストを更新
     }
 
+    private func beginEdit(_ ann: Anniversary) {
+        editingAnniversary = ann
+        editTitle = ann.title
+        editDate = ann.date
+        editRepeatType = ann.repeatType
+        showEditSheet = true
+    }
+
+    private var editSheet: some View {
+        NavigationStack {
+            Form {
+                Section(header: Text("基本情報")) {
+                    TextField("タイトル", text: $editTitle)
+                    DatePicker("日付", selection: $editDate, displayedComponents: .date)
+                }
+                Section(header: Text("繰り返し設定")) {
+                    Picker("繰り返し", selection: $editRepeatType) {
+                        ForEach(RepeatType.allCases, id: \.self) { type in
+                            Text(type.displayName).tag(type)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+            }
+            .navigationTitle("記念日を編集")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("キャンセル") { showEditSheet = false } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { updateEditedAnniversary() }
+                        .disabled(editTitle.trimmingCharacters(in: .whitespaces).isEmpty || editingAnniversary == nil)
+                }
+            }
+        }
+    }
+
+    private func updateEditedAnniversary() {
+        guard let ann = editingAnniversary else { return }
+        // ローカル更新
+        ann.title = editTitle.trimmingCharacters(in: .whitespaces)
+        ann.date = editDate
+        ann.repeatType = editRepeatType
+        do { try modelContext.save() } catch { log("Failed to save edited anniversary: \(error)", category: "ProfileDetailView") }
+
+        // CloudKitへはEngine経由
+        if #available(iOS 17.0, *) {
+            if let rec = ann.ckRecordName {
+                Task { @MainActor in
+                    await CKSyncEngineManager.shared.queueAnniversaryUpdate(
+                        recordName: rec,
+                        roomID: roomID,
+                        title: ann.title,
+                        date: ann.date
+                    )
+                }
+            } else {
+                // 互換のため、ckRecordNameがない既存データは作成として扱う
+                let recName = UUID().uuidString
+                ann.ckRecordName = recName
+                Task { @MainActor in
+                    await CKSyncEngineManager.shared.queueAnniversaryCreate(
+                        recordName: recName,
+                        roomID: roomID,
+                        title: ann.title,
+                        date: ann.date
+                    )
+                }
+            }
+        }
+
+        showEditSheet = false
+        editingAnniversary = nil
+        loadAnniversaries()
+    }
+
     private func delete(_ ann: Anniversary) {
         modelContext.delete(ann)
-        if let rec = ann.ckRecordName { Task { try? await CloudKitChatManager.shared.deleteAnniversary(recordName: rec) } }
+        if let rec = ann.ckRecordName {
+            if #available(iOS 17.0, *) {
+                Task { @MainActor in
+                    await CKSyncEngineManager.shared.queueAnniversaryDelete(recordName: rec, roomID: roomID)
+                }
+            } else {
+                // ENGINE_ONLY 運用のため通常到達しない
+            }
+        }
         loadAnniversaries() // リストを更新
     }
     
@@ -210,9 +316,9 @@ struct ProfileDetailView: View {
             Button(action: shareChat) {
                 HStack {
                     Image(systemName: "square.and.arrow.up")
-                        .foregroundColor(.blue)
+                        .foregroundColor(.accentColor)
                     Text("チャットを招待")
-                        .foregroundColor(.blue)
+                        .foregroundColor(.accentColor)
                     Spacer()
                 }
             }

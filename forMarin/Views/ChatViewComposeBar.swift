@@ -19,23 +19,26 @@ extension ChatView {
     // 以下 composeBarView のパーツをさらに分解
     @ViewBuilder 
     func composeLeadingTools() -> some View {
-        if attachmentsExpanded {
-            PhotosPicker(selection: $photosPickerItems,
-                            maxSelectionCount: 10,
-                            matching: .any(of: [.images, .videos]),
-                            photoLibrary: .shared()) {
-                Image(systemName: "photo.on.rectangle.angled")
-                    .font(.system(size: 24))
-                    .foregroundColor(.accentColor)
-            }
-            .buttonStyle(.plain)
-            .onChange(of: photosPickerItems) { _, _ in sendSelectedMedia() }
-
-            CameraDualButton()
-        } else {
-            Button { withAnimation { attachmentsExpanded = true } } label: {
+        let hasText = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        HStack(spacing: 8) {
+            if editingMessage == nil && !hasText {
+                // 写真/動画ピッカー（テキスト未入力時のみ）
+                PhotosPicker(selection: $photosPickerItems, matching: .any(of: [.images, .videos])) {
+                    Image(systemName: "photo.on.rectangle")
+                        .font(.system(size: 20))
+                }
+                // デュアルカメラ起動
+                Button {
+                    showDualCameraRecorder = true
+                } label: {
+                    Image(systemName: "camera.fill")
+                        .font(.system(size: 20))
+                }
+            } else {
+                // 折りたたみインジケータ（表示のみ）
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 20))
+                    .font(.system(size: 16))
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -52,38 +55,68 @@ extension ChatView {
             .focused($isTextFieldFocused)
             .onChange(of: isTextFieldFocused) { _, focused in
                 withAnimation { attachmentsExpanded = !focused }
+                log("ComposeBar: focus=\(focused) (scroll stays enabled; keyboard dismiss by input drag)", category: "ChatView")
             }
+            // 入力欄の下スワイプでのみキーボードを閉じる
+            .dismissKeyboardOnDrag()
     }
 
     @ViewBuilder 
     func composeTrailingTools() -> some View {
-        if isTextFieldFocused {
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Button { isEmojiPickerShown = true } label: {
-                    Image(systemName: "smiley")
-                        .font(.system(size: 24))
+        let hasText = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        HStack(spacing: 8) {
+            // 最近使った絵文字・ピッカーはテキスト未入力時のみ表示
+            if editingMessage == nil && !hasText {
+                HStack(spacing: 6) {
+                    ForEach(Array(recentEmojis.prefix(3)), id: \.self) { emoji in
+                        Button {
+                            // 1タップで絵文字メッセージ送信 + 最近の絵文字更新
+                            commitSend(with: emoji)
+                            updateRecentEmoji(emoji)
+                        } label: {
+                            Text(emoji)
+                                .font(.system(size: 20))
+                                .frame(width: 28, height: 28)
+                                .background(Color(UIColor.secondarySystemBackground))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(Text("絵文字送信: \(emoji)"))
+                    }
                 }
-                .buttonStyle(.plain)
-            } else {
-                Button { commitSend(with: text); text = "" } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 24))
+                // 絵文字ピッカー
+                Button {
+                    isEmojiPickerShown = true
+                } label: {
+                    Image(systemName: "face.smiling")
+                        .font(.system(size: 20))
                 }
-                .buttonStyle(.plain)
             }
-        } else {
-            QuickEmojiBar(recentEmojis: Array(recentEmojis.prefix(3))) { emoji in
-                commitSend(with: emoji)
-                updateRecentEmoji(emoji)
-            } onShowPicker: { isEmojiPickerShown = true }
-
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-                Button { commitSend(with: text); text = "" } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 24))
+            // 送信/完了ボタン（テキストが空でない時）
+            if hasText {
+                if editingMessage != nil {
+                    // 編集モード時は「完了」チェックアイコン
+                    Button {
+                        commitSend(with: text)
+                        // commitSend 内で text はクリアされる
+                    } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 24))
+                    }
+                    .accessibilityLabel(Text("編集を完了"))
+                    .buttonStyle(.plain)
+                } else {
+                    // 通常送信（紙飛行機）
+                    Button {
+                        commitSend(with: text)
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 24))
+                    }
+                    .accessibilityLabel(Text("送信"))
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
-} 
+}

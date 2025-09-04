@@ -149,28 +149,58 @@ class PerformanceOptimizer: ObservableObject {
     }
     
     private func processSendOperations(_ messages: [Message]) async {
-        // Implement parallel message sending with rate limiting
-        for message in messages {
-            if #available(iOS 17.0, *) {
-                MessageSyncService.shared.sendMessage(message)
+        // Engineに委譲（並列にWorkItem化）
+        if #available(iOS 17.0, *) {
+            await withTaskGroup(of: Void.self) { group in
+                for message in messages {
+                    group.addTask {
+                        await CKSyncEngineManager.shared.queueMessage(message)
+                        if let path = message.assetPath {
+                            await CKSyncEngineManager.shared.queueAttachment(
+                                messageRecordName: message.id.uuidString,
+                                roomID: message.roomID,
+                                localFileURL: URL(fileURLWithPath: path)
+                            )
+                        }
+                    }
+                }
             }
         }
     }
     
     private func processUpdateOperations(_ messages: [Message]) async {
-        // Implement parallel message updates
-        for message in messages {
-            if #available(iOS 17.0, *) {
-                MessageSyncService.shared.updateMessage(message)
+        // Engineに委譲（並列更新）
+        if #available(iOS 17.0, *) {
+            await withTaskGroup(of: Void.self) { group in
+                for message in messages {
+                    guard let recordName = message.ckRecordName else { continue }
+                    let newBody = message.body ?? ""
+                    group.addTask {
+                        await CKSyncEngineManager.shared.queueUpdateMessage(
+                            recordName: recordName,
+                            roomID: message.roomID,
+                            newBody: newBody,
+                            newTimestamp: Date()
+                        )
+                    }
+                }
             }
         }
     }
     
     private func processDeleteOperations(_ messages: [Message]) async {
-        // Implement parallel message deletions
-        for message in messages {
-            if #available(iOS 17.0, *) {
-                MessageSyncService.shared.deleteMessage(message)
+        // Engineに委譲（並列削除）
+        if #available(iOS 17.0, *) {
+            await withTaskGroup(of: Void.self) { group in
+                for message in messages {
+                    guard let recordName = message.ckRecordName else { continue }
+                    group.addTask {
+                        await CKSyncEngineManager.shared.queueDeleteMessage(
+                            recordName: recordName,
+                            roomID: message.roomID
+                        )
+                    }
+                }
             }
         }
     }

@@ -1,4 +1,5 @@
 import CloudKit
+import CryptoKit
 import Combine
 import SwiftUI
 import SwiftData
@@ -17,6 +18,11 @@ class CloudKitChatManager: ObservableObject {
     // ゾーン解決用の簡易キャッシュ（zoneName -> zoneID）
     private var privateZoneCache: [String: CKRecordZone.ID] = [:]
     private var sharedZoneCache: [String: CKRecordZone.ID] = [:]
+    // roomID -> scope ("private" or "shared") を永続キャッシュ
+    private var roomScopeCache: [String: String] = [:]
+    private let roomScopeDefaultsKey = "CloudKitChatManager.RoomScopeCache"
+    private let privateZoneCacheKey = "CloudKitChatManager.PrivateZoneCache"
+    private let sharedZoneCacheKey = "CloudKitChatManager.SharedZoneCache"
     
     @Published var currentUserID: String?
     @Published var isInitialized: Bool = false
@@ -26,8 +32,13 @@ class CloudKitChatManager: ObservableObject {
     // Schema creation flag
     private var isSyncDisabled: Bool = false
     
-    // プロフィールキャッシュ（userID -> (name, avatarData)）
-    private var profileCache: [String: (name: String?, avatarData: Data?)] = [:]
+    struct ProfileCacheEntry {
+        var name: String?
+        var avatarData: Data?
+        var shapeIndex: Int?
+    }
+    // プロフィールキャッシュ（userID -> キャッシュエントリ）
+    private var profileCache: [String: ProfileCacheEntry] = [:]
     
     // Build / environment diagnostics
     private var isTestFlightBuild: Bool {
@@ -42,6 +53,26 @@ class CloudKitChatManager: ObservableObject {
         
         setupSyncNotificationObservers()
         
+        // 永続化されたスコープ/ゾーンマップをロード
+        if let data = UserDefaults.standard.data(forKey: roomScopeDefaultsKey),
+           let map = try? JSONDecoder().decode([String: String].self, from: data) {
+            roomScopeCache = map
+        }
+        if let data = UserDefaults.standard.data(forKey: privateZoneCacheKey),
+           let map = try? JSONDecoder().decode([String: String].self, from: data) {
+            // 復元: zoneID は (zoneName, ownerName) を含むが、ここでは zoneName のみ利用
+            // CloudKitのCKRecordZone.IDは構造体のため簡易復元: zoneNameのみで再構築
+            var restored: [String: CKRecordZone.ID] = [:]
+            for (roomID, zoneName) in map { restored[roomID] = CKRecordZone.ID(zoneName: zoneName) }
+            privateZoneCache = restored
+        }
+        if let data = UserDefaults.standard.data(forKey: sharedZoneCacheKey),
+           let map = try? JSONDecoder().decode([String: String].self, from: data) {
+            var restored: [String: CKRecordZone.ID] = [:]
+            for (roomID, zoneName) in map { restored[roomID] = CKRecordZone.ID(zoneName: zoneName) }
+            sharedZoneCache = restored
+        }
+
         Task {
             await initialize()
         }
@@ -222,6 +253,21 @@ class CloudKitChatManager: ObservableObject {
         profileCache.removeAll()
         log("🧹 Profile cache cleared", category: "CloudKitChatManager")
     }
+
+    // MARK: - Avatar shape helpers
+    func stableShapeIndex(for userID: String) -> Int {
+        // SHA256の先頭バイトを使用（0-4の5種類）
+        let data = Data(userID.utf8)
+        let digest = SHA256.hash(data: data)
+        // Sequence.first の曖昧さを避け、安全に先頭バイトを取得
+        let firstByte: UInt8 = digest.withUnsafeBytes { buf in
+            buf.first ?? 0
+        }
+        return Int(firstByte % 5)
+    }
+    func getCachedAvatarShapeIndex(for userID: String) -> Int? {
+        profileCache[userID]?.shapeIndex
+    }
     
     /// 完全リセット実行（CloudKit・ローカル含む全消去）
     func performCompleteReset(bypassSafetyCheck: Bool = false) async throws {
@@ -391,12 +437,15 @@ class CloudKitChatManager: ObservableObject {
         let keysToRemove = [
             "recentEmojis",
             "autoDownloadImages",
-            "hasSeenWelcome"
+            // 参照実体のキーに統一
+            "hasShownWelcome"
         ]
         
         for key in keysToRemove {
             defaults.removeObject(forKey: key)
         }
+        // 旧キーは互換のため明示削除
+        defaults.removeObject(forKey: "hasSeenWelcome")
         
         // チュートリアルフラグをクリア
         let allKeys = defaults.dictionaryRepresentation().keys
@@ -500,6 +549,13 @@ class CloudKitChatManager: ObservableObject {
             log("✅ [ROOM CREATION] Zone: \(customZoneID.zoneName)", category: "CloudKitChatManager")
             log("✅ [ROOM CREATION] CKShare recordID: \(finalShare.recordID.recordName)", category: "CloudKitChatManager")
             log("✅ [ROOM CREATION] CKShare URL: \(finalShare.url?.absoluteString ?? "nil")", category: "CloudKitChatManager")
+            // オーナー側：privateスコープを永続化
+            setRoomScope(roomID, scope: "private")
+
+            // ルーム作成直後にオーナーのParticipantProfileをゾーンへ公開
+            let myName = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let myAvatar = UserDefaults.standard.data(forKey: "myAvatarData") ?? Data()
+            try? await upsertParticipantProfile(in: roomID, name: myName, avatarData: myAvatar)
             return finalShare
         
         } catch {
@@ -510,6 +566,37 @@ class CloudKitChatManager: ObservableObject {
                 log("❌ [ROOM CREATION] CKError description: \(ckError.localizedDescription)", category: "CloudKitChatManager")
             }
             throw error
+        }
+    }
+
+    // スコープの永続化（owner: private / participant: shared）
+    private func setRoomScope(_ roomID: String, scope: String) {
+        roomScopeCache[roomID] = scope
+        if let data = try? JSONEncoder().encode(roomScopeCache) {
+            UserDefaults.standard.set(data, forKey: roomScopeDefaultsKey)
+        }
+    }
+
+    private func getRoomScope(_ roomID: String) -> String? {
+        return roomScopeCache[roomID]
+    }
+
+    // キャッシュのみで所有者判定（不明ならnil）
+    func isOwnerCached(_ roomID: String) -> Bool? {
+        if let scope = getRoomScope(roomID) {
+            return scope == "private"
+        }
+        return nil
+    }
+
+    private func persistZoneCaches() {
+        let priv = privateZoneCache.reduce(into: [String: String]()) { dict, elem in dict[elem.key] = elem.value.zoneName }
+        if let data = try? JSONEncoder().encode(priv) {
+            UserDefaults.standard.set(data, forKey: privateZoneCacheKey)
+        }
+        let sh = sharedZoneCache.reduce(into: [String: String]()) { dict, elem in dict[elem.key] = elem.value.zoneName }
+        if let data = try? JSONEncoder().encode(sh) {
+            UserDefaults.standard.set(data, forKey: sharedZoneCacheKey)
         }
     }
     
@@ -564,6 +651,31 @@ class CloudKitChatManager: ObservableObject {
                 log("ℹ️ [SUBSCRIPTIONS] Shared database subscription already exists", category: "CloudKitChatManager")
             } else {
                 log("❌ [SUBSCRIPTIONS] Failed to create shared database subscription: \(error)", category: "CloudKitChatManager")
+                throw error
+            }
+        }
+    }
+
+    /// 🌟 [IDEAL] プライベートデータベースサブスクリプションの設定
+    func setupPrivateDatabaseSubscription() async throws {
+        log("📡 [SUBSCRIPTIONS] Ensuring private database subscription", category: "CloudKitChatManager")
+
+        // データベースサブスクリプション（プライベートDB全体の変更を監視）
+        let subscription = CKDatabaseSubscription(subscriptionID: "private-database-subscription")
+
+        let notificationInfo = CKSubscription.NotificationInfo()
+        notificationInfo.shouldBadge = false
+        notificationInfo.shouldSendContentAvailable = true
+        subscription.notificationInfo = notificationInfo
+
+        do {
+            _ = try await privateDB.save(subscription)
+            log("✅ [SUBSCRIPTIONS] Private database subscription created", category: "CloudKitChatManager")
+        } catch {
+            if let ckError = error as? CKError, ckError.code == .serverRejectedRequest {
+                log("ℹ️ [SUBSCRIPTIONS] Private database subscription already exists", category: "CloudKitChatManager")
+            } else {
+                log("❌ [SUBSCRIPTIONS] Failed to create private database subscription: \(error)", category: "CloudKitChatManager")
                 throw error
             }
         }
@@ -694,12 +806,23 @@ class CloudKitChatManager: ObservableObject {
     /// 指定roomIDに対して、書き込み対象のDBとzoneIDを解決（オーナー=private / 参加者=shared）。
     /// - Returns: (database, zoneID)
     func resolveDatabaseAndZone(for roomID: String) async throws -> (db: CKDatabase, zoneID: CKRecordZone.ID) {
-        // 1) Private DBのゾーンに存在するか（=オーナー）
+        // 0) まずローカルキャッシュを参照
+        if let scope = getRoomScope(roomID) {
+            if scope == "private", let cached = privateZoneCache[roomID] { return (privateDB, cached) }
+            if scope == "shared", let cached = sharedZoneCache[roomID] { return (sharedDB, cached) }
+        }
+        // 1) Private DBのゾーン（=オーナー）
         if let zoneID = try await resolvePrivateZoneIDIfExists(roomID: roomID) {
+            setRoomScope(roomID, scope: "private")
+            privateZoneCache[roomID] = zoneID
+            persistZoneCaches()
             return (privateDB, zoneID)
         }
-        // 2) Shared DBのゾーンに存在するか（=参加者）
+        // 2) Shared DBのゾーン（=参加者）
         if let zoneID = try await resolveSharedZoneIDIfExists(roomID: roomID) {
+            setRoomScope(roomID, scope: "shared")
+            sharedZoneCache[roomID] = zoneID
+            persistZoneCaches()
             return (sharedDB, zoneID)
         }
         // 3) 見つからない
@@ -711,6 +834,7 @@ class CloudKitChatManager: ObservableObject {
         let zones = try await privateDB.allRecordZones()
         if let zone = zones.first(where: { $0.zoneID.zoneName == roomID }) {
             privateZoneCache[roomID] = zone.zoneID
+            persistZoneCaches()
             return zone.zoneID
         }
         return nil
@@ -721,6 +845,7 @@ class CloudKitChatManager: ObservableObject {
         let zones = try await sharedDB.allRecordZones()
         if let zone = zones.first(where: { $0.zoneID.zoneName == roomID }) {
             sharedZoneCache[roomID] = zone.zoneID
+            persistZoneCaches()
             return zone.zoneID
         }
         return nil
@@ -731,18 +856,11 @@ class CloudKitChatManager: ObservableObject {
     func revokeShareAndDeleteIfNeeded(roomID: String) async {
         do {
             if let privateZone = try await resolvePrivateZoneIDIfExists(roomID: roomID) {
-                // オーナー: CKShare を削除し、ゾーンも削除
-                // 1) CKShare レコードを検索して削除
-                let q = CKQuery(recordType: "cloudkit.share", predicate: NSPredicate(value: true))
-                let (res, _) = try await privateDB.records(matching: q, inZoneWith: privateZone)
-                for (_, rr) in res {
-                    if let rec = try? rr.get(), rec is CKShare {
-                        do { try await privateDB.deleteRecord(withID: rec.recordID) } catch { /* 既に削除済み等は無視 */ }
-                    }
-                }
-                // 2) ゾーン削除
+                // オーナー: ゾーン共有のCKShareは recordName=cloudkit.zoneshare で固定ID。直接削除してからゾーン削除。
+                let shareID = CKRecord.ID(recordName: "cloudkit.zoneshare", zoneID: privateZone)
+                do { try await privateDB.deleteRecord(withID: shareID) } catch { /* 既に無ければ無視 */ }
                 _ = try await privateDB.modifyRecordZones(saving: [], deleting: [privateZone])
-                log("🗑️ [REVOKE] Deleted share and zone for roomID=\(roomID) (owner)", category: "CloudKitChatManager")
+                log("🗑️ [REVOKE] Deleted zone (and share) for roomID=\(roomID) (owner)", category: "CloudKitChatManager")
             } else if let sharedZone = try await resolveSharedZoneIDIfExists(roomID: roomID) {
                 // 参加者: 共有ゾーンから離脱（ローカルから削除）
                 _ = try await sharedDB.modifyRecordZones(saving: [], deleting: [sharedZone])
@@ -763,6 +881,8 @@ class CloudKitChatManager: ObservableObject {
         if let _ = try? await resolveSharedZoneIDIfExists(roomID: roomID),
            (try? await resolvePrivateZoneIDIfExists(roomID: roomID)) == nil {
             log("ℹ️ [SUBSCRIPTION] Skipped room subscription for shared zone (unsupported on Shared DB)", category: "CloudKitChatManager")
+            // 代わりにゾーン単位のサブスクリプションを設定（RTCSignal等の検知用）
+            try? await setupSignalZoneSubscription(for: roomID)
             return
         }
 
@@ -796,13 +916,42 @@ class CloudKitChatManager: ObservableObject {
                 throw error
             }
         }
+
+        // Private側でもゾーン単位サブスクリプションを追加（RTCSignal検知用）
+        try? await setupSignalZoneSubscription(for: roomID)
+    }
+
+    /// 1on1用: RTCSignalなどゾーン内の変化を検知するためのCKRecordZoneSubscriptionを追加
+    func setupSignalZoneSubscription(for roomID: String) async throws {
+        do {
+            let (db, zoneID) = try await resolveDatabaseAndZone(for: roomID)
+            if db.databaseScope == .shared {
+                // 共有DBではゾーンサブスクリプションは非対応。DBサブスクで検知後に個別フェッチする。
+                log("ℹ️ [SUBSCRIPTION] Skipped zone subscription for shared DB (room=\(roomID))", category: "CloudKitChatManager")
+                return
+            }
+            let subID = "zone-subscription-\(roomID)"
+            let sub = CKRecordZoneSubscription(zoneID: zoneID, subscriptionID: subID)
+            let info = CKSubscription.NotificationInfo()
+            info.shouldSendContentAvailable = true
+            info.shouldBadge = false
+            sub.notificationInfo = info
+            _ = try await db.save(sub)
+            log("✅ [SUBSCRIPTION] Zone subscription created for: \(roomID)", category: "CloudKitChatManager")
+        } catch {
+            if let ckError = error as? CKError, ckError.code == .serverRejectedRequest {
+                log("ℹ️ [SUBSCRIPTION] Zone subscription already exists for: \(roomID)", category: "CloudKitChatManager")
+            } else {
+                log("❌ [SUBSCRIPTION] Failed to create zone subscription: \(error)", category: "CloudKitChatManager")
+                throw error
+            }
+        }
     }
     
     // MARK: - Message Reactions (Ideal Implementation)
     
     /// 🌟 [IDEAL] メッセージにリアクションを追加（正規化実装）
     func addReactionToMessage(messageRecordName: String, roomID: String, emoji: String, userID: String) async throws {
-        log("👍 [REACTION] Adding reaction: \(emoji) to message: \(messageRecordName) by user: \(userID)", category: "CloudKitChatManager")
         
         // ユーザー認証の確認
         guard self.currentUserID != nil else {
@@ -820,11 +969,10 @@ class CloudKitChatManager: ObservableObject {
         
         do {
             _ = try await db.save(reactionRecord)
-            log("✅ [REACTION] Successfully added reaction: \(reactionID)", category: "CloudKitChatManager")
         } catch {
-            // 重複エラーの場合は既に存在することを示す
+            // 重複は無視（ノイズ削減）。その他はエラーとして記録
             if let ckError = error as? CKError, ckError.code == .serverRecordChanged {
-                log("ℹ️ [REACTION] Reaction already exists: \(reactionID)", category: "CloudKitChatManager")
+                return
             } else {
                 log("❌ [REACTION] Failed to add reaction: \(error)", category: "CloudKitChatManager")
                 throw error
@@ -834,7 +982,6 @@ class CloudKitChatManager: ObservableObject {
     
     /// 🌟 [IDEAL] メッセージからリアクションを削除
     func removeReactionFromMessage(messageRecordName: String, roomID: String, emoji: String, userID: String) async throws {
-        log("👎 [REACTION] Removing reaction: \(emoji) from message: \(messageRecordName) by user: \(userID)", category: "CloudKitChatManager")
         
         // 🌟 [IDEAL] 正規化されたID規約を使用
         let (db, zoneID) = try await resolveDatabaseAndZone(for: roomID)
@@ -843,10 +990,10 @@ class CloudKitChatManager: ObservableObject {
         
         do {
             try await db.deleteRecord(withID: recordID)
-            log("✅ [REACTION] Successfully removed reaction: \(reactionID)", category: "CloudKitChatManager")
         } catch {
+            // 既に削除済みは無視。その他はエラー
             if let ckError = error as? CKError, ckError.code == .unknownItem {
-                log("ℹ️ [REACTION] Reaction not found (already removed): \(reactionID)", category: "CloudKitChatManager")
+                return
             } else {
                 log("❌ [REACTION] Failed to remove reaction: \(error)", category: "CloudKitChatManager")
                 throw error
@@ -856,30 +1003,35 @@ class CloudKitChatManager: ObservableObject {
     
     /// 🌟 [IDEAL] メッセージのリアクション一覧を取得
     func getReactionsForMessage(messageRecordName: String, roomID: String) async throws -> [MessageReaction] {
-        log("📊 [REACTION] Fetching reactions for message: \(messageRecordName)", category: "CloudKitChatManager")
         
-        let (_, zoneID) = try await resolveDatabaseAndZone(for: roomID)
+        let (db, zoneID) = try await resolveDatabaseAndZone(for: roomID)
         let messageReference = MessageReaction.createMessageReference(messageID: messageRecordName, zoneID: zoneID)
         
         let predicate = NSPredicate(format: "messageRef == %@", messageReference)
         let query = CKQuery(recordType: "MessageReaction", predicate: predicate)
         
-        // どのDBかはroomIDから解決済み
-        let (db, _) = try await resolveDatabaseAndZone(for: roomID)
         do {
-            let (results, _) = try await db.records(matching: query)
+            // Shared DBではゾーン指定が必須
+            let (results, _) = try await db.records(matching: query, inZoneWith: zoneID)
             
             let reactions: [MessageReaction] = results.compactMap { (_, result) in
                 guard let record = try? result.get() else { return nil }
                 return MessageReaction.fromCloudKitRecord(record)
             }
-            
-            log("✅ [REACTION] Found \(reactions.count) reactions for message: \(messageRecordName)", category: "CloudKitChatManager")
+            // ノイズ削減: 反応がある場合のみ件数をログ
+            if reactions.count > 0 {
+                log("✅ [REACTION] Found \(reactions.count) reactions for message: \(messageRecordName)", category: "CloudKitChatManager")
+            }
             return reactions
             
         } catch {
-            log("❌ [REACTION] Failed to fetch reactions: \(error)", category: "CloudKitChatManager")
-            throw error
+            if let ckError = error as? CKError, ckError.code == .unknownItem || ckError.code == .invalidArguments {
+                // レコードタイプ未作成、またはSharedDBの制約→空配列で返す（ログ出力しない）
+                return []
+            } else {
+                log("❌ [REACTION] Failed to fetch reactions: \(error)", category: "CloudKitChatManager")
+                throw error
+            }
         }
     }
     
@@ -893,19 +1045,56 @@ class CloudKitChatManager: ObservableObject {
             throw CloudKitChatError.userNotAuthenticated
         }
         
-        // ユーザーのシステムレコード名（Users）と衝突しないよう、独自のレコード名を使用
         let recordName = "CD_Profile_\(currentUserID)"
-        let profileRecord = CKRecord(recordType: "CD_Profile", recordID: CKRecord.ID(recordName: recordName))
-        profileRecord["userID"] = currentUserID as CKRecordValue
-        profileRecord["displayName"] = name as CKRecordValue
-        profileRecord["avatarData"] = avatarData as CKRecordValue
-        profileRecord["updatedAt"] = Date() as CKRecordValue
+        let recordID = CKRecord.ID(recordName: recordName)
         
         do {
-            _ = try await privateDB.save(profileRecord)
-            log("✅ [PROFILE] Master profile saved successfully", category: "CloudKitChatManager")
+            // 既存レコードの有無を確認し、あれば更新、なければ新規作成
+            let existing: CKRecord
+            if let fetched = try? await privateDB.record(for: recordID) {
+                existing = fetched
+            } else {
+                existing = CKRecord(recordType: "CD_Profile", recordID: recordID)
+                existing["userID"] = currentUserID as CKRecordValue
+            }
+            existing["displayName"] = name as CKRecordValue
+            existing["avatarData"] = avatarData as CKRecordValue
+            existing["updatedAt"] = Date() as CKRecordValue
+            _ = try await privateDB.save(existing)
+            log("✅ [PROFILE] Master profile upserted", category: "CloudKitChatManager")
         } catch {
-            log("❌ [PROFILE] Failed to save master profile: \(error)", category: "CloudKitChatManager")
+            log("❌ [PROFILE] Failed to upsert master profile: \(error)", category: "CloudKitChatManager")
+            throw error
+        }
+    }
+
+    /// FaceTimeで使用するApple ID（メールアドレス/番号）をプロフィールへ保存
+    /// - Note: CD_Profile（privateDB）に `faceTimeID` フィールドとして格納
+    func saveFaceTimeID(_ faceTimeID: String) async throws {
+        log("📞 [PROFILE] Saving FaceTimeID", category: "CloudKitChatManager")
+
+        guard let currentUserID = currentUserID else {
+            throw CloudKitChatError.userNotAuthenticated
+        }
+
+        let recordName = "CD_Profile_\(currentUserID)"
+        let recordID = CKRecord.ID(recordName: recordName)
+        do {
+            // 既存レコードを読んで更新、無ければ新規作成
+            let record: CKRecord
+            if let existing = try? await privateDB.record(for: recordID) {
+                record = existing
+            } else {
+                record = CKRecord(recordType: "CD_Profile", recordID: recordID)
+                record["userID"] = currentUserID as CKRecordValue
+                record["displayName"] = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "") as CKRecordValue
+            }
+            record["faceTimeID"] = faceTimeID as CKRecordValue
+            record["updatedAt"] = Date() as CKRecordValue
+            _ = try await privateDB.save(record)
+            log("✅ [PROFILE] FaceTimeID saved", category: "CloudKitChatManager")
+        } catch {
+            log("❌ [PROFILE] Failed to save FaceTimeID: \(error)", category: "CloudKitChatManager")
             throw error
         }
     }
@@ -915,9 +1104,9 @@ class CloudKitChatManager: ObservableObject {
         log("🔍 [PROFILE] Fetching profile for user: \(userID)", category: "CloudKitChatManager")
         
         // まずキャッシュを確認
-        if let cachedProfile = profileCache[userID] {
+        if let cached = profileCache[userID] {
             log("✅ [PROFILE] Found profile in cache for user: \(userID)", category: "CloudKitChatManager")
-            return cachedProfile
+            return (cached.name, cached.avatarData)
         }
         
         // レコード名での直接取得は避け、userIDフィールドでクエリ
@@ -937,8 +1126,8 @@ class CloudKitChatManager: ObservableObject {
             let name = record["displayName"] as? String
             let avatarData = record["avatarData"] as? Data
             
-            // キャッシュに保存
-            profileCache[userID] = (name: name, avatarData: avatarData)
+            // キャッシュに保存（shapeはCD_Profileでは管理しない）
+            profileCache[userID] = ProfileCacheEntry(name: name, avatarData: avatarData, shapeIndex: profileCache[userID]?.shapeIndex)
             
             log("✅ [PROFILE] Profile fetched successfully for user: \(userID)", category: "CloudKitChatManager")
             return (name: name, avatarData: avatarData)
@@ -948,62 +1137,149 @@ class CloudKitChatManager: ObservableObject {
             throw error
         }
     }
+
+    /// 共有ゾーンに参加者プロフィールを保存（自分の最新プロフィールをゾーンへ公開）
+    /// - Note: レコード名は `PP_<userID>` とし、各ゾーンで一意。
+    func upsertParticipantProfile(in roomID: String, name: String?, avatarData: Data?) async throws {
+        guard let myUserID = currentUserID else { throw CloudKitChatError.userNotAuthenticated }
+        let (db, zoneID) = try await resolveDatabaseAndZone(for: roomID)
+
+        let recID = CKRecord.ID(recordName: "PP_\(myUserID)", zoneID: zoneID)
+        let record: CKRecord
+        if let existing = try? await db.record(for: recID) {
+            record = existing
+        } else {
+            record = CKRecord(recordType: "ParticipantProfile", recordID: recID)
+            record["userID"] = myUserID as CKRecordValue
+        }
+        if let n = name { record["displayName"] = n as CKRecordValue } else { record["displayName"] = "" as CKRecordValue }
+        if let data = avatarData, !data.isEmpty { record["avatarData"] = data as CKRecordValue } else { record["avatarData"] = Data() as CKRecordValue }
+        // shape が未設定なら安定アルゴリズムで決定して保存
+        if record["avatarShape"] == nil {
+            let shape = stableShapeIndex(for: myUserID)
+            record["avatarShape"] = shape as CKRecordValue
+        }
+        record["updatedAt"] = Date() as CKRecordValue
+        _ = try await db.save(record)
+        log("✅ [PROFILE] Upserted ParticipantProfile in zone=\(zoneID.zoneName)", category: "CloudKitChatManager")
+    }
+
+    /// 共有ゾーンから相手のプロフィールを取得
+    func fetchParticipantProfile(userID: String, roomID: String) async throws -> (name: String?, avatarData: Data?) {
+        let (db, zoneID) = try await resolveDatabaseAndZone(for: roomID)
+        let recID = CKRecord.ID(recordName: "PP_\(userID)", zoneID: zoneID)
+        do {
+            let record = try await db.record(for: recID)
+            let name = record["displayName"] as? String
+            let avatarData = record["avatarData"] as? Data
+            let shape = record["avatarShape"] as? Int
+            log("✅ [PROFILE] Fetched ParticipantProfile for user=\(userID) in zone=\(zoneID.zoneName)", category: "CloudKitChatManager")
+            // 共有情報もプロセスキャッシュへ（userID単位で十分）
+            profileCache[userID] = ProfileCacheEntry(name: name, avatarData: avatarData, shapeIndex: shape)
+            return (name: name, avatarData: avatarData)
+        } catch {
+            log("ℹ️ [PROFILE] ParticipantProfile not found for user=\(userID) in zone=\(zoneID.zoneName): \(error)", category: "CloudKitChatManager")
+            return (name: nil, avatarData: nil)
+        }
+    }
+
+    /// 参加者プロフィールを全ゾーンへ一括反映（private/shared 双方のカスタムゾーン）
+    func updateParticipantProfileInAllZones(name: String?, avatarData: Data?) async {
+        let nameVal = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let avatarVal = avatarData ?? Data()
+        do {
+            // private 側のカスタムゾーン
+            let pZones = try await privateDB.allRecordZones().map { $0.zoneID.zoneName }
+            // shared 側のカスタムゾーン
+            let sZones = try await sharedDB.allRecordZones().map { $0.zoneID.zoneName }
+            let roomIDs = Array(Set((pZones + sZones).filter { $0 != CKRecordZone.ID.defaultZoneName && !$0.hasPrefix("_") }))
+            log("🔄 [PROFILE] Broadcasting ParticipantProfile to zones count=\(roomIDs.count)", category: "CloudKitChatManager")
+            for roomID in roomIDs {
+                do {
+                    try await upsertParticipantProfile(in: roomID, name: nameVal, avatarData: avatarVal)
+                } catch {
+                    log("⚠️ [PROFILE] Failed to upsert ParticipantProfile for room=\(roomID): \(error)", category: "CloudKitChatManager")
+                }
+            }
+            log("✅ [PROFILE] Broadcast completed", category: "CloudKitChatManager")
+        } catch {
+            log("❌ [PROFILE] Broadcast failed to enumerate zones: \(error)", category: "CloudKitChatManager")
+        }
+    }
     
     // MARK: - Message Management
     
     /// 🌟 [IDEAL] メッセージの送信
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit sends are disabled. Use CKSyncEngineManager.queueMessage + queueAttachment.")
     func sendMessage(_ message: Message, to roomID: String) async throws {
-        log("📤 [MESSAGE] Sending message to room: \(roomID)", category: "CloudKitChatManager")
+        fatalError("Direct CloudKit sendMessage is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
+    @available(*, deprecated, message: "Use CKSyncEngineManager.queueMessage + queueAttachment instead")
+    func sendMessage(_ message: Message, to roomID: String) async throws {
+        log("[MESSAGE] Sending message to room: \(roomID)", category: "CloudKitChatManager")
         
         guard let currentUserID = currentUserID else {
             throw CloudKitChatError.userNotAuthenticated
         }
         
-        // 対象DBとゾーンを解決（オーナー=private / 参加者=shared）
         let (targetDB, zoneID) = try await resolveDatabaseAndZone(for: roomID)
-        log("🧭 [MESSAGE] Resolved database: \(targetDB.databaseScope == .private ? "Private" : targetDB.databaseScope == .shared ? "Shared" : "Public"), zone: \(zoneID.zoneName)", category: "CloudKitChatManager")
+        log("[MESSAGE] Resolved database: \(targetDB.databaseScope == .private ? "Private" : targetDB.databaseScope == .shared ? "Shared" : "Public"), zone: \(zoneID.zoneName)", category: "CloudKitChatManager")
         
-        // カスタムゾーンにメッセージを保存（1チャット=1ゾーン）
+        // Message本文のみを保存（attachmentは別レコード）
         let messageRecord = CKRecord(recordType: "Message", recordID: CKRecord.ID(recordName: message.id.uuidString, zoneID: zoneID))
-        
-        // 🌟 [IDEAL] フィールド構成
         messageRecord["roomID"] = roomID as CKRecordValue
         messageRecord["senderID"] = currentUserID as CKRecordValue
-        messageRecord["text"] = (message.body ?? "") as CKRecordValue  // body → text (理想実装)
-        messageRecord["timestamp"] = message.createdAt as CKRecordValue  // createdAt → timestamp (理想実装)
+        messageRecord["text"] = (message.body ?? "") as CKRecordValue
+        messageRecord["timestamp"] = message.createdAt as CKRecordValue
         
-        // 添付ファイルがある場合
-        if let assetPath = message.assetPath {
-            let fileURL = URL(fileURLWithPath: assetPath)
-            let asset = CKAsset(fileURL: fileURL)
-            messageRecord["attachment"] = asset  // asset → attachment (理想実装)
+        do {
+            _ = try await targetDB.save(messageRecord)
+            log("[MESSAGE] Message saved (header) to room: \(roomID)", level: "DEBUG", category: "CloudKitChatManager")
+        } catch {
+            if let ck = error as? CKError {
+                log("[MESSAGE] Failed to send message: CKError=\(ck.code.rawValue) (\(ck.code))", category: "CloudKitChatManager")
+                if let hint = ckErrorHint(ck, roomID: roomID) { log("[MESSAGE] Hint: \(hint)", level: "DEBUG", category: "CloudKitChatManager") }
+            } else {
+                log("[MESSAGE] Failed to send message: \(error)", category: "CloudKitChatManager")
+            }
+            Task { await self.diagnoseRoomAccessibility(roomID: roomID) }
+            throw error
         }
         
-        // 🌟 [IDEAL UPLOAD] 添付ファイルがある場合は長時間実行アップロードを使用
-        let hasAttachment = messageRecord["attachment"] as? CKAsset != nil
-        
-        if hasAttachment {
-            // 長時間実行アップロード使用
-            log("📤 [IDEAL UPLOAD] Using CKModifyRecordsOperation.isLongLived for large asset", category: "CloudKitChatManager")
-            try await sendMessageWithLongLivedOperation(messageRecord, in: targetDB)
-        } else {
-            // 通常のアップロード
+        // attachmentがあれば別レコードとして保存
+        if let assetPath = message.assetPath, FileManager.default.fileExists(atPath: assetPath) {
+            let fileURL = URL(fileURLWithPath: assetPath)
             do {
-                _ = try await targetDB.save(messageRecord)
-                log("✅ [MESSAGE] Message sent successfully to room: \(roomID)", category: "CloudKitChatManager")
+                try await addAttachmentToMessage(messageRecordName: message.id.uuidString, roomID: roomID, localFileURL: fileURL)
             } catch {
-                if let ck = error as? CKError {
-                    log("❌ [MESSAGE] Failed to send message: CKError=\(ck.code.rawValue) (\(ck.code))", category: "CloudKitChatManager")
-                    if let hint = ckErrorHint(ck, roomID: roomID) { log("💡 [MESSAGE] Hint: \(hint)", category: "CloudKitChatManager") }
-                } else {
-                    log("❌ [MESSAGE] Failed to send message: \(error)", category: "CloudKitChatManager")
-                }
-                // 送信失敗時に診断を実施（ノイズ抑制のため軽量）
-                Task { await self.diagnoseRoomAccessibility(roomID: roomID) }
-                throw error
+                // 本文保存済みなので致命ではない。UIは後から添付到着で更新される
+                log("[ATTACHMENT] Failed to upload attachment: \(error)", category: "CloudKitChatManager")
             }
         }
     }
+    #endif
+
+    /// 添付（画像/動画）をMessageとは別レコードとして保存
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit attachment uploads are disabled. Use CKSyncEngineManager.queueAttachment.")
+    func addAttachmentToMessage(messageRecordName: String, roomID: String, localFileURL: URL) async throws {
+        fatalError("Direct CloudKit addAttachmentToMessage is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
+    @available(*, deprecated, message: "Use CKSyncEngineManager.queueAttachment instead")
+    func addAttachmentToMessage(messageRecordName: String, roomID: String, localFileURL: URL) async throws {
+        let (db, zoneID) = try await resolveDatabaseAndZone(for: roomID)
+        let record = CKRecord(recordType: "MessageAttachment", recordID: CKRecord.ID(recordName: UUID().uuidString, zoneID: zoneID))
+        let messageID = CKRecord.ID(recordName: messageRecordName, zoneID: zoneID)
+        record["messageRef"] = CKRecord.Reference(recordID: messageID, action: .none)
+        record["asset"] = CKAsset(fileURL: localFileURL)
+        record["createdAt"] = Date() as CKRecordValue
+        _ = try await db.save(record)
+        log("[ATTACHMENT] Uploaded attachment for message=\(messageRecordName)", level: "DEBUG", category: "CloudKitChatManager")
+    }
+    #endif
 
     // MARK: - Diagnostics / Error Hints
     
@@ -1090,16 +1366,80 @@ class CloudKitChatManager: ObservableObject {
                         log("✅ [BOOTSTRAP] Created local ChatRoom for shared zone: \(roomID)", category: "CloudKitChatManager")
                     }
 
+                    // 参加者プロフィールを該当ゾーンへ公開/更新
+                    let myName = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let myAvatar = UserDefaults.standard.data(forKey: "myAvatarData") ?? Data()
+                    try? await upsertParticipantProfile(in: roomID, name: myName, avatarData: myAvatar)
+
                     // 同期を起動
                     if #available(iOS 17.0, *) {
                         MessageSyncService.shared.checkForUpdates(roomID: roomID)
                     }
+                    // 参加者側：sharedスコープを永続化
+                    setRoomScope(roomID, scope: "shared")
                 } catch {
                     log("⚠️ [BOOTSTRAP] Failed to read ChatSession in shared zone \(roomID): \(error)", category: "CloudKitChatManager")
                 }
             }
         } catch {
             log("⚠️ [BOOTSTRAP] Failed to list shared zones: \(error)", category: "CloudKitChatManager")
+        }
+    }
+
+    /// オーナー側（Private DB）のカスタムゾーンからローカルChatRoomを復元
+    func bootstrapOwnedRooms(modelContext: ModelContext) async {
+        log("🚀 [BOOTSTRAP] Scanning Private DB for owned zones…", category: "CloudKitChatManager")
+        do {
+            let zones = try await privateDB.allRecordZones()
+            let customZones = zones.filter { !$0.zoneID.zoneName.hasPrefix("_") && $0.zoneID.zoneName != CKRecordZone.ID.defaultZoneName }
+            guard !customZones.isEmpty else {
+                log("ℹ️ [BOOTSTRAP] No custom owned zones found", category: "CloudKitChatManager")
+                return
+            }
+
+            for zone in customZones {
+                let roomID = zone.zoneID.zoneName
+
+                // ローカルに存在するか
+                let descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate { $0.roomID == roomID })
+                if let existing = try? modelContext.fetch(descriptor), existing.isEmpty == false {
+                    log("ℹ️ [BOOTSTRAP] ChatRoom already exists for owned roomID=\(roomID)", category: "CloudKitChatManager")
+                    continue
+                }
+
+                // ゾーンにParticipantProfileがあれば相手IDを推定（自分以外の最初のID）
+                var inferredRemote: String = ""
+                if let myID = currentUserID {
+                    do {
+                        let q = CKQuery(recordType: "ParticipantProfile", predicate: NSPredicate(value: true))
+                        let (res, _) = try await privateDB.records(matching: q, inZoneWith: zone.zoneID)
+                        for (_, rr) in res {
+                            if let rec = try? rr.get(), let uid = rec["userID"] as? String, uid != myID {
+                                inferredRemote = uid
+                                break
+                            }
+                        }
+                    } catch {
+                        // 参加者未確定や空は許容
+                    }
+                }
+
+                // ChatRoomを作成
+                let newRoom = ChatRoom(roomID: roomID, remoteUserID: inferredRemote, displayName: nil)
+                modelContext.insert(newRoom)
+                try? modelContext.save()
+                log("✅ [BOOTSTRAP] Created local ChatRoom for owned zone: \(roomID)", category: "CloudKitChatManager")
+
+                // Private側：スコープを永続化
+                setRoomScope(roomID, scope: "private")
+
+                // 同期を軽く促す
+                if #available(iOS 17.0, *) {
+                    MessageSyncService.shared.checkForUpdates(roomID: roomID)
+                }
+            }
+        } catch {
+            log("⚠️ [BOOTSTRAP] Failed to list private zones: \(error)", category: "CloudKitChatManager")
         }
     }
     
@@ -1135,6 +1475,13 @@ class CloudKitChatManager: ObservableObject {
     }
     
     /// メッセージの更新
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit updates are disabled. Use CKSyncEngineManager.queueUpdateMessage.")
+    func updateMessage(_ message: Message) async throws {
+        fatalError("Direct CloudKit updateMessage is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
+    @available(*, deprecated, message: "Use CKSyncEngineManager.queueUpdateMessage instead")
     func updateMessage(_ message: Message) async throws {
         log("✏️ [MESSAGE] Updating message: \(message.id)", category: "CloudKitChatManager")
         
@@ -1165,8 +1512,16 @@ class CloudKitChatManager: ObservableObject {
             throw error
         }
     }
+    #endif
     
     /// メッセージの更新（recordName版 - CKSync互換）
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit updates are disabled. Use CKSyncEngineManager.queueUpdateMessage.")
+    func updateMessage(recordName: String, roomID: String, newBody: String) async throws {
+        fatalError("Direct CloudKit updateMessage(recordName:) is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
+    @available(*, deprecated, message: "Use CKSyncEngineManager.queueUpdateMessage instead")
     func updateMessage(recordName: String, roomID: String, newBody: String) async throws {
         log("✏️ [MESSAGE] Updating message (by recordName) in room: \(roomID)", category: "CloudKitChatManager")
         let (_, zoneID) = try await resolveDatabaseAndZone(for: roomID)
@@ -1188,8 +1543,16 @@ class CloudKitChatManager: ObservableObject {
             throw error
         }
     }
+    #endif
     
     /// メッセージの削除
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit deletes are disabled. Use CKSyncEngineManager.queueDeleteMessage.")
+    func deleteMessage(_ message: Message) async throws {
+        fatalError("Direct CloudKit deleteMessage is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
+    @available(*, deprecated, message: "Use CKSyncEngineManager.queueDeleteMessage instead")
     func deleteMessage(_ message: Message) async throws {
         log("🗑️ [MESSAGE] Deleting message: \(message.id)", category: "CloudKitChatManager")
         
@@ -1212,8 +1575,16 @@ class CloudKitChatManager: ObservableObject {
             throw error
         }
     }
+    #endif
     
     /// メッセージの削除（recordName + roomID 版）
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit deletes are disabled. Use CKSyncEngineManager.queueDeleteMessage.")
+    func deleteMessage(recordName: String, roomID: String) async throws {
+        fatalError("Direct CloudKit deleteMessage(recordName:) is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
+    @available(*, deprecated, message: "Use CKSyncEngineManager.queueDeleteMessage instead")
     func deleteMessage(recordName: String, roomID: String) async throws {
         log("🗑️ [MESSAGE] Deleting message with recordName: \(recordName) in room: \(roomID)", category: "CloudKitChatManager")
         let (_, zoneID) = try await resolveDatabaseAndZone(for: roomID)
@@ -1230,10 +1601,17 @@ class CloudKitChatManager: ObservableObject {
             throw error
         }
     }
+    #endif
     
     // MARK: - Anniversary Management
     
     /// 記念日の保存
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit anniversary saves are disabled. Use CKSyncEngineManager.queueAnniversaryCreate.")
+    func saveAnniversary(title: String, date: Date, roomID: String, repeatType: Any? = nil) async throws -> String {
+        fatalError("Direct CloudKit saveAnniversary is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
     func saveAnniversary(title: String, date: Date, roomID: String, repeatType: Any? = nil) async throws -> String {
         log("🎉 [ANNIVERSARY] Saving anniversary: \(title)", category: "CloudKitChatManager")
         
@@ -1254,8 +1632,15 @@ class CloudKitChatManager: ObservableObject {
             throw error
         }
     }
+    #endif
     
     /// 記念日の更新
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit anniversary updates are disabled. Use CKSyncEngineManager.queueAnniversaryUpdate.")
+    func updateAnniversary(recordName: String, title: String, date: Date, roomID: String) async throws -> String {
+        fatalError("Direct CloudKit updateAnniversary is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
     func updateAnniversary(recordName: String, title: String, date: Date, roomID: String) async throws -> String {
         log("✏️ [ANNIVERSARY] Updating anniversary: \(title)", category: "CloudKitChatManager")
         
@@ -1275,10 +1660,17 @@ class CloudKitChatManager: ObservableObject {
             throw error
         }
     }
+    #endif
     
     // 旧: updateAnniversary(recordName:title:date:) は削除（roomID必須）
     
     /// 記念日の削除
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit anniversary deletes are disabled. Use CKSyncEngineManager.queueAnniversaryDelete.")
+    func deleteAnniversary(recordName: String, roomID: String) async throws {
+        fatalError("Direct CloudKit deleteAnniversary is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
     func deleteAnniversary(recordName: String, roomID: String) async throws {
         log("🗑️ [ANNIVERSARY] Deleting anniversary: \(recordName)", category: "CloudKitChatManager")
         
@@ -1293,8 +1685,15 @@ class CloudKitChatManager: ObservableObject {
             throw error
         }
     }
+    #endif
     
     /// 記念日の削除（roomID不要版 - CKSync互換）
+    #if ENGINE_ONLY
+    @available(*, unavailable, message: "Direct CloudKit anniversary deletes are disabled. Use CKSyncEngineManager.queueAnniversaryDelete.")
+    func deleteAnniversary(recordName: String) async throws {
+        fatalError("Direct CloudKit deleteAnniversary (legacy) is unavailable when ENGINE_ONLY is defined")
+    }
+    #else
     func deleteAnniversary(recordName: String) async throws {
         log("🗑️ [ANNIVERSARY] Deleting anniversary (legacy): \(recordName)", category: "CloudKitChatManager")
         
@@ -1318,6 +1717,7 @@ class CloudKitChatManager: ObservableObject {
         log("❌ [ANNIVERSARY] Anniversary not found in any zone: \(recordName)", category: "CloudKitChatManager")
         throw CloudKitChatError.recordSaveFailed
     }
+    #endif
     
     // MARK: - Room Ownership and Participation
     
@@ -1460,21 +1860,24 @@ class CloudKitChatManager: ObservableObject {
         }
     }
     
-    /// 完全CloudKitリセット（ローカルは保持）
+    /// 完全CloudKitリセット + ローカルDB/キャッシュのクリーンアップ（UIの@AppStorageは呼び元で初期化）
     func performCompleteCloudReset() async throws {
         log("☁️ [CLOUD RESET] Starting complete cloud reset", category: "CloudKitChatManager")
         
         do {
-            // 全サブスクリプションを削除
+            // 1) サブスクリプション削除
             try await removeAllSubscriptions()
-            
-            // プライベートDBをクリア
+            // 2) プライベートDBゾーン削除
             try await clearPrivateDatabase()
-            
-            // 共有ゾーンから離脱
+            // 3) 共有ゾーンから離脱
             try await leaveAllSharedDatabases()
             
-            log("✅ [CLOUD RESET] Complete cloud reset finished", category: "CloudKitChatManager")
+            // 4) ローカルDBもクリーン（責務一本化）
+            try await clearLocalDatabase()
+            // 5) キャッシュもクリア
+            clearCache()
+            
+            log("✅ [CLOUD RESET] Complete cloud reset finished (local DB + cache cleared)", category: "CloudKitChatManager")
             
         } catch {
             log("❌ [CLOUD RESET] Complete cloud reset failed: \(error)", category: "CloudKitChatManager")

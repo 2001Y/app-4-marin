@@ -1,11 +1,7 @@
-#if canImport(EmojisReactionKit)
-import EmojisReactionKit
-#endif
 import SwiftUI
 import UIKit
 import SwiftData
 import PhotosUI
-import CloudKit
 import AVKit
 
 
@@ -17,6 +13,9 @@ struct ChatView: View {
     // In a production app roomID should be deterministic hash of both users.
     var roomID: String { chatRoom.roomID }
     @State var myID: String = ""
+    @State private var selectedTab: Int = 0
+    // CloudKitユーザーIDの変化を購読して常に最新を用いる
+    @StateObject private var chatManager = CloudKitChatManager.shared
 
     // 相手ユーザー ID をヘッダーに表示
     var remoteUserID: String { chatRoom.remoteUserID }
@@ -59,8 +58,7 @@ struct ChatView: View {
     @State var text: String = ""
     // 編集中のメッセージ（nil なら通常送信モード）
     @State var editingMessage: Message? = nil
-    @State var editingText: String = ""
-    @FocusState var editingFieldFocused: Bool
+    // 旧編集UI（インライン/オーバーレイ）用のStateを撤去
     @State var photosPickerItems: [PhotosPickerItem] = []
     @State var showSettings: Bool = false
     @State var showDualCameraRecorder: Bool = false
@@ -76,9 +74,10 @@ struct ChatView: View {
     @FocusState var isTextFieldFocused: Bool
     @State var attachmentsExpanded: Bool = true
     
-    // Context overlay for partner message actions
-    @State var contextMessage: Message? = nil
-    @State var editTextOverlay: String = ""
+    // ハーフモーダル（メッセージアクション）
+    @State var actionSheetMessage: Message? = nil
+    // 画像グループへの一括リアクション適用用（nilなら単一メッセージ）
+    @State var actionSheetTargetGroup: [Message]? = nil
     
     // Partner profile
     @State var partnerName: String = ""
@@ -92,10 +91,15 @@ struct ChatView: View {
     
     @State var showProfileSheet: Bool = false
     
-    // 🌟 [IDEAL SHARING UI] CloudKit共有関連の状態
-    @State private var showCloudSharingController = false
-    @State private var shareToPresent: CKShare?
-    @State private var isLoadingShare = false
+    // 長押し中のメッセージID（押している間だけ拡大表現）
+    @State var pressingMessageID: UUID? = nil
+
+    // リアクションピッカー表示用（テキストバブルのワンタップ）
+    // ChatViewMessageBubble.swift（別ファイルの拡張）から参照するためprivateを外す
+    @State var reactionPickerMessage: Message? = nil
+    @AppStorage("myDisplayName") var myDisplayName: String = ""
+    // 入力バーの実高さ（safeAreaInsetで配置したコンポーザの高さ）
+    @State var composerHeight: CGFloat = 0
     
     // Filtered anniversaries for current room
     var roomAnniversaries: [Anniversary] {
@@ -131,243 +135,246 @@ struct ChatView: View {
         buildBody()
     }
 
-    @ViewBuilder
     func buildBody() -> some View {
-        TabView {
+        // 1) タブ + ナビゲーション基本設定（AnyViewで型を単純化）
+        let base = AnyView(
+            tabsView()
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .indexViewStyle(.page(backgroundDisplayMode: .never))
+                .allowsHitTesting(true)
+                .navigationTitle(partnerName.isEmpty ? remoteUserID : partnerName)
+                .navigationBarTitleDisplayMode(.inline)
+        )
+
+        // 2) ツールバーを段階的に適用
+        let withTitle = AnyView(
+            base.toolbar {
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 2) {
+                        Text(partnerName.isEmpty ? remoteUserID : partnerName)
+                            .font(.headline)
+                        Text("あと\(daysUntilAnniversary)日")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .onTapGesture { showProfileSheet = true }
+                }
+            }
+        )
+
+        let withActions = AnyView(
+            withTitle.toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    HStack {
+                        FaceTimeAudioButton(callee: remoteUserID, roomID: roomID)
+                        FaceTimeButton(callee: remoteUserID, roomID: roomID)
+                    }
+                }
+            }
+        )
+
+        // 3) 各種シート/オーバーレイ/通知ハンドラを適用
+        let finalView = AnyView(
+            withActions
+                .onChange(of: selectedTab) { _, _ in
+                    // タブ移動時にフォーカス解除（キーボードを閉じる）
+                    isTextFieldFocused = false
+                }
+                .fullScreenCover(isPresented: $isVideoPlayerShown) {
+                    if let url = videoPlayerURL {
+                        VideoPlayer(player: AVPlayer(url: url))
+                            .ignoresSafeArea()
+                    }
+                }
+                .fullScreenCover(isPresented: $isPreviewShown) {
+                    if !previewMediaItems.isEmpty {
+                        FullScreenPreviewView(
+                            images: [],
+                            startIndex: previewStartIndex,
+                            onDismiss: { isPreviewShown = false },
+                            namespace: heroNS,
+                            geometryIDs: previewMediaItems.enumerated().map { index, _ in "preview_\(index)" },
+                            mediaItems: previewMediaItems
+                        )
+                    } else {
+                        FullScreenPreviewView(
+                            images: previewImages,
+                            startIndex: previewStartIndex,
+                            onDismiss: { isPreviewShown = false },
+                            namespace: heroNS,
+                            geometryIDs: previewImages.enumerated().map { index, _ in previewImages.count == 1 ? heroImageID : "preview_\(index)" }
+                        )
+                    }
+                }
+                .overlay {
+                    if showHero, let img = heroImage {
+                        FullScreenPreviewView(
+                            images: [img],
+                            startIndex: 0,
+                            onDismiss: { withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) { showHero = false } },
+                            namespace: heroNS,
+                            geometryIDs: [heroImageID]
+                        )
+                        .transition(.opacity)
+                    }
+                }
+                .sheet(isPresented: $isEmojiPickerShown) {
+                    MCEmojiPickerSheet(selectedEmoji: $pickedEmoji)
+                        .presentationDetents([.medium, .large])
+                }
+                .fullScreenCover(isPresented: $showDualCameraRecorder) { DualCamRecorderView() }
+                .sheet(isPresented: $showProfileSheet) { ProfileDetailView(chatRoom: chatRoom, partnerAvatar: partnerAvatar) }
+                .sheet(isPresented: Binding(
+                    get: { actionSheetMessage != nil },
+                    set: { newVal in
+                        if newVal == false {
+                            actionSheetMessage = nil
+                            actionSheetTargetGroup = nil
+                            log("ActionSheet: dismissed by user", category: "ChatView")
+                        }
+                    }
+                )) {
+                    if let target = actionSheetMessage {
+                        MessageActionSheet(
+                            message: target,
+                            isMine: target.senderID == myID,
+                            onReact: { emoji in
+                                let targets = actionSheetTargetGroup ?? [target]
+                                for msg in targets {
+                                    Task { _ = await ReactionManager.shared.addReaction(emoji, to: msg) }
+                                }
+                                log("ActionSheet: Added reaction(CloudKit) \(emoji) to \(targets.count) message(s)", category: "ChatView")
+                                updateRecentEmoji(emoji)
+                                actionSheetMessage = nil
+                                actionSheetTargetGroup = nil
+                            },
+                            onEdit: {
+                                guard target.senderID == myID else { return }
+                                editingMessage = target
+                                text = target.body ?? ""
+                                isTextFieldFocused = true
+                                log("Edit: enter edit mode id=\(target.id)", category: "ChatView")
+                                actionSheetMessage = nil
+                                actionSheetTargetGroup = nil
+                            },
+                            onCopy: {
+                                if let body = target.body { UIPasteboard.general.string = body }
+                                log("ActionSheet: Copied text from message id=\(target.id)", category: "ChatView")
+                                actionSheetMessage = nil
+                                actionSheetTargetGroup = nil
+                            },
+                            onDelete: {
+                                deleteMessage(target)
+                                log("ActionSheet: Deleted message id=\(target.id)", category: "ChatView")
+                                actionSheetMessage = nil
+                                actionSheetTargetGroup = nil
+                            },
+                            onDismiss: {
+                                actionSheetMessage = nil
+                                actionSheetTargetGroup = nil
+                            }
+                        )
+                        .presentationDetents([.fraction(0.33)])
+                    }
+                }
+                .sheet(item: $reactionPickerMessage) { msg in
+                    ReactionListSheet(message: msg, roomID: roomID, currentUserID: myID)
+                        .onAppear { log("ReactionList: open for id=\(msg.id)", category: "ChatView") }
+                        .presentationDetents([.medium])
+                }
+                .onChange(of: pickedEmoji) { newValue, _ in handleEmojiSelection(newValue) }
+                .onAppear {
+                    if messageStore == nil {
+                        messageStore = MessageStore(modelContext: modelContext, roomID: roomID)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { messageStore?.refresh() }
+                    }
+                    handleViewAppearance()
+                    requestChatPermissions()
+                    Task {
+                        if let userID = CloudKitChatManager.shared.currentUserID {
+                            myID = userID
+                            log("[ChatView] myID set onAppear (immediate): \(String(myID.prefix(8)))", category: "DEBUG")
+                        } else {
+                            while !CloudKitChatManager.shared.isInitialized { try? await Task.sleep(nanoseconds: 100_000_000) }
+                            if let userID = CloudKitChatManager.shared.currentUserID {
+                                myID = userID
+                                log("[ChatView] myID set onAppear (after init): \(String(myID.prefix(8)))", category: "DEBUG")
+                            }
+                        }
+                    }
+                }
+                .onReceive(chatManager.$currentUserID) { uid in
+                    if let uid, uid != myID {
+                        myID = uid
+                        log("[ChatView] myID updated via publisher: \(String(uid.prefix(8)))", category: "DEBUG")
+                    }
+                }
+                .onChange(of: messages.count) { _, newCount in
+                    if chatRoom.autoDownloadImages { autoDownloadNewImages() }
+                    handleMessagesCountChange(newCount)
+                }
+                .onDisappear { P2PController.shared.close() }
+                .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamRecording)) { notif in
+                    log("ChatView: Received .didFinishDualCamRecording notification", category: "DEBUG")
+                    if let url = notif.userInfo?["videoURL"] as? URL {
+                        log("ChatView: Video URL from notification: \(url)", category: "DEBUG")
+                        log("ChatView: Video file exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DEBUG")
+                        insertVideoMessage(url)
+                    } else {
+                        log("ChatView: No video URL found in notification userInfo", category: "DEBUG")
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamPhoto)) { notif in
+                    log("ChatView: Received .didFinishDualCamPhoto notification", category: "DEBUG")
+                    if let url = notif.userInfo?["photoURL"] as? URL {
+                        log("ChatView: Photo URL from notification: \(url)", category: "DEBUG")
+                        log("ChatView: Photo file exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DEBUG")
+                        insertPhotoMessage(url)
+                    } else {
+                        log("ChatView: No photo URL found in notification userInfo", category: "DEBUG")
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .faceTimeIDRegistered)) { notif in
+                    if let info = notif.userInfo as? [String: Any],
+                       let faceTimeID = info["faceTimeID"] as? String {
+                        let name = myDisplayName.isEmpty ? "あなた" : myDisplayName
+                        let body = Message.makeFaceTimeRegisteredBody(name: name, faceTimeID: faceTimeID)
+                        log("📞 [SYS] Sending FaceTime registration system message", category: "ChatView")
+                        messageStore?.sendMessage(body)
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RequestDatabaseDump"))) { notif in
+                    log("ChatView: Received RequestDatabaseDump notification", category: "DEBUG")
+                    if let source = notif.userInfo?["source"] as? String { log("ChatView: Database dump requested by: \(source)", category: "DEBUG") }
+                    messageStore?.debugPrintEntireDatabase()
+                    messageStore?.debugSearchForMessage(containing: "たああ")
+                    messageStore?.debugSearchForMessage(containing: "たあああ")
+                    messageStore?.debugSearchForMessage(containing: "メインからサブ")
+                    messageStore?.debugSearchForMessage(containing: "サブからメイン")
+                    messageStore?.debugSearchForMessage(containing: "サブからのテスト")
+                    messageStore?.debugSearchForMessage(containing: "メインからのテスト")
+                }
+                .onChange(of: isVideoPlayerShown) { _, newVal in if newVal == false { AudioSessionManager.configureForAmbient() } }
+        )
+
+        return finalView
+    }
+
+    // 複雑なTabView部分を分割して型推論負荷を軽減
+    @ViewBuilder
+    private func tabsView() -> some View {
+        TabView(selection: $selectedTab) {
             chatContentView()
                 .tag(0)
                 .tabItem {
                     Label("チャット", systemImage: "bubble.left.and.bubble.right")
                 }
-            
+
             unifiedCalendarAlbumView()
                 .tag(1)
                 .tabItem {
                     Label("カレンダー", systemImage: "calendar")
                 }
-        }
-        .tabViewStyle(.page(indexDisplayMode: .never))
-        .indexViewStyle(.page(backgroundDisplayMode: .never))
-        .allowsHitTesting(true)
-        .scrollDisabled(isTextFieldFocused || interactionBlocked) // テキストフィールドフォーカス時または編集モード時はスワイプ無効
-        .navigationTitle(partnerName.isEmpty ? remoteUserID : partnerName)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 2) {
-                    Text(partnerName.isEmpty ? remoteUserID : partnerName)
-                        .font(.headline)
-                    Text("あと\(daysUntilAnniversary)日")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .onTapGesture {
-                    showProfileSheet = true
-                }
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                HStack {
-                    #if DEBUG
-                    Button(action: {
-                        log("Manual database check requested", category: "DEBUG")
-                        messageStore?.debugPrintEntireDatabase()
-                        messageStore?.debugSearchForMessage(containing: "たああ")
-                        messageStore?.debugSearchForMessage(containing: "たあああ")
-                        messageStore?.refresh()
-                    }) {
-                        Image(systemName: "magnifyingglass.circle")
-                            .foregroundColor(.blue)
-                    }
-                    #endif
-                    
-                    // 🌟 [IDEAL SHARING UI] CloudKit共有ボタン
-                    Button(action: {
-                        loadAndShowCloudShare()
-                    }) {
-                        if isLoadingShare {
-                            ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle())
-                                .scaleEffect(0.8)
-                        } else {
-                            Image(systemName: "square.and.arrow.up")
-                                .foregroundColor(.blue)
-                        }
-                    }
-                    .disabled(isLoadingShare)
-                    
-                    FaceTimeAudioButton(callee: remoteUserID)
-                    FaceTimeButton(callee: remoteUserID)
-                }
-            }
-        }
-        .fullScreenCover(isPresented: $isVideoPlayerShown) {
-            if let url = videoPlayerURL {
-                VideoPlayer(player: AVPlayer(url: url))
-                    .ignoresSafeArea()
-            }
-        }
-        .fullScreenCover(isPresented: $isPreviewShown) {
-            if !previewMediaItems.isEmpty {
-                // 画像・動画混在プレビュー
-                FullScreenPreviewView(
-                    images: [], // 空配列（mediaItemsを使用）
-                    startIndex: previewStartIndex,
-                    onDismiss: { isPreviewShown = false },
-                    namespace: heroNS,
-                    geometryIDs: previewMediaItems.enumerated().map { index, _ in
-                        "preview_\(index)"
-                    },
-                    mediaItems: previewMediaItems
-                )
-            } else {
-                // 従来の画像のみプレビュー
-                FullScreenPreviewView(
-                    images: previewImages,
-                    startIndex: previewStartIndex,
-                    onDismiss: { isPreviewShown = false },
-                    namespace: heroNS,
-                    geometryIDs: previewImages.enumerated().map { index, _ in
-                        // 単一画像の場合はassetPath、複数画像の場合はindexベースのID
-                        previewImages.count == 1 ? heroImageID : "preview_\(index)"
-                    }
-                )
-            }
-        }
-        .overlay {
-            if showHero, let img = heroImage {
-                // HeroImagePreviewは削除されたため、FullScreenPreviewViewを使用
-                FullScreenPreviewView(
-                    images: [img],
-                    startIndex: 0,
-                    onDismiss: {
-                        withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
-                            showHero = false
-                        }
-                    },
-                    namespace: heroNS,
-                    geometryIDs: [heroImageID]
-                )
-                .transition(.opacity)
-            }
-        }
-        .sheet(isPresented: $isEmojiPickerShown) {
-            MCEmojiPickerSheet(selectedEmoji: $pickedEmoji)
-                .presentationDetents([.medium, .large])
-        }
-        .fullScreenCover(isPresented: $showDualCameraRecorder) {
-            DualCamRecorderView()
-        }
-        .sheet(isPresented: $showProfileSheet) {
-            ProfileDetailView(chatRoom: chatRoom, partnerAvatar: partnerAvatar)
-        }
-        // 🌟 [IDEAL SHARING UI] 拡張版CloudKit共有コントローラー（URL共有ボタン付き）
-        .sheet(isPresented: $showCloudSharingController) {
-            if let shareToPresent = shareToPresent {
-                EnhancedCloudSharingView(
-                    share: shareToPresent,
-                    container: CloudKitChatManager.shared.containerForSharing,
-                    onDismiss: {
-                        showCloudSharingController = false
-                    }
-                )
-            }
-        }
-        .onChange(of: pickedEmoji) { newValue, _ in
-            handleEmojiSelection(newValue)
-        }
-        .onAppear {
-            // Initialize MessageStore with Environment's modelContext if not already initialized
-            if messageStore == nil {
-                messageStore = MessageStore(modelContext: modelContext, roomID: roomID)
-                log("ChatView: Initialized MessageStore with Environment modelContext", category: "DEBUG")
-                log("ChatView: MessageStore ModelContext: \(ObjectIdentifier(modelContext))", category: "DEBUG")
-                
-                // Force refresh to ensure UI-DB sync
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    messageStore?.refresh()
-                    log("ChatView: Auto-refresh triggered after MessageStore initialization", category: "DEBUG")
-                }
-            } else {
-                // MessageStore already exists, just refresh
-                messageStore?.refresh()
-                log("ChatView: Refreshing existing MessageStore", category: "DEBUG")
-                log("ChatView: MessageStore ModelContainer: \(ObjectIdentifier(modelContext.container))", category: "DEBUG")
-            }
-            
-            handleViewAppearance()
-            requestChatPermissions()
-            
-            // CloudKit UserIDを取得してmyIDに設定
-            Task {
-                if let userID = CloudKitChatManager.shared.currentUserID {
-                    myID = userID
-                    log("ChatView: myID set to CloudKit userID: \(userID)", category: "DEBUG")
-                } else {
-                    // CloudKitChatManagerが初期化中の場合は待つ
-                    while !CloudKitChatManager.shared.isInitialized {
-                        try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒待機
-                    }
-                    if let userID = CloudKitChatManager.shared.currentUserID {
-                        myID = userID
-                        log("ChatView: myID set to CloudKit userID (after init): \(userID)", category: "DEBUG")
-                    } else {
-                        // フォールバック: デバイスIDを使用
-                        myID = UIDevice.current.identifierForVendor?.uuidString ?? "unknown-device"
-                        log("ChatView: myID fallback to device ID: \(myID)", category: "DEBUG")
-                    }
-                }
-            }
-        }
-        .onChange(of: messages.count) { _, newCount in
-            // 統合されたメッセージ数変更処理
-            if chatRoom.autoDownloadImages {
-                autoDownloadNewImages()
-            }
-            handleMessagesCountChange(newCount)
-        }
-        .onDisappear {
-            P2PController.shared.close()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamRecording)) { notif in
-            log("ChatView: Received .didFinishDualCamRecording notification", category: "DEBUG")
-            if let url = notif.userInfo?["videoURL"] as? URL {
-                log("ChatView: Video URL from notification: \(url)", category: "DEBUG")
-                log("ChatView: Video file exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DEBUG")
-                insertVideoMessage(url)
-            } else {
-                log("ChatView: No video URL found in notification userInfo", category: "DEBUG")
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamPhoto)) { notif in
-            log("ChatView: Received .didFinishDualCamPhoto notification", category: "DEBUG")
-            if let url = notif.userInfo?["photoURL"] as? URL {
-                log("ChatView: Photo URL from notification: \(url)", category: "DEBUG")
-                log("ChatView: Photo file exists: \(FileManager.default.fileExists(atPath: url.path))", category: "DEBUG")
-                insertPhotoMessage(url)
-            } else {
-                log("ChatView: No photo URL found in notification userInfo", category: "DEBUG")
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RequestDatabaseDump"))) { notif in
-            log("ChatView: Received RequestDatabaseDump notification", category: "DEBUG")
-            if let source = notif.userInfo?["source"] as? String {
-                log("ChatView: Database dump requested by: \(source)", category: "DEBUG")
-            }
-            
-            // MessageStoreのデバッグ機能を実行
-            messageStore?.debugPrintEntireDatabase()
-            messageStore?.debugSearchForMessage(containing: "たああ")
-            messageStore?.debugSearchForMessage(containing: "たあああ")
-            messageStore?.debugSearchForMessage(containing: "メインからサブ")
-            messageStore?.debugSearchForMessage(containing: "サブからメイン")
-            messageStore?.debugSearchForMessage(containing: "サブからのテスト")
-            messageStore?.debugSearchForMessage(containing: "メインからのテスト")
-        }
-        // 動画プレイヤー解除時に他アプリのオーディオを止めない
-        .onChange(of: isVideoPlayerShown) { _, newVal in
-            if newVal == false {
-                AudioSessionManager.configureForAmbient()
-            }
         }
     }
     
@@ -377,108 +384,32 @@ struct ChatView: View {
         ZStack(alignment: .topTrailing) {
             VStack(spacing: 0) {
                 messagesView()
-                
-                Divider()
-                
-                composeBarView()
             }
             .background(Color(UIColor.systemBackground))
             .allowsHitTesting(true)
             .contentShape(Rectangle())
-            .overlay { contextOverlayView() }
+            // 旧・返信/コピー用のオーバーレイは廃止（ハーフモーダルへ統合）
+            // P2Pビデオオーバーレイ（条件は内部で判定）
+            FloatingVideoOverlay()
         }
-        .overlay { interactionBlockerView() }
-        .overlay(alignment: .bottomTrailing) { editingOverlayView() }
-    }
-    
-
-    
-    @ViewBuilder
-    private func contextOverlayView() -> some View {
-        if let ctx = contextMessage {
-            Color.black.opacity(0.3)
-                .ignoresSafeArea()
-                .background(.ultraThinMaterial)
-                .onTapGesture { contextMessage = nil }
-
-            contextModalContent(ctx: ctx)
+        // 入力欄はセーフエリア下端に常設（キーボード追従はOS任せ）
+        .safeAreaInset(edge: .bottom) {
+            composeBarView()
+                .readHeight($composerHeight)
+                .background(Color(UIColor.systemBackground))
         }
     }
     
-    @ViewBuilder
-    private func contextModalContent(ctx: Message) -> some View {
-        GeometryReader { g in
-            let msgWidth: CGFloat = min(g.size.width * 0.72, 320)
-            let horizontalOffset = ctx.senderID == myID ? (g.size.width/2 - msgWidth*0.6) : -(g.size.width/2 - msgWidth*0.4)
 
-            VStack(spacing: 24) {
-                Spacer().frame(height: 60)
-                bubble(for: ctx)
-                    .frame(width: msgWidth, alignment: ctx.senderID == myID ? .trailing : .leading)
-                    .offset(x: horizontalOffset)
-                    .allowsHitTesting(false)
-
-                contextActionButtons(ctx: ctx)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
     
-    @ViewBuilder
-    private func contextActionButtons(ctx: Message) -> some View {
-                            if ctx.senderID == myID {
-                                VStack(spacing: 16) {
-                                TextEditor(text: $editTextOverlay)
-                                    .frame(height: 120)
-                                    .padding(8)
-                                    .background(Color(UIColor.secondarySystemBackground))
-                                    .cornerRadius(12)
-                                    .onAppear { editTextOverlay = ctx.body ?? "" }
-                                    .onChange(of: editTextOverlay) { _, newVal in
-                                        ctx.body = newVal
-                                    }
-                                    
-                                    HStack {
-                                        Spacer()
-                                Button("完了") { contextMessage = nil }
-                                            .buttonStyle(.borderedProminent)
-                                    }
-                                }
-                            } else {
-                                HStack(spacing: 32) {
-                                    Button {
-                                        text = "> " + (ctx.body ?? "") + "\n"
-                                        isTextFieldFocused = true
-                                        contextMessage = nil
-                                    } label: {
-                                        VStack { Image(systemName: "arrowshape.turn.up.left"); Text("返信") }
-                                    }
-
-                                    Button {
-                                        if let body = ctx.body { UIPasteboard.general.string = body }
-                                        contextMessage = nil
-                                    } label: {
-                                        VStack { Image(systemName: "doc.on.doc"); Text("コピー") }
-                                    }
-                                }
-                                .foregroundColor(.primary)
-                                .font(.body)
-                            }
-                        }
-    
-    @ViewBuilder
-    private func interactionBlockerView() -> some View {
+    // 旧・contextOverlayView/返信・コピーUIは削除
+    @ViewBuilder private func interactionBlockerView() -> some View {
         if interactionBlocked {
             Color.clear.contentShape(Rectangle()).allowsHitTesting(true)
         }
     }
     
-    @ViewBuilder
-    private func editingOverlayView() -> some View {
-        if let editing = editingMessage {
-            EditingOverlay(message: editing)
-        }
-    }
+    // 旧編集オーバーレイUIは廃止（通常の入力欄編集へ統合済み）
     
     @ViewBuilder
     private func heroPreviewOverlay() -> some View {
@@ -699,93 +630,4 @@ struct ChatView: View {
         }
     }
     
-    // MARK: - 🌟 [IDEAL SHARING UI] CloudKit共有機能
-    
-    /// 既存のCKShareを取得して共有コントローラーを表示
-    private func loadAndShowCloudShare() {
-        isLoadingShare = true
-        
-        Task {
-            do {
-                // 既存のゾーンとCKShareを取得
-                let ckShare = try await findExistingShare()
-                
-                await MainActor.run {
-                    self.shareToPresent = ckShare
-                    self.isLoadingShare = false
-                    self.showCloudSharingController = true
-                }
-                
-                log("✅ [IDEAL SHARING UI] Loaded existing CKShare for room: \(roomID)", category: "ChatView")
-                
-            } catch {
-                await MainActor.run {
-                    self.isLoadingShare = false
-                }
-                log("❌ [IDEAL SHARING UI] Failed to load CKShare: \(error)", category: "ChatView")
-                
-                // エラー時は新しいCKShareを作成
-                createNewShareIfNeeded()
-            }
-        }
-    }
-    
-    /// 既存のCKShareを検索
-    private func findExistingShare() async throws -> CKShare {
-        let cloudKitManager = CloudKitChatManager.shared
-        
-        // まずPrivate DBでCKShareを検索
-        do {
-            let customZoneID = CKRecordZone.ID(zoneName: roomID)
-            let query = CKQuery(recordType: "cloudkit.share", predicate: NSPredicate(value: true))
-            
-            let (results, _) = try await cloudKitManager.privateDB.records(
-                matching: query,
-                inZoneWith: customZoneID
-            )
-            
-            for (_, result) in results {
-                switch result {
-                case .success(let record):
-                    if let share = record as? CKShare {
-                        return share
-                    }
-                case .failure(_):
-                    continue
-                }
-            }
-        } catch {
-            log("⚠️ [IDEAL SHARING UI] Failed to find existing share in Private DB: \(error)", category: "ChatView")
-        }
-        
-        // 見つからない場合は新しく作成
-        throw CloudKitChatError.shareNotFound
-    }
-    
-    /// 新しいCKShareの作成（既存のものが見つからない場合）
-    private func createNewShareIfNeeded() {
-        Task {
-            do {
-                let cloudKitManager = CloudKitChatManager.shared
-                let ckShare = try await cloudKitManager.createSharedChatRoom(
-                    roomID: roomID,
-                    invitedUserID: "pending"
-                )
-                
-                await MainActor.run {
-                    self.shareToPresent = ckShare
-                    self.isLoadingShare = false
-                    self.showCloudSharingController = true
-                }
-                
-                log("✅ [IDEAL SHARING UI] Created new CKShare for existing room: \(roomID)", category: "ChatView")
-                
-            } catch {
-                await MainActor.run {
-                    self.isLoadingShare = false
-                }
-                log("❌ [IDEAL SHARING UI] Failed to create new CKShare: \(error)", category: "ChatView")
-            }
-        }
-    }
 }

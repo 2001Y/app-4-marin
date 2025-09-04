@@ -2,11 +2,13 @@ import SwiftUI
 import AVFoundation
 import VisionKit
 import CloudKit
+import SwiftData
 
 @MainActor
 struct QRScannerSheet: View {
     @Binding var isPresented: Bool
     var onAccepted: (() -> Void)? = nil
+    @Environment(\.modelContext) private var modelContext
     @State private var useVisionKit = false
     @State private var torchOn = false
     @State private var isRunning = true
@@ -65,13 +67,47 @@ struct QRScannerSheet: View {
         guard Date().timeIntervalSince(lastDetectionAt) > 1 else { return }
         lastDetectionAt = Date()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        if let url = URL(string: value) {
-            Task { @MainActor in
+        guard let url = URL(string: value) else { return }
+
+        // 読み取りに成功したら即座にスキャナを停止しモーダルを閉じる
+        isRunning = false
+        isPresented = false
+
+        Task { @MainActor in
+            // モーダル閉鎖後〜チャット遷移までの間にシステム風ローディングを表示（通知でRootに指示）
+            NotificationCenter.default.post(name: Notification.Name("showGlobalLoading"), object: nil, userInfo: ["title": "読み込み中…"])
+            // 1) CloudKit招待URL（icloud.com）か、アプリ内カスタム招待かを判定
+            if url.host?.contains("icloud.com") == true {
+                // 事前にメタデータからゾーン名(roomID)を取得
+                var scannedRoomID: String? = nil
+                do {
+                    let container = CloudKitChatManager.shared.containerForSharing
+                    let meta = try await container.shareMetadata(for: url)
+                    scannedRoomID = meta.share.recordID.zoneID.zoneName
+                } catch {
+                    // メタデータ取得に失敗しても受諾は試みる
+                    log("QRScanner: Failed to fetch share metadata: \(error)", category: "Invite")
+                }
+
                 let ok = await InvitationManager.shared.acceptInvitation(from: url)
                 if ok {
+                    // 受諾後にローカルのChatRoomをブートストラップ
+                    await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
                     MessageSyncService.shared.checkForUpdates()
-                    isPresented = false
+
+                    // roomID からチャットを特定して遷移通知
+                    if let roomID = scannedRoomID {
+                        // まず同一Contextで検索
+                        if let found = try? modelContext.fetch(FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })).first {
+                            NotificationCenter.default.post(name: .openChatRoom, object: nil, userInfo: ["room": found])
+                        } else {
+                            NotificationCenter.default.post(name: .openChatRoom, object: nil, userInfo: ["roomID": roomID])
+                        }
+                    }
                     onAccepted?()
+                } else {
+                    // エラー時はHUDを閉じる（遷移は発生しない）
+                    NotificationCenter.default.post(name: Notification.Name("hideGlobalLoading"), object: nil)
                 }
             }
         }

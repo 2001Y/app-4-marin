@@ -33,7 +33,7 @@ struct EnhancedCloudSharingView: View {
                         HStack(spacing: 12) {
                             Image(systemName: "link.circle.fill")
                                 .font(.system(size: 20))
-                                .foregroundColor(.blue)
+                                .foregroundColor(.accentColor)
                             
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("リンクをコピー／共有")

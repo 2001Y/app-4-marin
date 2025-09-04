@@ -68,7 +68,7 @@ struct InviteModalView: View {
                     
                     Text("理想実装: ゾーン共有によるネイティブ招待")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.blue)
+                .foregroundColor(.accentColor)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(Color.blue.opacity(0.1))

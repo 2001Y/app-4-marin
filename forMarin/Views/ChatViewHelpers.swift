@@ -1,10 +1,63 @@
 import SwiftUI
+import Combine
 import SwiftData
 import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
 
 extension ChatView {
+    // グループ（同一送信者の連続メディア）用のCloudKit集計リアクションバー
+    private struct ReactionGroupOverlay: View {
+        let group: MessageGroup
+        let roomID: String
+        let isMine: Bool
+
+        @State private var aggregated: [String] = []
+
+        var body: some View {
+            Group {
+                if !aggregated.isEmpty {
+                    ReactionBarView(emojis: aggregated, isMine: isMine)
+                }
+            }
+            .task {
+                // 各メッセージのリアクションをCloudKitから取得して集約
+                var all: [String] = []
+                for msg in group.messages {
+                    let record = msg.ckRecordName ?? msg.id.uuidString
+                    do {
+                        let reactions = try await CloudKitChatManager.shared.getReactionsForMessage(messageRecordName: record, roomID: roomID)
+                        all.append(contentsOf: reactions.map { $0.emoji })
+                    } catch {
+                        // 失敗時は該当メッセージ分はスキップ
+                        log("ReactionGroupOverlay: fetch failed for msg=\(record) error=\(error)", category: "ChatView")
+                    }
+                }
+                if !all.isEmpty { log("ReactionGroupOverlay: loaded total=\(all.count) emojis for group", category: "ChatView") }
+                await MainActor.run { aggregated = all }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .reactionsUpdated)) { notif in
+                guard let info = notif.userInfo as? [String: Any], let updated = info["recordName"] as? String else { return }
+                // 対象グループ内のどれかのメッセージに一致したら再集計
+                let ids = Set(group.messages.map { $0.ckRecordName ?? $0.id.uuidString })
+                if ids.contains(updated) {
+                    Task {
+                        var all: [String] = []
+                        for msg in group.messages {
+                            let record = msg.ckRecordName ?? msg.id.uuidString
+                            do {
+                                let reactions = try await CloudKitChatManager.shared.getReactionsForMessage(messageRecordName: record, roomID: roomID)
+                                all.append(contentsOf: reactions.map { $0.emoji })
+                            } catch {
+                                log("ReactionGroupOverlay: refresh failed for msg=\(record) error=\(error)", category: "ChatView")
+                            }
+                        }
+                        await MainActor.run { aggregated = all }
+                    }
+                }
+            }
+        }
+    }
     
     // MARK: - Helper Methods
     
@@ -16,7 +69,7 @@ extension ChatView {
             return
         }
         
-        messageStore.sendMessage(text, senderID: myID)
+        messageStore.sendMessage(text)
         
         // Update ChatRoom's last message info
         chatRoom.lastMessageText = text
@@ -37,20 +90,21 @@ extension ChatView {
             target.body = trimmed
             target.isSent = false
             Task { @MainActor in
-                if let recName = target.ckRecordName {
-                    try? await CloudKitChatManager.shared.updateMessage(recordName: recName, roomID: target.roomID, newBody: trimmed)
+                if let store = messageStore {
+                    store.updateMessage(target, newBody: trimmed)
                 } else {
-                    try? await CloudKitChatManager.shared.sendMessage(target, to: target.roomID)
-                    target.ckRecordName = target.id.uuidString
+                    self.sendMessage(trimmed)
                 }
-                target.isSent = true
             }
             // リセット
+            log("Edit: commit updated id=\(target.id)", category: "ChatView")
             editingMessage = nil
             text = ""
+            log("[Compose] Cleared text after edit-send", category: "ChatView")
         } else {
             sendMessage(trimmed)
             text = ""
+            log("[Compose] Cleared text after send", category: "ChatView")
         }
     }
 
@@ -186,7 +240,7 @@ extension ChatView {
                             continue
                         }
                         
-                        messageStore.sendImageMessage(image, senderID: myID)
+                        messageStore.sendImageMessage(image)
                         
                         log("sendSelectedMedia: Sent image message via MessageStore", category: "DEBUG")
                         
@@ -201,12 +255,14 @@ extension ChatView {
         }
     }
 
-    /// Deletes message locally and (if possible) from CloudKit
+    /// Deletes message via MessageStore (Engine経由)
     func deleteMessage(_ message: Message) {
-        modelContext.delete(message)
-        if let recName = message.ckRecordName {
-            Task { try? await CloudKitChatManager.shared.deleteMessage(recordName: recName, roomID: message.roomID) }
+        log("🗑️ [UI DELETE] action tapped id=\(message.id) record=\(message.ckRecordName ?? "nil")", category: "ChatView")
+        guard let store = messageStore else {
+            modelContext.delete(message)
+            return
         }
+        store.deleteMessage(message)
     }
 
     func insertVideoMessage(_ url: URL) {
@@ -223,7 +279,7 @@ extension ChatView {
         log("insertVideoMessage: Using processed URL: \(processedURL)", category: "DEBUG")
         
         // Use MessageStore for sending video messages
-        messageStore.sendVideoMessage(processedURL, senderID: myID)
+        messageStore.sendVideoMessage(processedURL)
         
         // Update ChatRoom's last message info
         chatRoom.lastMessageText = "🎥 動画"
@@ -240,7 +296,7 @@ extension ChatView {
         
         // Load image and send via MessageStore
         if let image = UIImage(contentsOfFile: url.path) {
-            messageStore.sendImageMessage(image, senderID: myID)
+            messageStore.sendImageMessage(image)
             
             // Update ChatRoom's last message info
             chatRoom.lastMessageText = "📷 写真"
@@ -252,24 +308,7 @@ extension ChatView {
         }
     }
 
-    // MARK: - Inline edit commit
-    func commitInlineEdit() {
-        guard let target = editingMessage else { return }
-        let trimmed = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { editingMessage = nil; return }
-        
-        guard let messageStore = messageStore else {
-            log("ChatView: MessageStore not initialized, cannot update message", category: "DEBUG")
-            editingMessage = nil
-            return
-        }
-
-        // Use MessageStore for updating messages
-        messageStore.updateMessage(target, newBody: trimmed)
-        editingMessage = nil
-        
-        log("commitInlineEdit: Message updated via MessageStore", category: "DEBUG")
-    }
+    // 旧インライン編集コミット関数は不要（commitSendで編集更新に統合）
 
     func autoDownloadNewImages() {
         for message in messages {
@@ -338,32 +377,37 @@ extension ChatView {
         messageStore?.refresh()
         log("ChatView appeared. MessageStore refreshed", category: "DEBUG")
         
-        // デバッグ：ビュー表示時にDB全体をチェック
-        #if DEBUG
-        if let store = messageStore {
-            log("=== ChatView: Full DB Debug Check ===", category: "DEBUG")
-            store.debugPrintEntireDatabase()
-            
-            // 特定のメッセージを検索
-            store.debugSearchForMessage(containing: "たああ")
-            store.debugSearchForMessage(containing: "たあああ")
-            log("=== End ChatView Debug Check ===", category: "DEBUG")
-        }
-        #endif
+        // 自動の大規模デバッグ出力は抑止（必要時はツールバーの手動ボタンで実行）
         
         if chatRoom.autoDownloadImages {
             autoDownloadNewImages()
         }
+        if remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            log("ChatView: skip participant profile fetch (empty uid) room=\(roomID)", category: "ChatView")
+        } else {
         Task {
             do {
-                let result = try await CloudKitChatManager.shared.fetchProfile(userID: remoteUserID)
-                if let name = result.name { partnerName = name }
-                if let data = result.avatarData { partnerAvatar = UIImage(data: data) }
+                // 共有ゾーンに自分の最新プロフィールを公開
+                let myName = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let myAvatar = UserDefaults.standard.data(forKey: "myAvatarData") ?? Data()
+                try? await CloudKitChatManager.shared.upsertParticipantProfile(in: roomID, name: myName, avatarData: myAvatar)
+
+                // 相手プロフィールは共有ゾーンから取得、無ければ従来のprivateプロフィールにフォールバック
+                let sharedResult = try await CloudKitChatManager.shared.fetchParticipantProfile(userID: remoteUserID, roomID: roomID)
+                var nameToUse: String? = sharedResult.name
+                var avatarToUse: Data? = sharedResult.avatarData
+                if (nameToUse == nil || nameToUse!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                    let privateResult = try? await CloudKitChatManager.shared.fetchProfile(userID: remoteUserID)
+                    if let privateResult { nameToUse = privateResult.name; avatarToUse = avatarToUse ?? privateResult.avatarData }
+                }
+                if let name = nameToUse { partnerName = name }
+                if let data = avatarToUse { partnerAvatar = UIImage(data: data) }
             } catch {
-                log("Failed to fetch profile for userID: \(remoteUserID) - \(error)", category: "ChatView")
+                log("Failed to fetch participant profile for userID: \(remoteUserID) - \(error)", category: "ChatView")
             }
         }
         
+        }
         // チュートリアルはルーム作成時にCloudKitへ投入済み
     }
     
@@ -389,17 +433,44 @@ extension ChatView {
                             }
                         }
                     }
+                    // ボトムセンチネル（常に存在する安定ID）
+                    Color.clear
+                        .frame(height: 1)
+                        .id("__bottom__")
                 }
+                // 入力欄の実高さぶんを確保（メッセージが隠れないように）
+                .padding(.bottom, composerHeight)
                 .animation(.easeInOut(duration: 0.2), value: messages.count)
             }
-            .scrollDismissesKeyboard(.interactively)
-            .dismissKeyboardOnDrag()
+            // キーボードによるセーフエリア縮小を無視（レイアウトシフトを避ける）
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+            // キーボードは入力欄の下スワイプのみで閉じる方針に変更
+            // （メッセージ一覧のスクロールでは閉じない）
             .onChange(of: messages.count) { _, _ in
                 // 新しいメッセージのスクロールを最適化
-                if let lastMessage = messages.last {
+                DispatchQueue.main.async {
                     withAnimation(.easeInOut(duration: 0.3)) {
-                        proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        proxy.scrollTo("__bottom__", anchor: .bottom)
                     }
+                }
+            }
+            .onChange(of: isTextFieldFocused) { _, focused in
+                if focused {
+                    DispatchQueue.main.async {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo("__bottom__", anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .onChange(of: composerHeight) { _, _ in
+                DispatchQueue.main.async {
+                    proxy.scrollTo("__bottom__", anchor: .bottom)
+                }
+            }
+            .onAppear {
+                DispatchQueue.main.async {
+                    proxy.scrollTo("__bottom__", anchor: .bottom)
                 }
             }
         }
@@ -502,37 +573,71 @@ extension ChatView {
     // MARK: - Media Group Bubble (Image + Video)
     @ViewBuilder
     func imageGroupBubble(for group: MessageGroup) -> some View {
-        let allMedia = group.messages.compactMap { message -> (MediaItem, String, Message)? in
-            if let assetPath = message.assetPath {
-                let ext = URL(fileURLWithPath: assetPath).pathExtension.lowercased()
-                if ["jpg", "jpeg", "png", "heic", "heif", "gif"].contains(ext),
-                   let image = UIImage(contentsOfFile: assetPath) {
-                    return (.image(image), assetPath, message)
-                } else if ["mov", "mp4", "m4v", "avi"].contains(ext) {
-                    return (.video(URL(fileURLWithPath: assetPath)), assetPath, message)
-                }
+        // プレビュー用（ローカルに実体があるもののみを対象）
+        let allMedia: [(MediaItem, String, Message)] = group.messages.compactMap { message in
+            guard let assetPath = message.assetPath else { return nil }
+            let ext = URL(fileURLWithPath: assetPath).pathExtension.lowercased()
+            if ["jpg", "jpeg", "png", "heic", "heif", "gif"].contains(ext),
+               FileManager.default.fileExists(atPath: assetPath),
+               let image = UIImage(contentsOfFile: assetPath) {
+                return (.image(image), assetPath, message)
+            } else if ["mov", "mp4", "m4v", "avi"].contains(ext),
+                      FileManager.default.fileExists(atPath: assetPath) {
+                return (.video(URL(fileURLWithPath: assetPath)), assetPath, message)
             }
             return nil
         }
-        
-        if allMedia.isEmpty {
-            EmptyView()
-        } else {
-            VStack(alignment: group.senderID == myID ? .trailing : .leading, spacing: 4) {
+        // プレビュー開始位置のマッピング（message.id -> index）
+        let previewIndexMap: [UUID: Int] = Dictionary(uniqueKeysWithValues: allMedia.enumerated().map { ($1.2.id, $0) })
+
+        VStack(alignment: group.senderID == myID ? .trailing : .leading, spacing: 4) {
             HStack {
-                if group.senderID == myID {
-                    Spacer(minLength: 0)
-                }
-                
+                if group.senderID == myID { Spacer(minLength: 0) }
+
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 8) {
-                        ForEach(Array(allMedia.enumerated()), id: \.offset) { index, mediaData in
-                            let (mediaItem, mediaPath, _) = mediaData
-                            Button {
-                                // 全てのメディアでプレビューを起動
-                                handleMediaGroupTap(allMedia: allMedia, startIndex: index)
-                            } label: {
-                                mediaThumbnailView(mediaItem: mediaItem, mediaPath: mediaPath, index: index, groupId: group.id)
+                        ForEach(Array(group.messages.enumerated()), id: \.element.id) { displayIndex, message in
+                            // 各セルを個別に判定し、ローカル実体が無ければプレースホルダを表示
+                            if let assetPath = message.assetPath {
+                                let ext = URL(fileURLWithPath: assetPath).pathExtension.lowercased()
+                                let exists = FileManager.default.fileExists(atPath: assetPath)
+                                if ["jpg", "jpeg", "png", "heic", "heif", "gif"].contains(ext) {
+                                    if exists, let image = UIImage(contentsOfFile: assetPath) {
+                                        Button {
+                                            if let start = previewIndexMap[message.id] {
+                                                handleMediaGroupTap(allMedia: allMedia, startIndex: start)
+                                            }
+                                        } label: {
+                                            mediaThumbnailView(mediaItem: .image(image), mediaPath: assetPath, index: displayIndex, groupId: group.id)
+                                        }
+                                    } else {
+                                        // 画像の実体がまだ無い場合も落とさず表示
+                                        missingMediaPlaceholder(type: .image, message: "画像を準備中…")
+                                            .frame(width: 120, height: 120)
+                                    }
+                                } else if ["mov", "mp4", "m4v", "avi"].contains(ext) {
+                                    if exists {
+                                        let url = URL(fileURLWithPath: assetPath)
+                                        Button {
+                                            if let start = previewIndexMap[message.id] {
+                                                handleMediaGroupTap(allMedia: allMedia, startIndex: start)
+                                            }
+                                        } label: {
+                                            mediaThumbnailView(mediaItem: .video(url), mediaPath: assetPath, index: displayIndex, groupId: group.id)
+                                        }
+                                    } else {
+                                        missingMediaPlaceholder(type: .video, message: "動画を準備中…")
+                                            .frame(width: 120, height: 120)
+                                    }
+                                } else {
+                                    // 未知拡張子
+                                    missingMediaPlaceholder(type: .image, message: "未対応のメディア")
+                                        .frame(width: 120, height: 120)
+                                }
+                            } else {
+                                // assetPath = nil
+                                missingMediaPlaceholder(type: .image, message: "メディアなし")
+                                    .frame(width: 120, height: 120)
                             }
                         }
                     }
@@ -541,19 +646,14 @@ extension ChatView {
                 .scrollTargetLayout()
                 .frame(height: 120)
                 .frame(maxWidth: .infinity)
-                
-                if group.senderID != myID {
-                    Spacer(minLength: 0)
-                }
+
+                if group.senderID != myID { Spacer(minLength: 0) }
             }
-            
-            // Aggregate reactions from all messages in group
-            let aggregatedReactions = aggregateGroupReactions(for: group)
-            if !aggregatedReactions.isEmpty {
-                ReactionBarView(emojis: aggregatedReactions, isMine: group.senderID == myID)
-            }
-            
-            // Show timestamp of the last message in group
+
+            // CloudKitベースのリアクション集計バー
+            ReactionGroupOverlay(group: group, roomID: roomID, isMine: group.senderID == myID)
+
+            // タイムスタンプ（グループ最後）
             if let lastMessage = group.messages.last {
                 Text(lastMessage.createdAt, style: .time)
                     .font(.caption2)
@@ -561,52 +661,19 @@ extension ChatView {
             }
         }
         .padding(.vertical, 4)
-        .padding(.horizontal, 0) // 画像スライダーの左右余白を0に
+        .padding(.horizontal, 0)
         .frame(maxWidth: .infinity, alignment: group.senderID == myID ? .trailing : .leading)
-        .background {
-            // EmojisReactionKit for partner image groups
-            if group.senderID != myID, let firstMessage = group.messages.first {
-                ReactionKitWrapperView(message: firstMessage) { emoji in
-                    // 触覚フィードバック
-                    let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-                    impactFeedback.impactOccurred()
-                    
-                    // Add reaction to all messages in group
-                    for message in group.messages {
-                        var reactions = message.reactionEmoji ?? ""
-                        reactions.append(emoji)
-                        message.reactionEmoji = reactions
-                        // Sync to CloudKit
-                        if let recName = message.ckRecordName {
-                            Task {
-                                if let userID = CloudKitChatManager.shared.currentUserID {
-                                    try? await CloudKitChatManager.shared.addReactionToMessage(
-                                        messageRecordName: recName,
-                                        roomID: message.roomID,
-                                        emoji: emoji,
-                                        userID: userID
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    updateRecentEmoji(emoji)
-                }
+        .onLongPressGesture(minimumDuration: 0.3) {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            if let first = group.messages.first {
+                log("LongPress: image group (count=\(group.messages.count)) first id=\(first.id)", category: "ChatView")
+                actionSheetTargetGroup = group.messages
+                actionSheetMessage = first
             }
-        }
         }
     }
     
-    // Helper to aggregate reactions from all messages in a group
-    func aggregateGroupReactions(for group: MessageGroup) -> [String] {
-        var reactions: [String] = []
-        for message in group.messages {
-            if let r = message.reactionEmoji {
-                reactions.append(contentsOf: r.map { String($0) })
-            }
-        }
-        return reactions
-    }
+    // 旧：ローカル文字列ベースの集計は非推奨（CloudKit集計へ移行）
 }
 
 // MARK: - Emoji Detection Helper

@@ -7,7 +7,8 @@
 
 import SwiftUI
 
-struct WelcomeModalView: View {
+// ウェルカムモーダル（経緯）
+struct WelcomeReasonModalView: View {
     let onContinue: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var showShareSheet = false
@@ -153,8 +154,8 @@ struct RoundedCorner: Shape {
 }
 
 
-// ハーフモーダル表示用のオーバーレイ
-struct WelcomeModalOverlay: View {
+// ウェルカムモーダル（経緯）のオーバーレイ
+struct WelcomeReasonModalOverlay: View {
     @Binding var isPresented: Bool
     let onContinue: () -> Void
     @State private var dragOffset: CGFloat = 0
@@ -172,37 +173,13 @@ struct WelcomeModalOverlay: View {
                 // モーダル本体
                 VStack {
                     Spacer()
-                    WelcomeModalView {
+                    WelcomeReasonModalView {
                         withAnimation(.easeInOut(duration: 0.3)) {
                             isPresented = false
                         }
                         onContinue()
                     }
-                    .offset(y: dragOffset)
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                let translation = value.translation
-                                if translation.height > 0 {
-                                    dragOffset = translation.height
-                                }
-                            }
-                            .onEnded { value in
-                                let translation = value.translation
-                                let predictedEnd = value.predictedEndTranslation
-                                if translation.height > 150 || predictedEnd.height > 300 {
-                                    // スワイプで閉じる
-                                    withAnimation(.easeInOut(duration: 0.3)) {
-                                        isPresented = false
-                                    }
-                                } else {
-                                    // 元の位置に戻す
-                                    withAnimation(.easeOut(duration: 0.3)) {
-                                        dragOffset = 0
-                                    }
-                                }
-                            }
-                    )
+                    // スワイプや背景タップで閉じられない（必ず「つづける」で閉じる）
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -216,7 +193,7 @@ struct WelcomeModalOverlay: View {
     @Previewable @State var isPresented = true
     return ZStack {
         Color.gray.ignoresSafeArea()
-        WelcomeModalOverlay(isPresented: $isPresented) {
+        WelcomeReasonModalOverlay(isPresented: $isPresented) {
             log("Continue tapped", category: "App")
         }
     }

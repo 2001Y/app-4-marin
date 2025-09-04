@@ -24,7 +24,7 @@ struct SettingsView: View {
     @State private var showLogoutAlert = false
     @State private var showResetAlert = false
     @State private var showWelcomeModal = false
-    @State private var showPairingView = false
+    // 特徴ページへの遷移はNavigationLinkで行う
     @State private var showImageDownloadModal = false
     @State private var versionTapCount = 0
     @State private var lastVersionTapTime = Date()
@@ -61,6 +61,22 @@ struct SettingsView: View {
         let testUntil = UserDefaults.standard.double(forKey: "testModeScheduledUntil")
         return testUntil > 0 && Date().timeIntervalSince1970 < testUntil ? Date(timeIntervalSince1970: testUntil) : nil
     }
+
+    // CKSyncEngine 簡易状態
+    @State private var enginePendingTotal: Int = 0
+    @State private var enginePendingRecord: Int = 0
+    @State private var enginePendingDB: Int = 0
+
+    private func refreshEngineStats() {
+        if #available(iOS 17.0, *) {
+            Task { @MainActor in
+                let stats = await CKSyncEngineManager.shared.pendingStats()
+                self.enginePendingTotal = stats.total
+                self.enginePendingRecord = stats.recordChanges
+                self.enginePendingDB = stats.databaseChanges
+            }
+        }
+    }
     
     var body: some View {
         ZStack {
@@ -86,8 +102,8 @@ struct SettingsView: View {
                 }
             }
             
-            // ウェルカムモーダルオーバーレイ
-            WelcomeModalOverlay(isPresented: $showWelcomeModal) {
+            // ウェルカムモーダル（経緯）オーバーレイ
+            WelcomeReasonModalOverlay(isPresented: $showWelcomeModal) {
                 // 「つづける」ボタンが押された時の処理（何もしない）
             }
             
@@ -146,7 +162,10 @@ struct SettingsView: View {
             Text("CloudKitスキーマの再構築が完了しました。アプリを再起動して変更を反映してください。")
         }
         .alert("CloudKit完全リセット", isPresented: $showCompleteResetAlert) {
-            Button("リセット", role: .destructive) { performCompleteReset() }
+            Button("リセット", role: .destructive) {
+                // 実行先を完全クラウドリセットに統一（CloudKit→ローカル初期化）
+                performCompleteCloudReset()
+            }
             Button("キャンセル", role: .cancel) {}
         } message: {
             Text("CloudKitデータベースを完全にリセットします。全てのチャットデータ、プロフィール、設定が削除されます。この操作は取り消せません。")
@@ -177,25 +196,15 @@ struct SettingsView: View {
         }
         
         .alert("完全初期化（CloudKit含む）", isPresented: $showCompleteCloudResetAlert) {
-            Button("完全初期化", role: .destructive) { 
-                Task { 
-                    await unifiedResetAll() 
-                } 
+            Button("完全初期化", role: .destructive) {
+                // 統一方針：CloudKit完全リセット後にローカルも完全初期化
+                performCompleteCloudReset()
             }
             Button("キャンセル", role: .cancel) {}
         } message: {
             Text("CloudKit・ローカルを含む全てのデータを削除します。\n⚠️ この操作は取り消せません")
         }
-        .sheet(isPresented: $showPairingView) {
-            PairingView(showWelcomeModalOnAppear: true, onChatCreated: { _ in
-                // チャット作成時の処理は不要（設定画面からの呼び出しのため）
-                showPairingView = false
-            }, onDismiss: {
-                showPairingView = false
-            })
-            .presentationBackground(.clear)
-            .presentationBackgroundInteraction(.enabled)
-        }
+        // ページ遷移に統一（シートは使用しない）
         .sheet(isPresented: $showLogShareSheet) {
             if let url = logFileURL {
                 ShareSheet(items: [url])
@@ -312,7 +321,7 @@ struct SettingsView: View {
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.system(size: 16))
-                        .foregroundColor(.blue)
+                        .foregroundColor(.accentColor)
                 }
                 .disabled(myUserID.isEmpty)
             }
@@ -348,7 +357,7 @@ struct SettingsView: View {
                     Text("招待メッセージをシェア")
                     Spacer()
                 }
-                .foregroundColor(.blue)
+                .foregroundColor(.accentColor)
             }
             .disabled(myUserID.isEmpty)
         }
@@ -477,9 +486,7 @@ struct SettingsView: View {
 
     @ViewBuilder private var infoSection: some View {
         Section(header: Text("情報")) {
-            Button {
-                showPairingView = true
-            } label: {
+            NavigationLink(destination: FeaturesPage(showWelcomeModalOnAppear: false, onChatCreated: { _ in }, onDismiss: {})) {
                 HStack {
                     Text("このアプリについて")
                     Spacer()
@@ -597,6 +604,46 @@ struct SettingsView: View {
                     }
                 }
                 .foregroundColor(.orange)
+
+                // CKSyncEngine 状態
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Label("CKSyncEngine", systemImage: "arrow.triangle.2.circlepath")
+                        Spacer()
+                        Text("pending: \(enginePendingTotal)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("records: \(enginePendingRecord)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("db: \(enginePendingDB)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Button {
+                            if #available(iOS 17.0, *) { Task { await CKSyncEngineManager.shared.kickSyncNow() } }
+                            refreshEngineStats()
+                        } label: {
+                            Label("同期キック", systemImage: "paperplane")
+                        }
+                        Spacer()
+                        Button(role: .destructive) {
+                            if #available(iOS 17.0, *) { Task { await CKSyncEngineManager.shared.resetEngines() } }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { refreshEngineStats() }
+                        } label: {
+                            Label("状態リセット", systemImage: "arrow.counterclockwise")
+                        }
+                        Spacer()
+                        Button { refreshEngineStats() } label: {
+                            Label("更新", systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
+                .onAppear { refreshEngineStats() }
                 
                 VStack(alignment: .leading, spacing: 4) {
                     Button {
@@ -634,7 +681,7 @@ struct SettingsView: View {
                     HStack {
                         if isCollectingLogs {
                             ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+                                .progressViewStyle(CircularProgressViewStyle(tint: .accentColor))
                                 .scaleEffect(0.8)
                             Text("ログ収集中...")
                         } else {
@@ -643,7 +690,7 @@ struct SettingsView: View {
                         Spacer()
                     }
                 }
-                .foregroundColor(.blue)
+                .foregroundColor(.accentColor)
                 .disabled(isCollectingLogs)
                 
                 // 統合リセット（CloudKit含む完全初期化）
@@ -732,15 +779,7 @@ struct SettingsView: View {
     }
 
     // 統合リセット実行
-    private func unifiedResetAll() async {
-        isPerformingCloudReset = true
-        defer { isPerformingCloudReset = false }
-        do {
-            try await CloudKitChatManager.shared.resetAll()
-        } catch {
-            log("Unified reset failed: \(error)", category: "App")
-        }
-    }
+    // unifiedResetAll は役割重複のため削除（performCompleteCloudReset に統一）
     
     private func refreshPermissionStatuses() {
         Task { @MainActor in
@@ -812,14 +851,6 @@ struct SettingsView: View {
         UserDefaults.standard.removeObject(forKey: "lastOnlineAt")
         UserDefaults.standard.removeObject(forKey: "showOfflineModal")
         
-        // チャットデータの削除
-        clearAllChatRooms()
-        clearMessages()
-        
-        // 画像キャッシュの削除
-        ImageCacheManager.clearCache()
-        cacheSizeBytes = 0
-        
         // UI状態のリセット
         selectedImage = nil
         tempDisplayName = ""
@@ -840,6 +871,11 @@ struct SettingsView: View {
         myDisplayName = tempDisplayName
         Task {
             try? await CloudKitChatManager.shared.saveMasterProfile(
+                name: myDisplayName,
+                avatarData: myAvatarData
+            )
+            // 共有中の全ゾーンへ同報
+            await CloudKitChatManager.shared.updateParticipantProfileInAllZones(
                 name: myDisplayName,
                 avatarData: myAvatarData
             )
@@ -1105,14 +1141,6 @@ struct SettingsView: View {
             do {
                 // 1. CloudKitChatManagerのローカルリセット
                 try await CloudKitChatManager.shared.performLocalReset()
-                
-                // 2. ローカルSwiftDataメッセージを削除
-                await MainActor.run {
-                    clearMessages()
-                }
-                
-                // 3. 画像キャッシュをクリア
-                ImageCacheManager.clearCache()
                 
                 await MainActor.run {
                     isPerformingLocalReset = false

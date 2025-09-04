@@ -11,6 +11,8 @@ final class ChatRoom: Hashable {
     
     // チャット相手の表示名（オプション）
     var displayName: String?
+    // 相手のアバター画像（オプション）
+    var avatarData: Data?
     
     // ルームID（= ゾーン名。唯一の真実）
     var roomID: String = ""

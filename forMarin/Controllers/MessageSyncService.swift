@@ -44,9 +44,9 @@ class MessageSyncService: NSObject, ObservableObject {
     let syncStatusChanged = PassthroughSubject<Bool, Never>()
     // Reactions updated for a specific message in a specific room
     let reactionsUpdated = PassthroughSubject<(roomID: String, messageRecordName: String), Never>()
+    // 添付更新イベント（roomID, messageRecordName, localPath）
+    let attachmentsUpdated = PassthroughSubject<(roomID: String, messageRecordName: String, localPath: String), Never>()
     
-    // Queue for offline messages
-    private var offlineMessageQueue: [Message] = []
     
     // Schema creation flag
     private var isSyncDisabled: Bool = false
@@ -60,6 +60,11 @@ class MessageSyncService: NSObject, ObservableObject {
     private var privateDBChangeToken: CKServerChangeToken?
     private var sharedDBChangeToken: CKServerChangeToken?
     private var zoneChangeTokens: [CKRecordZone.ID: CKServerChangeToken] = [:]
+    // 同期トリガのコアレッサ（多重実行抑止＋デバウンス）
+    private let syncCoordinator = SyncCoordinator()
+    // Legacy検出に伴う多重リセット抑止
+    private var hasTriggeredLegacyReset: Bool = false
+    private var cancellables: Set<AnyCancellable> = []
     
     
     override init() {
@@ -68,6 +73,17 @@ class MessageSyncService: NSObject, ObservableObject {
         super.init()
         setupNotificationObservers()
         setupSyncEngine()
+        // Combine → NSNotification 橋渡し（View側の既存購読へ通知）
+        reactionsUpdated
+            .receive(on: RunLoop.main)
+            .sink { info in
+                NotificationCenter.default.post(
+                    name: .reactionsUpdated,
+                    object: nil,
+                    userInfo: ["roomID": info.roomID, "recordName": info.messageRecordName]
+                )
+            }
+            .store(in: &cancellables)
     }
     
     private func setupNotificationObservers() {
@@ -124,7 +140,7 @@ class MessageSyncService: NSObject, ObservableObject {
         if let sharedTokenData = userDefaults.data(forKey: "MessageSync.SharedDBToken") {
             do {
                 sharedDBChangeToken = try NSKeyedUnarchiver.unarchivedObject(ofClass: CKServerChangeToken.self, from: sharedTokenData)
-                log("📱 Loaded Shared DB change token", category: "MessageSyncService")
+                log("📱 Loaded Shared DB change token", level: "DEBUG", category: "MessageSyncService")
             } catch {
                 log("⚠️ Failed to load Shared DB change token: \(error)", category: "MessageSyncService")
             }
@@ -154,7 +170,7 @@ class MessageSyncService: NSObject, ObservableObject {
             do {
                 let tokenData = try NSKeyedArchiver.archivedData(withRootObject: sharedToken, requiringSecureCoding: true)
                 userDefaults.set(tokenData, forKey: "MessageSync.SharedDBToken")
-                log("💾 Persisted Shared DB change token", category: "MessageSyncService")
+                log("💾 Persisted Shared DB change token", level: "DEBUG", category: "MessageSyncService")
             } catch {
                 log("⚠️ Failed to persist Shared DB change token: \(error)", category: "MessageSyncService")
             }
@@ -231,7 +247,9 @@ class MessageSyncService: NSObject, ObservableObject {
     /// 役割ベースの同期戦略を取得（デバッグ/診断用）
     func getSyncStrategy(for roomID: String) async -> String {
         let chatManager = CloudKitChatManager.shared
-        let isOwner = await chatManager.isOwnerOfRoom(roomID)
+        let cached = chatManager.isOwnerCached(roomID)
+        let isOwner: Bool
+        if let cached { isOwner = cached } else { isOwner = await chatManager.isOwnerOfRoom(roomID) }
         
         if isOwner {
             return "OWNER - Private DB (default + shared zones)"
@@ -459,7 +477,7 @@ class MessageSyncService: NSObject, ObservableObject {
             log("Cannot delete message without CloudKit record name", category: "MessageSyncService")
             return
         }
-        
+
         Task {
             do {
                 let (_, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: message.roomID)
@@ -469,7 +487,7 @@ class MessageSyncService: NSObject, ObservableObject {
                 } else {
                     try await sharedDB.deleteRecord(withID: recordID)
                 }
-                
+
                 await MainActor.run {
                     messageDeleted.send(message.id.uuidString)
                     log("Message deleted successfully: \(message.id)", category: "MessageSyncService")
@@ -482,36 +500,43 @@ class MessageSyncService: NSObject, ObservableObject {
             }
         }
     }
-    
+
     func checkForUpdates(roomID: String? = nil) {
         guard !isSyncDisabled else {
-            log("🛑 Sync is disabled, skipping update check", category: "MessageSyncService")
+            log("Sync is disabled, skipping update check", category: "MessageSyncService")
             return
         }
-        
-        log("🔄 Manual checkForUpdates called for roomID: \(roomID ?? "nil")", category: "MessageSyncService")
-        
-        Task {
+
+        log("Manual checkForUpdates called for roomID: \(roomID ?? "nil")", level: "DEBUG", category: "MessageSyncService")
+
+        Task { [weak self] in
+            await self?.performManualSync(roomID: roomID)
+        }
+    }
+    
+    private func performManualSync(roomID: String?) async {
+        await syncCoordinator.requestSync(trigger: "manual") { [weak self] in
+            guard let self = self else { return }
+            let (dt, cooldown): (TimeInterval, TimeInterval) = await MainActor.run {
+                (Date().timeIntervalSince(self.lastSyncTime), self.syncCooldown)
+            }
+            if dt < cooldown {
+                log("Sync cooldown active, skip. Δt=\(dt)", level: "DEBUG", category: "MessageSyncService")
+                return
+            }
             do {
-                try await performQuery(roomID: roomID)
+                try await self.performQuery(roomID: roomID)
             } catch {
                 await MainActor.run {
-                    // 共有DB/招待未受理ヒント
-                    if let ckError = error as? CKError {
-                        if ckError.code == .partialFailure {
-                            log("🧩 Partial failure during sync - possible missing share acceptance", category: "MessageSyncService")
-                        }
+                    if let ckError = error as? CKError, ckError.code == .partialFailure {
+                        log("Partial failure during sync - possible missing share acceptance", level: "DEBUG", category: "MessageSyncService")
                     }
-                    // スキーマ関連のエラーかチェック
-                    if let ckError = error as? CKError, ckError.code == .invalidArguments {
-                        if ckError.localizedDescription.contains("Unknown field") {
-                            log("⚠️ Schema not ready yet, will retry later: \(ckError.localizedDescription)", category: "MessageSyncService")
-                            // スキーマ準備待ちのため、エラーとして扱わない
-                            return
-                        }
+                    if let ckError = error as? CKError, ckError.code == .invalidArguments,
+                       ckError.localizedDescription.contains("Unknown field") {
+                        log("Schema not ready yet, will retry later: \(ckError.localizedDescription)", level: "DEBUG", category: "MessageSyncService")
+                        return
                     }
-                    
-                    syncError.send(error)
+                    self.syncError.send(error)
                     log("Manual sync failed: \(error)", category: "MessageSyncService")
                 }
             }
@@ -524,16 +549,27 @@ class MessageSyncService: NSObject, ObservableObject {
         
         // 役割ベースの検索ロジック
         if let roomID = roomID {
-            let isOwner = await chatManager.isOwnerOfRoom(roomID)
+            let cached = chatManager.isOwnerCached(roomID)
+            let isOwner: Bool
+            if let cached { isOwner = cached } else { isOwner = await chatManager.isOwnerOfRoom(roomID) }
             
             if isOwner {
-                log("🔍 Querying as OWNER for roomID: \(roomID)", category: "MessageSyncService")
-                // オーナー：Private DBの共有ゾーンを検索
-                let privateRecords = await queryPrivateDatabase(roomID: roomID)
-                let sharedZoneRecords = await querySharedZones(roomID: roomID)
-                allRecords = privateRecords + sharedZoneRecords
+                // OWNER側はPrivate DBの当該ゾーンのみを検索
+                // オーナー：Private DBの当該カスタムゾーンを直接検索
+                do {
+                    if let zoneID = try await chatManager.resolvePrivateZoneIDIfExists(roomID: roomID) {
+                        let zoneRecords = await querySpecificZone(database: privateDB, zoneID: zoneID, roomID: roomID)
+                        allRecords = zoneRecords
+                    } else {
+                        log("⚠️ Owner zone not found for roomID=\(roomID)", category: "MessageSyncService")
+                        allRecords = []
+                    }
+                } catch {
+                    log("⚠️ Failed to resolve private zone for roomID=\(roomID): \(error)", category: "MessageSyncService")
+                    allRecords = []
+                }
             } else {
-                log("🔍 Querying as PARTICIPANT for roomID: \(roomID)", category: "MessageSyncService")
+                // 参加者側はShared DBを検索
                 // 参加者：Shared DBを検索
                 let sharedDBRecords = await querySharedDatabase(roomID: roomID)
                 allRecords = sharedDBRecords
@@ -557,46 +593,31 @@ class MessageSyncService: NSObject, ObservableObject {
         
         // Process all unique messages with duplicate prevention
         await MainActor.run {
-            log("🔍 Processing \(deduplicatedRecords.count) unique records (from \(allRecords.count) total) for roomID: \(roomID ?? "nil")", category: "MessageSyncService")
+            // サマリのみを出力
+            log("🔄 Sync processing: unique=\(deduplicatedRecords.count) total=\(allRecords.count) room=\(roomID ?? "nil")", category: "MessageSyncService")
             
             // クールダウンチェック
             let timeSinceLastSync = Date().timeIntervalSince(self.lastSyncTime)
-            if timeSinceLastSync < self.syncCooldown {
-                log("⏰ Sync cooldown active, skipping duplicate sync (last sync: \(timeSinceLastSync)s ago)", category: "MessageSyncService")
-                return
-            }
+            if timeSinceLastSync < self.syncCooldown { return }
             
             var newMessagesCount = 0
             var duplicateCount = 0
             
             for record in deduplicatedRecords {
                 let recordRoomID = record["roomID"] as? String ?? "unknown"
-                let recordSenderID = record["senderID"] as? String ?? "unknown"
-                let recordBody = record["text"] as? String ?? "empty"
-                let recordCreatedAt = record["timestamp"] as? Date ?? Date()
                 let recordName = record.recordID.recordName
                 
                 // 重複チェック：最近同期したレコードかどうか
                 if self.recentlySyncedRecords.contains(recordName) {
                     duplicateCount += 1
-                    
-                    // 特定のメッセージのみ詳細ログ
-                    if recordBody.contains("たああ") || recordBody.contains("たあああ") {
-                        log("🎯 TRACKED MESSAGE ALREADY SYNCED: '\(recordBody)' (recordName: \(recordName))", category: "MessageSyncService")
-                    }
                     continue
                 }
                 
-                log("📝 Found record - recordName: \(recordName), roomID: \(recordRoomID), senderID: \(recordSenderID), body: \(recordBody.prefix(50)), createdAt: \(recordCreatedAt)", category: "MessageSyncService")
-                
-                // 特定のメッセージを追跡（たああメッセージなど）
-                if recordBody.contains("たああ") || recordBody.contains("たあああ") {
-                    log("🎯 TRACKED MESSAGE FOUND: '\(recordBody)' in record \(recordName)", category: "MessageSyncService")
-                }
+                // 個別レコードの詳細ログは抑制
                 
                 // roomIDフィルタリングチェック
                 if let targetRoomID = roomID, recordRoomID != targetRoomID {
-                    log("⚠️ Skipping record due to roomID mismatch: \(recordRoomID) != \(targetRoomID)", category: "MessageSyncService")
+                    // 対象ルーム以外はスキップ
                     continue
                 }
                 
@@ -641,7 +662,7 @@ class MessageSyncService: NSObject, ObservableObject {
             } else {
                 // Zone wide queryを避けるため、最近のメッセージのみ取得
                 let oneWeekAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
-                predicate = NSPredicate(format: "createdAt > %@", oneWeekAgo as NSDate)
+                predicate = NSPredicate(format: "timestamp > %@", oneWeekAgo as NSDate)
             }
             
             let query = CKQuery(recordType: "Message", predicate: predicate)
@@ -699,7 +720,7 @@ class MessageSyncService: NSObject, ObservableObject {
             } else {
                 // 最近のメッセージのみ取得
                 let oneWeekAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
-                predicate = NSPredicate(format: "createdAt > %@", oneWeekAgo as NSDate)
+                predicate = NSPredicate(format: "timestamp > %@", oneWeekAgo as NSDate)
             }
             
             let query = CKQuery(recordType: "Message", predicate: predicate)
@@ -725,9 +746,9 @@ class MessageSyncService: NSObject, ObservableObject {
             // Step 1: 変更があったゾーンIDを取得
             let changedZoneIDs = try await fetchChangedZonesFromSharedDB()
             
-            log("🔍 Found \(changedZoneIDs.count) changed zones in Shared DB", category: "MessageSyncService")
-            if changedZoneIDs.isEmpty {
-                log("🛈 Shared DB changed zones = 0. If peer created a share, it may be unaccepted. Ensure CKShare URL is accepted on this device.", category: "MessageSyncService")
+            log("🔍 Found \(changedZoneIDs.count) changed zones in Shared DB", level: (changedZoneIDs.isEmpty ? "DEBUG" : "INFO"), category: "MessageSyncService")
+                    if changedZoneIDs.isEmpty {
+                log("🛈 Shared DB changed zones = 0. If peer created a share, it may be unaccepted. Ensure CKShare URL is accepted on this device.", level: "DEBUG", category: "MessageSyncService")
             }
             
             var allRecords: [CKRecord] = []
@@ -768,7 +789,7 @@ class MessageSyncService: NSObject, ObservableObject {
             
             dbChangesOp.changeTokenUpdatedBlock = { [weak self] newToken in
                 self?.sharedDBChangeToken = newToken
-                log("📱 Shared DB change token updated", category: "MessageSyncService")
+                log("📱 Shared DB change token updated", level: "DEBUG", category: "MessageSyncService")
             }
             
             dbChangesOp.fetchDatabaseChangesResultBlock = { [weak self] (result: Result<(serverChangeToken: CKServerChangeToken, moreComing: Bool), Error>) in
@@ -780,7 +801,7 @@ class MessageSyncService: NSObject, ObservableObject {
                     self?.sharedDBChangeToken = serverChangeToken
                     self?.persistTokens()
                     if changedZoneIDs.isEmpty {
-                        log("🛈 No changed zones in shared DB (token advanced). If expecting incoming messages, verify share acceptance on this account.", category: "MessageSyncService")
+                        log("🛈 No changed zones in shared DB (token advanced). If expecting incoming messages, verify share acceptance on this account.", level: "DEBUG", category: "MessageSyncService")
                     }
                     continuation.resume(returning: changedZoneIDs)
                 }
@@ -807,8 +828,8 @@ class MessageSyncService: NSObject, ObservableObject {
                     previousServerChangeToken: zoneToken,
                     resultsLimit: nil,
                     // 🌟 [IDEAL DESIREDKEYS]
-                    // Include message fields and reaction fields we care about
-                    desiredKeys: ["roomID", "senderID", "text", "timestamp", "messageRef", "emoji"]
+                    // Include message / reaction / attachment fields we care about
+                    desiredKeys: ["roomID", "senderID", "text", "timestamp", "messageRef", "emoji", "asset", "createdAt"]
                 )
             ]
         )
@@ -817,6 +838,7 @@ class MessageSyncService: NSObject, ObservableObject {
         // Simplified direct async implementation
         var fetchedRecords: [CKRecord] = []
         var affectedReactions: Set<ReactionKey> = [] // set of affected (roomID, messageRecordName)
+        var pendingAttachments: [(roomID: String, msgName: String, fileURL: URL)] = []
         
         zoneChangesOp.recordWasChangedBlock = { recordID, result in
             switch result {
@@ -830,6 +852,23 @@ class MessageSyncService: NSObject, ObservableObject {
                             if targetRoomID == rid { affectedReactions.insert(ReactionKey(roomID: rid, messageRecordName: msgName)) }
                         } else {
                             affectedReactions.insert(ReactionKey(roomID: rid, messageRecordName: msgName))
+                        }
+                    }
+                } else if record.recordType == "MessageAttachment" {
+                    if let messageRef = record["messageRef"] as? CKRecord.Reference,
+                       let asset = record["asset"] as? CKAsset,
+                       let srcURL = asset.fileURL {
+                        let rid = messageRef.recordID.zoneID.zoneName
+                        let msgName = messageRef.recordID.recordName
+                        // ローカルへ保存
+                        let localURL = AttachmentManager.makeFileURL(ext: srcURL.pathExtension)
+                        do {
+                            if !FileManager.default.fileExists(atPath: localURL.path) {
+                                try FileManager.default.copyItem(at: srcURL, to: localURL)
+                            }
+                            pendingAttachments.append((roomID: rid, msgName: msgName, fileURL: localURL))
+                        } catch {
+                            log("Failed to copy attachment asset: \(error)", category: "MessageSyncService")
                         }
                     }
                 } else {
@@ -858,13 +897,13 @@ class MessageSyncService: NSObject, ObservableObject {
             if let newToken = newToken {
                 self?.zoneChangeTokens[zoneID] = newToken
             }
-            log("📱 Zone \(zoneID.zoneName) change token updated", category: "MessageSyncService")
+                        log("📱 Zone \(zoneID.zoneName) change token updated", level: "DEBUG", category: "MessageSyncService")
         }
         
         zoneChangesOp.recordZoneFetchResultBlock = { (zoneID: CKRecordZone.ID, result: Result<(serverChangeToken: CKServerChangeToken, clientChangeTokenData: Data?, moreComing: Bool), Error>) in
             switch result {
             case .success:
-                log("✅ Zone \(zoneID.zoneName) fetch completed successfully", category: "MessageSyncService")
+                log("✅ Zone \(zoneID.zoneName) fetch completed successfully", level: "DEBUG", category: "MessageSyncService")
             case .failure(let error):
                 log("⚠️ Error fetching zone \(zoneID.zoneName): \(error)", category: "MessageSyncService")
             }
@@ -881,6 +920,12 @@ class MessageSyncService: NSObject, ObservableObject {
                 // 影響のあったメッセージのみReactions更新イベントを発行
                 for key in affectedReactions {
                     self?.reactionsUpdated.send((roomID: key.roomID, messageRecordName: key.messageRecordName))
+                }
+                // 添付更新イベントを通知
+                if let self = self {
+                    for item in pendingAttachments {
+                        self.attachmentsUpdated.send((roomID: item.roomID, messageRecordName: item.msgName, localPath: item.fileURL.path))
+                    }
                 }
                 continuation.resume(returning: fetchedRecords)
             }
@@ -1006,10 +1051,29 @@ class MessageSyncService: NSObject, ObservableObject {
     private func createMessage(from record: CKRecord) -> Message? {
         guard record.recordType == "Message",
               let roomID = record["roomID"] as? String,
-              let senderID = record["senderID"] as? String else {
+              let senderID = record["senderID"] as? String,
+              let createdAt = record["timestamp"] as? Date else {
+            // 旧スキーマ（必須キー欠如）を検出したら完全リセットを実行
+            if record.recordType == "Message" && !hasTriggeredLegacyReset {
+                hasTriggeredLegacyReset = true
+                Task { @MainActor in
+                    log("[AUTO RESET] Legacy Message record detected (missing required fields). Resetting...", category: "MessageSyncService")
+                }
+                Task {
+                    do {
+                        try await CloudKitChatManager.shared.performCompleteReset(bypassSafetyCheck: true)
+                        await MainActor.run {
+                            log("[AUTO RESET] Complete reset finished.", category: "MessageSyncService")
+                        }
+                    } catch {
+                        await MainActor.run {
+                            log("[AUTO RESET] Complete reset failed: \(error)", category: "MessageSyncService")
+                        }
+                    }
+                }
+            }
             return nil
         }
-        let createdAt = (record["timestamp"] as? Date) ?? (record.creationDate ?? Date())
         
         let body = record["text"] as? String
         var assetPath: String?
@@ -1033,8 +1097,7 @@ class MessageSyncService: NSObject, ObservableObject {
             assetPath: assetPath,
             ckRecordName: record.recordID.recordName,
             createdAt: createdAt,
-            isSent: true,
-            reactionEmoji: nil
+            isSent: true
         )
         // 正規化リアクションを取得してUIに反映
         Task { @MainActor in
@@ -1048,7 +1111,7 @@ class MessageSyncService: NSObject, ObservableObject {
                 for (emoji, items) in grouped {
                     builder += String(repeating: emoji, count: items.count)
                 }
-                msg.reactionEmoji = builder
+                // reactionEmoji は廃止（CloudKit正規化に統一）
             } catch {
                 // 応答なしは無視
             }
@@ -1056,26 +1119,7 @@ class MessageSyncService: NSObject, ObservableObject {
         return msg
     }
     
-    // MARK: - Offline Support
-    
-    func queueOfflineMessage(_ message: Message) {
-        offlineMessageQueue.append(message)
-        saveOfflineQueue()
-    }
-    
-    func processOfflineQueue() {
-        for message in offlineMessageQueue {
-            sendMessage(message)
-        }
-        offlineMessageQueue.removeAll()
-        saveOfflineQueue()
-        log("Processed \(offlineMessageQueue.count) offline messages", category: "MessageSyncService")
-    }
-    
-    private func saveOfflineQueue() {
-        // In a real implementation, you would serialize the queue to persistent storage
-        UserDefaults.standard.set(offlineMessageQueue.count, forKey: "OfflineMessageCount")
-    }
+    // MARK: - Offline Support (Legacy removed) – Engine に委譲済み
     
     // MARK: - Conflict Resolution
     

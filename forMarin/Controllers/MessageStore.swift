@@ -40,10 +40,13 @@ class MessageStore: ObservableObject {
             }
         }
     }
+
     
     private let modelContext: ModelContext
     private let roomID: String
     private var cancellables = Set<AnyCancellable>()
+    // 添付がメッセージ本体より先に届いた場合の一時キャッシュ（recordName -> localPath）
+    private var pendingAttachmentPaths: [String: String] = [:]
     
     // Offline support
     private let offlineManager = OfflineManager.shared
@@ -59,8 +62,6 @@ class MessageStore: ObservableObject {
         self.roomID = roomID
         
         log("🏗️ Initialized with roomID: \(roomID)", category: "MessageStore")
-        log("🗄️ ModelContext: \(ObjectIdentifier(modelContext))", category: "MessageStore")
-        log("🗄️ ModelContainer: \(ObjectIdentifier(modelContext.container))", category: "MessageStore")
         
         setupSyncSubscriptions()
         loadInitialMessages()
@@ -68,13 +69,7 @@ class MessageStore: ObservableObject {
         // 特定のルーム用のPush Notificationサブスクリプションを設定
         setupRoomPushNotifications()
         
-        // 初期化時にDB全体をデバッグ出力
-        debugPrintEntireDatabase()
-        
-        // 定期的なDBチェックを開始（デバッグ用）
-        #if DEBUG
-        startPeriodicDatabaseCheck()
-        #endif
+        // デバッグ出力/定期チェックは抑制（必要時に明示的に呼び出す）
     }
     
     // MARK: - Setup
@@ -110,13 +105,32 @@ class MessageStore: ObservableObject {
                 }
                 .store(in: &cancellables)
 
-            // Subscribe to reaction updates for this room only
+            // Reactions updates for this room only
             syncService.reactionsUpdated
                 .filter { $0.roomID == currentRoomID }
                 .sink { [weak self] payload in
                     self?.refreshReactions(for: payload.messageRecordName)
                 }
                 .store(in: &cancellables)
+
+            // Attachments updates for this room only
+            if let svc = syncService as MessageSyncService? {
+                svc.attachmentsUpdated
+                    .filter { $0.roomID == currentRoomID }
+                    .sink { [weak self] payload in
+                        guard let self = self else { return }
+                        if let idx = self.messages.firstIndex(where: { $0.ckRecordName == payload.messageRecordName }) {
+                            self.messages[idx].assetPath = payload.localPath
+                            do { try self.modelContext.save() } catch { log("Failed to save attachment path: \(error)", category: "MessageStore") }
+                            log("Attachment updated for message=\(payload.messageRecordName)", level: "DEBUG", category: "MessageStore")
+                        } else {
+                            // メッセージ未着 → 後で反映
+                            self.pendingAttachmentPaths[payload.messageRecordName] = payload.localPath
+                            log("Attachment queued (message not yet in UI): record=\(payload.messageRecordName)", level: "DEBUG", category: "MessageStore")
+                        }
+                    }
+                    .store(in: &cancellables)
+            }
         }
         
         // Subscribe to offline manager events
@@ -190,7 +204,11 @@ class MessageStore: ObservableObject {
     
     // MARK: - Message Operations
     
-    func sendMessage(_ text: String, senderID: String) {
+func sendMessage(_ text: String) {
+        guard let senderID = CloudKitChatManager.shared.currentUserID else {
+            log("❌ Cannot send: currentUserID not available", category: "MessageStore")
+            return
+        }
         let message = Message(
             roomID: roomID,
             senderID: senderID,
@@ -238,12 +256,16 @@ class MessageStore: ObservableObject {
         syncToCloudKit(message)
     }
     
-    func sendImageMessage(_ image: UIImage, senderID: String) {
+    func sendImageMessage(_ image: UIImage) {
+        guard let senderID = CloudKitChatManager.shared.currentUserID else {
+            log("❌ Cannot send image: currentUserID not available", category: "MessageStore")
+            return
+        }
         guard let localURL = AttachmentManager.saveImageToCache(image) else {
             log("Failed to save image to cache", category: "MessageStore")
             return
         }
-        
+
         let message = Message(
             roomID: roomID,
             senderID: senderID,
@@ -252,36 +274,40 @@ class MessageStore: ObservableObject {
             createdAt: Date(),
             isSent: false
         )
-        
-        // Optimistic UI update
+        // 楽観的UI反映 + ローカル保存（テキストと整合）
         _ = message.generateRecordName()
-        messages.append(message)
+        withAnimation(.easeInOut(duration: 0.2)) {
+            messages.append(message)
+            messages.sort { $0.createdAt < $1.createdAt }
+        }
         modelContext.insert(message)
-        
-        // Save to persistent storage
         do {
             try modelContext.save()
-            log("Image message saved locally: \(message.id)", category: "MessageStore")
+            log("Message(image) saved locally: id=\(message.id)", category: "MessageStore")
         } catch {
+            if let idx = messages.firstIndex(of: message) { _ = withAnimation { messages.remove(at: idx) } }
             log("Failed to save image message locally: \(error)", category: "MessageStore")
             return
         }
-        
-        // Sync to CloudKit
+        // 同期キューへ登録
         syncToCloudKit(message)
     }
     
-    func sendVideoMessage(_ videoURL: URL, senderID: String) {
+    func sendVideoMessage(_ videoURL: URL) {
+        guard let senderID = CloudKitChatManager.shared.currentUserID else {
+            log("❌ Cannot send video: currentUserID not available", category: "MessageStore")
+            return
+        }
         // Copy to permanent storage
         let permanentURL = AttachmentManager.makeFileURL(ext: videoURL.pathExtension)
-        
+
         do {
             try FileManager.default.copyItem(at: videoURL, to: permanentURL)
         } catch {
             log("Failed to copy video to permanent storage: \(error)", category: "MessageStore")
             return
         }
-        
+
         let message = Message(
             roomID: roomID,
             senderID: senderID,
@@ -290,22 +316,22 @@ class MessageStore: ObservableObject {
             createdAt: Date(),
             isSent: false
         )
-        
-        // Optimistic UI update
+        // 楽観的UI反映 + ローカル保存（テキストと整合）
         _ = message.generateRecordName()
-        messages.append(message)
+        withAnimation(.easeInOut(duration: 0.2)) {
+            messages.append(message)
+            messages.sort { $0.createdAt < $1.createdAt }
+        }
         modelContext.insert(message)
-        
-        // Save to persistent storage
         do {
             try modelContext.save()
-            log("Video message saved locally: \(message.id)", category: "MessageStore")
+            log("Message(video) saved locally: id=\(message.id)", category: "MessageStore")
         } catch {
+            if let idx = messages.firstIndex(of: message) { _ = withAnimation { messages.remove(at: idx) } }
             log("Failed to save video message locally: \(error)", category: "MessageStore")
             return
         }
-        
-        // Sync to CloudKit
+        // 同期キューへ登録
         syncToCloudKit(message)
     }
     
@@ -313,37 +339,46 @@ class MessageStore: ObservableObject {
         let oldBody = message.body
         message.body = newBody
         message.isSent = false
+        let recNameInfo = message.ckRecordName ?? "nil"
+        log("✏️ [UI UPDATE] commit start id=\(message.id) record=\(recNameInfo) room=\(message.roomID) newLen=\(newBody.count)", category: "MessageStore")
         
         // Save to persistent storage
         do {
             try modelContext.save()
-            log("Message updated locally: \(message.id)", category: "MessageStore")
+            log("✏️ [UI UPDATE] local saved id=\(message.id) record=\(recNameInfo)", category: "MessageStore")
         } catch {
             // Revert on failure
             message.body = oldBody
-            log("Failed to update message locally: \(error)", category: "MessageStore")
+            log("❌ [UI UPDATE] local save failed id=\(message.id) record=\(recNameInfo) error=\(error)", category: "MessageStore")
             return
         }
         
-        // Sync to CloudKit
-        Task {
-            do {
+        // Sync via CKSyncEngine (WorkItem)
+        Task { @MainActor in
+            if #available(iOS 17.0, *) {
                 if let recordName = message.ckRecordName {
-                    try await CloudKitChatManager.shared.updateMessage(recordName: recordName, roomID: message.roomID, newBody: newBody)
-                    await MainActor.run {
-                        message.isSent = true
-                    }
+                    await CKSyncEngineManager.shared.queueUpdateMessage(
+                        recordName: recordName,
+                        roomID: message.roomID,
+                        newBody: newBody,
+                        newTimestamp: Date()
+                    )
+                    message.isSent = true
+                    log("✏️ [UI UPDATE] queued to Engine id=\(message.id) record=\(recNameInfo)", category: "MessageStore")
                 }
-            } catch {
-                await MainActor.run {
-                    syncError = error
-                    log("Failed to update message in CloudKit: \(error)", category: "MessageStore")
-                }
+            } else {
+                #if ENGINE_ONLY
+                log("❌ [UI UPDATE] ENGINE_ONLY defined but iOS < 17 path encountered", category: "MessageStore")
+                #else
+                log("⚠️ [UI UPDATE] CKSyncEngine not available on this OS version", category: "MessageStore")
+                #endif
             }
         }
     }
     
     func deleteMessage(_ message: Message) {
+        let recNameInfo = message.ckRecordName ?? "nil"
+        log("🗑️ [UI DELETE] request id=\(message.id) record=\(recNameInfo) room=\(message.roomID) hasAsset=\(message.assetPath != nil)", category: "MessageStore")
         // Remove from UI with animation
         if let index = messages.firstIndex(of: message) {
             _ = withAnimation(.easeInOut(duration: 0.2)) {
@@ -356,9 +391,9 @@ class MessageStore: ObservableObject {
         
         do {
             try modelContext.save()
-            log("Message deleted locally: \(message.id)", category: "MessageStore")
+            log("🗑️ [UI DELETE] local removed id=\(message.id) record=\(recNameInfo)", category: "MessageStore")
         } catch {
-            log("Failed to delete message locally: \(error)", category: "MessageStore")
+            log("❌ [UI DELETE] local delete failed id=\(message.id) record=\(recNameInfo) error=\(error)", category: "MessageStore")
             // Re-add to UI if delete failed
             withAnimation {
                 messages.append(message)
@@ -367,39 +402,34 @@ class MessageStore: ObservableObject {
             return
         }
         
-        // Sync deletion to CloudKit
+        // Sync deletion via CKSyncEngine (WorkItem)
         if let recordName = message.ckRecordName {
-            Task {
-                do {
-                    try await CloudKitChatManager.shared.deleteMessage(recordName: recordName, roomID: message.roomID)
-                    log("Message deleted from CloudKit: \(recordName)", category: "MessageStore")
-                } catch {
-                    await MainActor.run {
+            Task { @MainActor in
+                if #available(iOS 17.0, *) {
+                    await CKSyncEngineManager.shared.queueDeleteMessage(recordName: recordName, roomID: message.roomID)
+                    log("🗑️ [UI DELETE] queued to Engine record=\(recordName)", category: "MessageStore")
+                } else {
+                    #if ENGINE_ONLY
+                    log("❌ [UI DELETE] ENGINE_ONLY defined but iOS < 17 path encountered", category: "MessageStore")
+                    #else
+                    // iOS 16以下のためのフォールバック（基本17+想定）
+                    do {
+                        try await CloudKitChatManager.shared.deleteMessage(recordName: recordName, roomID: message.roomID)
+                        log("🗑️ [UI DELETE] deleted from CloudKit record=\(recordName)", category: "MessageStore")
+                    } catch {
                         syncError = error
-                        log("Failed to delete message from CloudKit: \(error)", category: "MessageStore")
+                        log("❌ [UI DELETE] CloudKit delete failed record=\(recordName) error=\(error)", category: "MessageStore")
                     }
+                    #endif
                 }
             }
         }
     }
     
-    /// メッセージにリアクション絵文字を追加
+    /// メッセージにリアクション絵文字を追加（CloudKit正規化レコードに一本化）
     func addReaction(_ emoji: String, to message: Message) {
-        // ローカルで即座に更新
-        let currentReactions = message.reactionEmoji ?? ""
-        message.reactionEmoji = currentReactions + emoji
-        
-        // UI更新
-        objectWillChange.send()
-        
-        // ローカル保存
-        do {
-            try modelContext.save()
-            log("Reaction added locally: \(emoji) to \(message.id)", category: "MessageStore")
-        } catch {
-            log("Failed to save reaction locally: \(error)", category: "MessageStore")
-            return
-        }
+        // ローカルの reactionEmoji は更新しない（UIはCloudKitから集計表示）
+        log("Reaction enqueue only (CloudKit): \(emoji) to id=\(message.id)", category: "MessageStore")
         
         // CloudKitに同期
         guard let recordName = message.ckRecordName else {
@@ -407,25 +437,38 @@ class MessageStore: ObservableObject {
             return
         }
         
-        Task {
-            do {
+        Task { @MainActor in
+            if #available(iOS 17.0, *) {
                 if let userID = CloudKitChatManager.shared.currentUserID {
-                    try await CloudKitChatManager.shared.addReactionToMessage(
+                    await CKSyncEngineManager.shared.queueReaction(
                         messageRecordName: recordName,
                         roomID: message.roomID,
                         emoji: emoji,
                         userID: userID
                     )
-                }
-                await MainActor.run {
                     message.isSent = true
+                    log("Reaction enqueued to CKSyncEngine: \(emoji)", category: "MessageStore")
                 }
-                log("Reaction synced to CloudKit: \(emoji)", category: "MessageStore")
-            } catch {
-                await MainActor.run {
+            } else {
+                #if ENGINE_ONLY
+                log("❌ Reaction sync skipped: ENGINE_ONLY on iOS < 17", category: "MessageStore")
+                #else
+                do {
+                    if let userID = CloudKitChatManager.shared.currentUserID {
+                        try await CloudKitChatManager.shared.addReactionToMessage(
+                            messageRecordName: recordName,
+                            roomID: message.roomID,
+                            emoji: emoji,
+                            userID: userID
+                        )
+                        message.isSent = true
+                        log("Reaction synced to CloudKit (fallback): \(emoji)", category: "MessageStore")
+                    }
+                } catch {
                     syncError = error
+                    log("Failed to sync reaction to CloudKit (fallback): \(error)", category: "MessageStore")
                 }
-                log("Failed to sync reaction to CloudKit: \(error)", category: "MessageStore")
+                #endif
             }
         }
     }
@@ -434,176 +477,76 @@ class MessageStore: ObservableObject {
     
     private func refreshReactions(for messageRecordName: String) {
         let currentRoomID = self.roomID
-        guard let idx = messages.firstIndex(where: { $0.ckRecordName == messageRecordName }) else { return }
+        guard messages.contains(where: { $0.ckRecordName == messageRecordName }) else { return }
         Task { @MainActor in
             do {
                 let list = try await CloudKitChatManager.shared.getReactionsForMessage(
                     messageRecordName: messageRecordName,
                     roomID: currentRoomID
                 )
-                let grouped = Dictionary(grouping: list, by: { $0.emoji })
-                var builder = ""
-                for (emoji, items) in grouped {
-                    builder += String(repeating: emoji, count: items.count)
+                if !list.isEmpty {
+                    log("Reactions fetched (count=\(list.count)) for message: \(messageRecordName)", category: "MessageStore")
                 }
-                messages[idx].reactionEmoji = builder
-                log("🔁 Refreshed reactions for message: \(messageRecordName)", category: "MessageStore")
+                NotificationCenter.default.post(
+                    name: .reactionsUpdated,
+                    object: nil,
+                    userInfo: ["recordName": messageRecordName]
+                )
             } catch {
-                log("⚠️ Failed to refresh reactions for message: \(messageRecordName) - \(error)", category: "MessageStore")
+                log("Failed to refresh reactions for message: \(messageRecordName) - \(error)", category: "MessageStore")
             }
         }
     }
+    /*
+            log("🎯 ENQUEUE TRACKED MESSAGE (ENGINE): '\(body)' - Message ID: \(message.id)", category: "MessageStore")
+        }
 
+        // Engineへ完全移行：WorkItem化して送信を委譲
+        Task { @MainActor in
+            if #available(iOS 17.0, *) {
+                await CKSyncEngineManager.shared.queueMessage(message)
+                if let path = message.assetPath {
+                    await CKSyncEngineManager.shared.queueAttachment(
+                        messageRecordName: message.id.uuidString,
+                        roomID: message.roomID,
+                        localFileURL: URL(fileURLWithPath: path)
+                    )
+                }
+                log("📮 Queued message to CKSyncEngine: id=\(message.id)", category: "MessageStore")
+            } else {
+                log("⚠️ CKSyncEngine not available on this OS version", category: "MessageStore")
+            }
+        }
+    }
+    
+*/
     private func syncToCloudKit(_ message: Message) {
         guard message.isValidForSync else {
             log("Message is not valid for sync: \(message.id)", category: "MessageStore")
             return
         }
-        
-        // 特定のメッセージを追跡
         if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-            log("🎯 SYNCING TRACKED MESSAGE TO CLOUDKIT: '\(body)' - Message ID: \(message.id)", category: "MessageStore")
+            log("ENQUEUE TRACKED MESSAGE (ENGINE): '\(body)' - Message ID: \(message.id)", category: "MessageStore")
         }
-        
-        // Check if online before attempting sync
-        if !offlineManager.isOnline {
-            log("Offline, queueing message: \(message.id)", category: "MessageStore")
-            offlineManager.queueMessage(message)
-            return
-        }
-        
-        Task {
-            do {
-                // CloudKitChatManagerを使用して共有チャット管理
-                let chatManager = CloudKitChatManager.shared
-                
-                // ルームレコードを取得、存在しない場合は作成を試行
-                var roomRecord: CKRecord?
-                do {
-                    roomRecord = try await chatManager.getRoomRecord(roomID: message.roomID)
-                } catch {
-                    log("Room record not found for roomID: \(message.roomID)", category: "MessageStore")
-                    roomRecord = nil
+        Task { @MainActor in
+            if #available(iOS 17.0, *) {
+                await CKSyncEngineManager.shared.queueMessage(message)
+                if let path = message.assetPath {
+                    await CKSyncEngineManager.shared.queueAttachment(
+                        messageRecordName: message.id.uuidString,
+                        roomID: message.roomID,
+                        localFileURL: URL(fileURLWithPath: path)
+                    )
                 }
-                
-                if roomRecord == nil {
-                    log("No shared room found for roomID: \(message.roomID), attempting to create...", category: "MessageStore")
-                    
-                    // roomIDから相手のユーザーIDを推定（これは理想的ではないが、一時的な対処）
-                    // より良い解決策は、ChatRoomモデルに相手のユーザーIDを保存することです
-                    do {
-                        // ChatRoomモデルからremoteUserIDを取得
-                        let descriptor = FetchDescriptor<ChatRoom>()
-                        let allRooms = try modelContext.fetch(descriptor)
-                        
-                        log("🔍 Searching for ChatRoom with roomID: \(message.roomID)", category: "MessageStore")
-                        log("📋 Found \(allRooms.count) total ChatRooms:", category: "MessageStore")
-                        for (index, room) in allRooms.enumerated() {
-                            log("📋 Room \(index): ID=\(room.id), roomID=\(room.roomID), remoteUserID=\(room.remoteUserID)", category: "MessageStore")
-                            
-                            // roomIDの詳細比較
-                            let isMatch = room.roomID == message.roomID
-                            log("🔍 Room \(index) roomID match: \(isMatch)", category: "MessageStore")
-                            if !isMatch {
-                                log("📊 Target roomID length: \(message.roomID.count)", category: "MessageStore")
-                                log("📊 Room \(index) roomID length: \(room.roomID.count)", category: "MessageStore")
-                                log("📊 Target roomID: '\(message.roomID)'", category: "MessageStore")
-                                log("📊 Room \(index) roomID: '\(room.roomID)'", category: "MessageStore")
-                                
-                                // 部分一致をチェック
-                                if message.roomID.count >= 20 && room.roomID.count >= 20 {
-                                    let targetPrefix = String(message.roomID.prefix(20))
-                                    let roomPrefix = String(room.roomID.prefix(20))
-                                    log("📊 Prefix match (20 chars): \(targetPrefix == roomPrefix)", category: "MessageStore")
-                                }
-                            }
-                        }
-                        
-                        if let chatRoom = allRooms.first(where: { $0.roomID == message.roomID }) {
-                            log("✅ Found local ChatRoom, creating CloudKit shared room for remote user: \(chatRoom.remoteUserID)", category: "MessageStore")
-                            let _ = try await chatManager.createSharedChatRoom(roomID: message.roomID, invitedUserID: chatRoom.remoteUserID)
-                            roomRecord = try await chatManager.getRoomRecord(roomID: message.roomID)
-                            log("✅ Successfully created shared room for roomID: \(message.roomID)", category: "MessageStore")
-                        } else {
-                            // 部分一致での検索を試行（デバッグ用）
-                            let partialMatches = allRooms.filter { room in
-                                room.roomID.contains(message.roomID.prefix(10)) || message.roomID.contains(room.roomID.prefix(10))
-                            }
-                            
-                            if !partialMatches.isEmpty {
-                                log("🔍 Found partial matches:", category: "MessageStore")
-                                for match in partialMatches {
-                                    log("📋 Partial match: roomID=\(match.roomID)", category: "MessageStore")
-                                }
-                            }
-                            
-                            log("❌ Could not find local ChatRoom for roomID: \(message.roomID)", category: "MessageStore")
-                            await MainActor.run {
-                                message.isSent = false
-                                syncError = CloudKitChatError.roomNotFound
-                            }
-                            return
-                        }
-                    } catch {
-                        log("❌ Failed to fetch ChatRooms or create shared room: \(error)", category: "MessageStore")
-                        await MainActor.run {
-                            message.isSent = false
-                            syncError = error
-                        }
-                        return
-                    }
-                }
-                
-                guard roomRecord != nil else {
-                    log("❌ Still no room record available for roomID: \(message.roomID)", category: "MessageStore")
-                    await MainActor.run {
-                        message.isSent = false
-                        syncError = CloudKitChatError.roomNotFound
-                    }
-                    return
-                }
-                
-                // 共有ルームにメッセージを送信
-                try await chatManager.sendMessage(message, to: message.roomID)
-                await MainActor.run {
-                    message.ckRecordName = message.id.uuidString  // メッセージIDをレコード名として使用
-                    message.isSent = true
-                    log("Message synced to shared room: \(message.id)", category: "MessageStore")
-                    
-                    // 特定のメッセージの同期成功を追跡
-                    if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-                        log("🎯 TRACKED MESSAGE SUCCESSFULLY SYNCED TO CLOUDKIT: '\(body)' - recordName: \(message.id.uuidString)", category: "MessageStore")
-                    }
-                }
-                
-            } catch {
-                await MainActor.run {
-                    message.isSent = false
-                    syncError = error
-                    log("Failed to sync message: \(error)", category: "MessageStore")
-                    
-                    // Queue for retry if it's a network error
-                    if error.isNetworkError {
-                        offlineManager.queueMessage(message)
-                    }
-                }
+                log("Queued message to CKSyncEngine: id=\(message.id)", category: "MessageStore")
+            } else {
+                log("CKSyncEngine not available on this OS version", category: "MessageStore")
             }
         }
     }
-    
+
     private func handleReceivedMessage(_ message: Message) {
-        log("🔍 Handling received message - ID: \(message.id), roomID: \(message.roomID), senderID: \(message.senderID), body: \(message.body?.prefix(50) ?? "nil"), ckRecordName: \(message.ckRecordName ?? "nil")", category: "MessageStore")
-        
-        // 特定のメッセージを追跡（たああメッセージなど）
-        if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-            log("🎯 TRACKED MESSAGE RECEIVED: Message ID \(message.id), body: '\(body)', ckRecordName: \(message.ckRecordName ?? "nil")", category: "MessageStore")
-        }
-        
-        // 詳細な重複チェック
-        log("🔍 Local messages count: \(messages.count)", category: "MessageStore")
-        log("📋 Local ckRecordNames: \(messages.compactMap(\.ckRecordName).prefix(10))", category: "MessageStore")
-        log("👥 Local senderIDs: \(messages.map(\.senderID).prefix(10))", category: "MessageStore")
-        log("📨 Incoming senderID: \(message.senderID)", category: "MessageStore")
+        // 受信処理の重複チェックは行うが、ログは最小限
         
         // 改善された重複チェック：より厳密にチェックし、デバッグ情報を追加
         if let targetRecordName = message.ckRecordName {
@@ -612,22 +555,21 @@ class MessageStore: ObservableObject {
                 $0.ckRecordName == targetRecordName && $0.senderID == message.senderID 
             })
             if let existing = existingInMemory {
-                log("⚠️ Found existing message in memory with same ckRecordName and senderID:", category: "MessageStore")
-                log("📌 Existing - ID: \(existing.id), senderID: \(existing.senderID), body: \(existing.body?.prefix(50) ?? "nil"), createdAt: \(existing.createdAt)", category: "MessageStore")
-                log("📌 New      - ID: \(message.id), senderID: \(message.senderID), body: \(message.body?.prefix(50) ?? "nil"), createdAt: \(message.createdAt)", category: "MessageStore")
-                // 既存メッセージのリアクション表示のみ更新（本文は変わらない想定）
-                if let newReactions = message.reactionEmoji, !newReactions.isEmpty, existing.reactionEmoji != newReactions {
-                    existing.reactionEmoji = newReactions
-                    log("🔁 Updated reaction display for existing message: \(targetRecordName)", category: "MessageStore")
-                } else {
-                    log("📱 Same message from same sender already exists in UI - no action needed", category: "MessageStore")
+                // 既存UI更新（送達確定・リアクション差分・添付反映）
+                existing.isSent = true
+                // reactionEmoji は廃止（CloudKit正規化に統一）
+                if let newPath = message.assetPath, existing.assetPath != newPath {
+                    existing.assetPath = newPath
                 }
-                
-                // 特定のメッセージの重複を詳しくログ
-                if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-                    log("🎯 TRACKED MESSAGE DUPLICATE DETECTED IN MEMORY - Already in UI", category: "MessageStore")
+                // 添付が先行していた場合の適用
+                if let queuedPath = pendingAttachmentPaths[targetRecordName] {
+                    if existing.assetPath != queuedPath {
+                        existing.assetPath = queuedPath
+                        do { try modelContext.save() } catch { log("Failed to save queued attachment path: \(error)", category: "MessageStore") }
+                    }
+                    pendingAttachmentPaths.removeValue(forKey: targetRecordName)
                 }
-                
+                log("[DEDUP] In-memory matched ck=\(String(targetRecordName.prefix(8))) sender=\(String(message.senderID.prefix(8)))", category: "MessageStore")
                 return
             }
             
@@ -635,9 +577,7 @@ class MessageStore: ObservableObject {
             let sameRecordDifferentSender = messages.first(where: { 
                 $0.ckRecordName == targetRecordName && $0.senderID != message.senderID 
             })
-            if sameRecordDifferentSender != nil {
-                log("🔄 Found same recordName from different sender - allowing cross-device message", category: "MessageStore")
-            }
+            _ = sameRecordDifferentSender
             
             // 2. ローカルデータベースもチェック（同一送信者の重複のみ）
             do {
@@ -650,34 +590,25 @@ class MessageStore: ObservableObject {
                 let existingMessages = try modelContext.fetch(descriptor)
                 if !existingMessages.isEmpty {
                     let existing = existingMessages.first!
-                    log("⚠️ Found existing message in database with same ckRecordName and senderID: \(targetRecordName)", category: "MessageStore")
-                    log("📌 DB Existing - ID: \(existing.id), senderID: \(existing.senderID), body: \(existing.body?.prefix(50) ?? "nil"), createdAt: \(existing.createdAt)", category: "MessageStore")
-                    log("📌 New        - ID: \(message.id), senderID: \(message.senderID), body: \(message.body?.prefix(50) ?? "nil"), createdAt: \(message.createdAt)", category: "MessageStore")
-                    
-                    // 同一送信者のメッセージがUIに表示されているかチェック
+                    existing.isSent = true
+                    // UIにまだ無ければ追加
                     let inUI = messages.contains { $0.ckRecordName == targetRecordName && $0.senderID == currentSenderID }
-                    
-                    // 特定のメッセージの重複を詳しくログ
-                    if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-                        log("🎯 TRACKED MESSAGE DUPLICATE DETECTED IN DATABASE - Not adding to avoid duplicates", category: "MessageStore")
-                        log("🎯 But checking if it's in UI...", category: "MessageStore")
-                        log("🎯 Is message in UI? \(inUI)", category: "MessageStore")
-                    }
-                    
-                    // UIに表示されていない場合は追加（同一送信者のメッセージ対象）
                     if !inUI {
-                        log("📱 Message from same sender exists in DB but not in UI - Adding to UI: \(existing.body?.prefix(30) ?? "nil")", category: "MessageStore")
                         withAnimation(.easeInOut(duration: 0.2)) {
                             messages.append(existing)
                             messages.sort { $0.createdAt < $1.createdAt }
                         }
-                        
-                        // 特定のメッセージの場合は追加ログ
-                        if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-                            log("🎯 TRACKED MESSAGE EXISTS IN DB BUT NOT IN UI - Added to UI", category: "MessageStore")
-                        }
+                        log("[DEDUP] DB matched and appended ck=\(String(targetRecordName.prefix(8)))", category: "MessageStore")
                     }
-                    
+                    // 添付が先行していた場合の適用
+                    if let queuedPath = pendingAttachmentPaths[targetRecordName] {
+                        if existing.assetPath != queuedPath {
+                            existing.assetPath = queuedPath
+                            do { try modelContext.save() } catch { log("Failed to save queued attachment path: \(error)", category: "MessageStore") }
+                        }
+                        pendingAttachmentPaths.removeValue(forKey: targetRecordName)
+                    }
+                    log("[DEDUP] DB matched ck=\(String(targetRecordName.prefix(8))) sender=\(String(currentSenderID.prefix(8)))", category: "MessageStore")
                     return
                 }
                 
@@ -688,18 +619,13 @@ class MessageStore: ObservableObject {
                     }
                 )
                 let differentSenderMessages = try modelContext.fetch(differentSenderDescriptor)
-                if !differentSenderMessages.isEmpty {
-                    log("🔄 Found message with same recordName from different sender in DB - allowing cross-device message", category: "MessageStore")
-                }
+                _ = differentSenderMessages
             } catch {
-                log("⚠️ Failed to check database for duplicates: \(error)", category: "MessageStore")
                 // エラーが発生した場合は処理を続行
             }
             
-            log("✅ No existing message found with ckRecordName: \(targetRecordName)", category: "MessageStore")
+            // 重複なし
         } else {
-            log("⚠️ Message has no ckRecordName, using alternative duplicate check", category: "MessageStore")
-            
             // ckRecordNameがない場合は、他の条件で重複チェック
             let possibleDuplicate = messages.first { existing in
                 existing.senderID == message.senderID &&
@@ -708,16 +634,22 @@ class MessageStore: ObservableObject {
             }
             
             if let duplicate = possibleDuplicate {
-                log("⚠️ Found possible duplicate message based on content and timing", category: "MessageStore")
-                log("📌 Duplicate - ID: \(duplicate.id), createdAt: \(duplicate.createdAt)", category: "MessageStore")
-                log("📌 New      - ID: \(message.id), createdAt: \(message.createdAt)", category: "MessageStore")
+                _ = duplicate
+                log("[DEDUP] Heuristic duplicate (no ck) sender=\(String(message.senderID.prefix(8))) body=\(String((message.body ?? "").prefix(10)))", category: "MessageStore")
                 return
             }
         }
         
+        // システムメッセージ（FaceTime登録）の場合はローカルに相手のFaceTimeIDを保存
+        if let sysID = Message.extractFaceTimeID(from: message.body) {
+            var dict = (UserDefaults.standard.dictionary(forKey: "FaceTimeIDs") as? [String: String]) ?? [:]
+            dict[message.senderID] = sysID
+            UserDefaults.standard.set(dict, forKey: "FaceTimeIDs")
+            log("📞 [SYS] Stored FaceTimeID for sender=\(String(message.senderID.prefix(8)))", category: "MessageStore")
+        }
+
         // roomIDチェック
         if message.roomID != self.roomID {
-            log("⚠️ RoomID mismatch - Message roomID: \(message.roomID), Store roomID: \(self.roomID)", category: "MessageStore")
             return
         }
         
@@ -733,22 +665,20 @@ class MessageStore: ObservableObject {
                 messages.sort { $0.createdAt < $1.createdAt }
             }
             
-            log("✅ Successfully received new message: \(message.id), body: \(message.body?.prefix(50) ?? "nil")", category: "MessageStore")
-            
-            // 受信成功時に追跡メッセージをハイライト
-            if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-                log("🎯 *** TRACKED MESSAGE SUCCESSFULLY RECEIVED AND SAVED *** '\(body)'", category: "MessageStore")
-                log("🎯 Message details: ID=\(message.id), roomID=\(message.roomID), senderID=\(message.senderID), ckRecordName=\(message.ckRecordName ?? "nil")", category: "MessageStore")
-                log("🎯 Current messages count: \(messages.count)", category: "MessageStore")
+            // 添付が先に到着していた場合はここで適用
+            if let rnFull = message.ckRecordName, let queuedPath = pendingAttachmentPaths[rnFull] {
+                if message.assetPath != queuedPath {
+                    message.assetPath = queuedPath
+                    pendingAttachmentPaths.removeValue(forKey: rnFull)
+                    do { try modelContext.save() } catch { log("Failed to save queued attachment path: \(error)", category: "MessageStore") }
+                }
             }
             
+            let rn = message.ckRecordName.map { String($0.prefix(8)) } ?? "nil"
+            log("✅ Message received: id=\(message.id) sender=\(String(message.senderID.prefix(8))) record=\(rn)", category: "MessageStore")
+        
         } catch {
             log("❌ Failed to save received message: \(error)", category: "MessageStore")
-            
-            // 保存失敗時にも追跡メッセージをハイライト
-            if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-                log("🎯 *** TRACKED MESSAGE FAILED TO SAVE *** '\(body)' - Error: \(error)", category: "MessageStore")
-            }
         }
     }
     
@@ -770,8 +700,8 @@ class MessageStore: ObservableObject {
     
     // MARK: - Public Utilities
     
-    func refresh() {
-        log("🔄 Manual refresh requested for roomID: \(roomID)", category: "MessageStore")
+func refresh() {
+        log("Manual refresh requested for roomID: \(roomID)", category: "MessageStore")
         
         if #available(iOS 17.0, *) {
             syncService.checkForUpdates(roomID: roomID)
@@ -780,7 +710,7 @@ class MessageStore: ObservableObject {
             loadInitialMessages()
         }
         
-        // 追加の手動確認：ローカルDBをリロードして、UIに反映されていないメッセージがあるかチェック
+        // 余計な全件ダンプは行わず、必要最小限の差分確認のみ実施
         Task { @MainActor in
             do {
                 let descriptor = FetchDescriptor<Message>()
@@ -788,84 +718,43 @@ class MessageStore: ObservableObject {
                 let currentRoomMessages = allMessages.filter { $0.roomID == self.roomID }
                 let sortedMessages = currentRoomMessages.sorted { $0.createdAt < $1.createdAt }
                 
-                log("🔄 Local DB has \(sortedMessages.count) messages for room \(roomID)", category: "MessageStore")
-                log("🔄 UI shows \(messages.count) messages", category: "MessageStore")
+                // 送信者別サマリを短く出力（UI検証しやすく集約）
+                let myID = CloudKitChatManager.shared.currentUserID ?? "unknown"
+                let mineCount = sortedMessages.filter { $0.senderID == myID }.count
+                let otherCount = sortedMessages.count - mineCount
+                log("Local DB: total=\(sortedMessages.count) room=\(roomID) mine=\(mineCount) other=\(otherCount)", category: "MessageStore")
+                log("UI shows \(messages.count) messages", category: "MessageStore")
                 
-                // 全メッセージの詳細をログ出力
-                log("🔍 All messages in local DB for this room:", category: "MessageStore")
-                for (index, msg) in sortedMessages.enumerated() {
-                    let body = msg.body ?? "nil"
-                    let truncatedBody = String(body.prefix(20))
-                    log("🔍 [\(index)] ID: \(msg.id), body: '\(truncatedBody)', createdAt: \(msg.createdAt), ckRecordName: \(msg.ckRecordName ?? "nil")", category: "MessageStore")
-                    
-                    // 特定のメッセージを詳細チェック
-                    if body.contains("たああ") || body.contains("たあああ") {
-                        log("🎯 FOUND TRACKED MESSAGE IN LOCAL DB: '\(body)'", category: "MessageStore")
-                    }
-                }
-                
-                // UIとローカルDBの差分をチェック
+                // 件数/内容差分に応じてUI最小更新
                 if sortedMessages.count != messages.count {
-                    log("⚠️ Message count mismatch detected. Reloading UI...", category: "MessageStore")
-                    log("🔧 Before UI update: messages.count = \(messages.count), sortedMessages.count = \(sortedMessages.count)", category: "MessageStore")
+                    log("Message count mismatch detected. Reloading UI...", category: "MessageStore")
+                    log("Before UI update: messages.count = \(messages.count), sortedMessages.count = \(sortedMessages.count)", category: "MessageStore")
                     
-                    // 強制的なUI更新（複数の方法を試行）
                     self.messages.removeAll()
-                    
                     DispatchQueue.main.async {
                         withAnimation(.easeInOut(duration: 0.3)) {
                             self.messages = sortedMessages
                         }
-                        
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            log("🔧 After UI update: messages.count = \(self.messages.count)", category: "MessageStore")
-                            
-                            // さらに確認して必要があれば再度更新
+                            log("After UI update: messages.count = \(self.messages.count)", category: "MessageStore")
                             if self.messages.count != sortedMessages.count {
-                                log("🚨 UI update failed, forcing direct assignment", category: "MessageStore")
                                 self.messages = sortedMessages
                             }
                         }
                     }
                 } else {
-                    // カウントが同じでも内容が違うかもしれないのでチェック
+                    // 同数でも本文差分があれば最小更新
                     let uiMessageBodies = Set(messages.compactMap(\.body))
                     let dbMessageBodies = Set(sortedMessages.compactMap(\.body))
-                    
                     if uiMessageBodies != dbMessageBodies {
-                        log("⚠️ Message content mismatch detected despite same count. Reloading UI...", category: "MessageStore")
+                        log("Message content mismatch detected despite same count. Reloading UI...", category: "MessageStore")
                         withAnimation(.easeInOut(duration: 0.3)) {
                             self.messages = sortedMessages
                         }
                     }
                 }
-                
-                // 全データベースから「たああ」を含むメッセージを検索
-                let allDbMessages = try modelContext.fetch(FetchDescriptor<Message>())
-                let trackedMessagesAllRooms = allDbMessages.filter { message in
-                    if let body = message.body {
-                        return body.contains("たああ") || body.contains("たあああ")
-                    }
-                    return false
-                }
-                
-                if !trackedMessagesAllRooms.isEmpty {
-                    log("🎯 Found \(trackedMessagesAllRooms.count) tracked messages in ENTIRE DB:", category: "MessageStore")
-                    for msg in trackedMessagesAllRooms {
-                        log("🎯 - ID: \(msg.id), roomID: \(msg.roomID), body: '\(msg.body ?? "nil")', createdAt: \(msg.createdAt)", category: "MessageStore")
-                    }
-                } else {
-                    log("🚫 No 'たああ' messages found in entire local database", category: "MessageStore")
-                }
-                
-                // デバッグ情報を自動出力
-                log("🔧 AUTO-RUNNING DEBUG FUNCTIONS...", category: "MessageStore")
-                self.debugPrintAllMessages()
-                self.debugSearchMessages("たああ")
-                self.debugCompareRoomMessages()
-                
             } catch {
-                log("❌ Failed to refresh from local DB: \(error)", category: "MessageStore")
+                log("Failed to refresh from local DB: \(error)", category: "MessageStore")
             }
         }
     }
@@ -1005,25 +894,36 @@ class MessageStore: ObservableObject {
     
     // MARK: - Enhanced Utilities
     
-    func getOfflineStatistics() -> OfflineStatistics {
-        let queueStats = offlineManager.getQueueStatistics()
+    func getOfflineStatistics() async -> OfflineStatistics {
         let unsentCount = getUnsentMessageCount()
-        
+        var queued = 0
+        if #available(iOS 17.0, *) {
+            let stats = await CKSyncEngineManager.shared.pendingStats()
+            queued = stats.total
+        }
         return OfflineStatistics(
             isOnline: offlineManager.isOnline,
-            queuedMessages: queueStats.totalQueued,
-            failedMessages: queueStats.failedMessages,
+            queuedMessages: queued,
+            failedMessages: 0,
             unsentMessages: unsentCount,
             lastSyncDate: offlineManager.lastSyncDate
         )
     }
     
-    func forceSync() {
-        offlineManager.forceSync()
+    func forceSync() async {
+        if #available(iOS 17.0, *) {
+            await CKSyncEngineManager.shared.kickSyncNow()
+        } else {
+            log("⚠️ forceSync no-op (CKSyncEngine unavailable)", category: "MessageStore")
+        }
     }
     
     func clearOfflineQueue() {
-        offlineManager.clearQueue()
+        if #available(iOS 17.0, *) {
+            Task { await CKSyncEngineManager.shared.resetEngines() }
+        } else {
+            log("⚠️ clearOfflineQueue no-op (CKSyncEngine unavailable)", category: "MessageStore")
+        }
     }
     
     // MARK: - Debug Functions

@@ -3,15 +3,20 @@ import SwiftData
 import AVKit
 import AVFoundation
 import CloudKit
+import UIKit
 
 struct ChatListView: View {
     @Query(sort: \ChatRoom.lastMessageDate, order: .reverse) private var chatRooms: [ChatRoom]
     @Environment(\.modelContext) private var modelContext
     @State private var showInviteModal = false
-    @State private var showQRInvite = false
     var onChatSelected: (ChatRoom) -> Void
     @State private(set) var showingSettings = false
     @State private(set) var selectedChatRoom: ChatRoom?
+    @AppStorage("myAvatarData") private var myAvatarData: Data = Data()
+    // プロフィール一括プリフェッチ制御
+    @State private var isPrefetchingProfiles = false
+    // モーダル排他: 招待とQRは同時に出さない
+    @State private var showQRScanner = false
     
     init(onChatSelected: @escaping (ChatRoom) -> Void) {
         self.onChatSelected = onChatSelected
@@ -19,6 +24,32 @@ struct ChatListView: View {
     // パフォーマンス最適化: 未読数計算をmemoizeで最適化
     private var totalUnreadCount: Int {
         chatRooms.lazy.reduce(0) { $0 + $1.unreadCount }
+    }
+    
+    // 表示用にroomID単位で一意化（最新の更新を優先）
+    private var uniqueChatRooms: [ChatRoom] {
+        let grouped = Dictionary(grouping: chatRooms, by: { $0.roomID })
+        var collapsed: [ChatRoom] = []
+        var removed = 0
+        for (_, rooms) in grouped {
+            if rooms.count > 1 { removed += (rooms.count - 1) }
+            let picked = rooms.max(by: { (lhs, rhs) in
+                let l = lhs.lastMessageDate ?? lhs.createdAt
+                let r = rhs.lastMessageDate ?? rhs.createdAt
+                return l < r
+            }) ?? rooms[0]
+            collapsed.append(picked)
+        }
+        let sorted = collapsed.sorted { (lhs, rhs) in
+            let l = lhs.lastMessageDate ?? lhs.createdAt
+            let r = rhs.lastMessageDate ?? rhs.createdAt
+            return l > r
+        }
+        if removed > 0 {
+            let ids = grouped.filter { $0.value.count > 1 }.keys.joined(separator: ", ")
+            log("♻️ Collapsed duplicate ChatRooms for roomIDs: [\(ids)] (removed=\(removed))", category: "ChatListView")
+        }
+        return sorted
     }
     
     var body: some View {
@@ -49,7 +80,7 @@ struct ChatListView: View {
                     
                     Spacer()
                     
-                    // 右側：新規追加と設定ボタン
+                    // 右側：新規追加と設定ボタン（設定はプロフィール画像に）
                     HStack(alignment: .center, spacing: 16) {
                         Button {
                             withAnimation(.easeInOut(duration: 0.2)) {
@@ -67,16 +98,32 @@ struct ChatListView: View {
                                 showingSettings = true
                             }
                         } label: {
-                            Image(systemName: "gearshape.fill")
-                                .font(.system(size: 26, weight: .bold))
-                                .symbolRenderingMode(.hierarchical)
-                                .symbolEffect(.bounce, value: showingSettings)
+                            Group {
+                                if !myAvatarData.isEmpty, let image = UIImage(data: myAvatarData) {
+                                    Image(uiImage: image)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 28, height: 28)
+                                        .clipShape(Circle())
+                                        .overlay(Circle().stroke(Color.gray.opacity(0.2), lineWidth: 1))
+                                } else {
+                                    Image(systemName: "person.crop.circle.fill")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 28, height: 28)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                         }
                     }
                 }
                 .padding(.leading, 4)
                 .padding(.trailing, 8)
                 .padding(.vertical, 4)
+                .onAppear {
+                    // 重複の可能性をログに出力（UIには影響させない）
+                    debugLogDuplicateChatRooms(chatRooms)
+                }
                 
                 Divider()
                 
@@ -87,14 +134,26 @@ struct ChatListView: View {
                 SettingsView()
             }
             .sheet(isPresented: $showInviteModal) {
-                InviteModalView { newRoom in
+                InviteUnifiedSheet(onChatCreated: { newRoom in
                     onChatSelected(newRoom)
+                }, onJoined: {
+                    // QR受諾後に必要があれば更新
+                }, onOpenQR: {
+                    // 先に自分を閉じてからQRを開く（排他）
+                    showInviteModal = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        showQRScanner = true
+                    }
+                })
+            }
+            .sheet(isPresented: $showQRScanner) {
+                QRScannerSheet(isPresented: $showQRScanner) {
+                    // 受諾後にアップデート
+                    MessageSyncService.shared.checkForUpdates()
                 }
             }
-            .sheet(isPresented: $showQRInvite) {
-                InviteModalView { newRoom in
-                    onChatSelected(newRoom)
-                }
+            .task(id: uniqueChatRooms.map(\.roomID).joined(separator: ",")) {
+                await prefetchMissingDisplayNames()
             }
     }
     
@@ -104,7 +163,7 @@ struct ChatListView: View {
                 emptyStateView
             } else {
                 List {
-                    ForEach(chatRooms, id: \.id) { chatRoom in
+                    ForEach(uniqueChatRooms, id: \.roomID) { chatRoom in
                         Button {
                             // セルタップ時にコールバック（アニメーション付き）
                             withAnimation(.easeInOut(duration: 0.2)) {
@@ -115,7 +174,7 @@ struct ChatListView: View {
                         } label: {
                             ChatRowView(
                                 chatRoom: chatRoom,
-                                avatarView: avatarView(for: chatRoom.remoteUserID, displayText: chatRoom.displayName?.prefix(1) ?? chatRoom.remoteUserID.prefix(1))
+                                avatarView: avatarView(for: chatRoom)
                             )
                         }
                         .buttonStyle(.plain)
@@ -123,11 +182,11 @@ struct ChatListView: View {
                     .onDelete(perform: deleteChatRooms)
                 }
                 .listStyle(.plain)
-                .animation(.easeInOut(duration: 0.2), value: chatRooms.count)
+                .animation(.easeInOut(duration: 0.2), value: uniqueChatRooms.count)
             }
         }
     }
-    
+
     private var emptyStateView: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -149,7 +208,7 @@ struct ChatListView: View {
             
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    showQRInvite = true
+                    showInviteModal = true
                 }
             } label: {
                 HStack(spacing: 8) {
@@ -167,16 +226,69 @@ struct ChatListView: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 40)
     }
-    
-    
-    
+
+    // MARK: - Profile Prefetch
+    private func roomsMissingDisplayName() -> [ChatRoom] {
+        uniqueChatRooms.filter { room in
+            let name = room.displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return name.isEmpty
+        }
+    }
+
+    private func prefetchMissingDisplayNames() async {
+        if isPrefetchingProfiles { return }
+        isPrefetchingProfiles = true
+        defer { isPrefetchingProfiles = false }
+
+        let targets = roomsMissingDisplayName()
+        guard targets.isEmpty == false else { return }
+        log("ChatList: prefetch profiles start missing=\(targets.count)", category: "ChatListView")
+
+        for room in targets {
+            let uid = room.remoteUserID
+            // 空UIDはフェッチしない（診断ログのみ）
+            if uid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                log("ChatList: skip profile fetch (empty uid) room=\(room.roomID)", category: "ChatListView")
+                continue
+            }
+            do {
+                // 共有ゾーンの参加者プロフィールを優先
+                let shared = try await CloudKitChatManager.shared.fetchParticipantProfile(userID: uid, roomID: room.roomID)
+                var nameToUse: String? = shared.name
+                var avatarToUse: Data? = shared.avatarData
+                if (nameToUse == nil || nameToUse!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                    // フォールバック：従来のprivateプロフィール
+                    if let priv = try? await CloudKitChatManager.shared.fetchProfile(userID: uid) {
+                        nameToUse = priv.name
+                        if avatarToUse == nil { avatarToUse = priv.avatarData }
+                    }
+                }
+                await MainActor.run {
+                    if let name = nameToUse, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        room.displayName = name
+                    }
+                    if let data = avatarToUse, !data.isEmpty {
+                        room.avatarData = data
+                    }
+                }
+                let nm = nameToUse?.trimmingCharacters(in: .whitespacesAndNewlines)
+                log("ChatList: profile ok uid=\(uid) name=\(nm?.isEmpty == false ? nm! : "nil")", category: "ChatListView")
+            } catch {
+                log("ChatList: profile failed uid=\(uid) err=\(error)", category: "ChatListView")
+            }
+        }
+
+        log("ChatList: prefetch profiles done", category: "ChatListView")
+    }
+
     private func deleteChatRooms(at offsets: IndexSet) {
         withAnimation(.easeInOut(duration: 0.3)) {
-            for index in offsets {
-                let room = chatRooms[index]
+            let targets = offsets.map { uniqueChatRooms[$0] }
+            for room in targets {
                 // 共有の無効化（オーナーならゾーン削除、参加者なら離脱）
                 Task { await CloudKitChatManager.shared.revokeShareAndDeleteIfNeeded(roomID: room.roomID) }
                 modelContext.delete(room)
+                log("ChatList: deleted room locally and requested CloudKit revoke room=\(room.roomID)", category: "ChatListView")
             }
         }
     }
@@ -186,8 +298,8 @@ struct ChatListView: View {
     // アバター形状をシャッフル（ユーザーIDに基づいて一貫性を保つ）
     @ViewBuilder
     private func avatarView(for userID: String, displayText: Substring) -> some View {
-        let hash = abs(userID.hashValue)
-        let shapeIndex = hash % 5
+        let shapeIndex = CloudKitChatManager.shared.getCachedAvatarShapeIndex(for: userID)
+            ?? CloudKitChatManager.shared.stableShapeIndex(for: userID)
         
         Group {
             switch shapeIndex {
@@ -243,7 +355,44 @@ struct ChatListView: View {
         }
         .frame(width: 60, height: 60)
     }
+
+    // 画像アバター優先版（表示名/IDからのイニシャルにフォールバック）
+    @ViewBuilder
+    private func avatarView(for room: ChatRoom) -> some View {
+        if let data = room.avatarData, let image = UIImage(data: data) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 60, height: 60)
+                .clipShape(Circle())
+                .overlay(Circle().stroke(Color.gray.opacity(0.2), lineWidth: 1))
+        } else {
+            let displayText: Substring = room.displayName?.prefix(1) ?? room.remoteUserID.prefix(1)
+            avatarView(for: room.remoteUserID, displayText: displayText)
+        }
+    }
     
+}
+
+// MARK: - 重複検出ログ（診断用）
+extension ChatListView {
+    fileprivate func debugLogDuplicateChatRooms(_ rooms: [ChatRoom]) {
+        // roomID単位の重複（本来はありえない想定）
+        let byRoomID = Dictionary(grouping: rooms, by: { $0.roomID })
+        let dupRoomIDs = byRoomID.filter { $0.value.count > 1 }
+        if !dupRoomIDs.isEmpty {
+            let ids = dupRoomIDs.keys.joined(separator: ", ")
+            log("⚠️ Duplicate ChatRoom entries detected for roomID(s): [\(ids)]", category: "ChatListView")
+        }
+
+        // 同じ相手(remoteUserID)に対する複数ルーム（仕様上は起こり得るが診断用に出力）
+        let byRemote = Dictionary(grouping: rooms, by: { $0.remoteUserID })
+        let dupRemote = byRemote.filter { !$0.key.isEmpty && $0.value.count > 1 }
+        if !dupRemote.isEmpty {
+            let list = dupRemote.map { "\($0.key): \($0.value.count) rooms" }.joined(separator: ", ")
+            log("ℹ️ Multiple ChatRooms found for same remoteUserID(s): [\(list)]", category: "ChatListView")
+        }
+    }
 }
 
 // MARK: - パフォーマンス最適化のための個別チャット行コンポーネント
@@ -302,7 +451,8 @@ struct ChatRowView: View {
 }
 
 struct ChatListVideoLogoView: View {
-    @State private(set) var player: AVPlayer?
+    @State private(set) var player: AVQueuePlayer?
+    @State private var looper: AVPlayerLooper?
     @State private(set) var videoAspectRatio: CGFloat = 1.0
     @State private(set) var hasPlayedOnce = false
     let size: CGFloat
@@ -325,20 +475,25 @@ struct ChatListVideoLogoView: View {
         .frame(width: size, height: size)
         .clipped()
         .onAppear {
-            // ページ遷移時に一度だけ再生（パフォーマンス最適化）
+            // ページ遷移時に一度だけ初期化（再生はレイヤー準備後に自動）
             if !hasPlayedOnce {
                 setupPlayer()
-                startPlayback()
                 hasPlayedOnce = true
             } else if let player = player {
-                // 既に初期化済みの場合は単に再生のみ
                 player.seek(to: .zero)
-                player.play()
             }
         }
         .onDisappear {
             // メモリ最適化: 非表示時は一時停止
             player?.pause()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            // 復帰時の再表示
+            if let player = player {
+                player.seek(to: .zero)
+            } else {
+                setupPlayer()
+            }
         }
     }
     
@@ -350,15 +505,19 @@ struct ChatListVideoLogoView: View {
             return
         }
         
-        let asset = AVAsset(url: videoURL)
-        let playerItem = AVPlayerItem(asset: asset)
-        let newPlayer = AVPlayer(playerItem: playerItem)
-        newPlayer.isMuted = true
-        newPlayer.actionAtItemEnd = .pause // 終了時は停止
-        
+        let asset = AVURLAsset(url: videoURL)
+        let item = AVPlayerItem(
+            asset: asset,
+            automaticallyLoadedAssetKeys: ["playable", "tracks", "duration"]
+        )
+        let queue = AVQueuePlayer()
+        queue.isMuted = true
+        queue.actionAtItemEnd = .none
         // メモリ最適化：バックグラウンド時は自動停止
-        newPlayer.preventsDisplaySleepDuringVideoPlayback = false
-        player = newPlayer
+        queue.preventsDisplaySleepDuringVideoPlayback = false
+        let looper = AVPlayerLooper(player: queue, templateItem: item)
+        self.player = queue
+        self.looper = looper
         
         // Get video aspect ratio (バックグラウンドで実行)
         Task.detached(priority: .background) {
@@ -405,22 +564,40 @@ struct ChatListVideoLogoView: View {
         }
         
         player.seek(to: .zero)
-        player.play()
     }
 }
 
 struct ChatListVideoPlayerView: UIViewRepresentable {
     let player: AVPlayer
     let aspectRatio: CGFloat
-    
+
+    class Coordinator {
+        var readyObservation: NSKeyValueObservation?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
+        view.backgroundColor = .clear
+
         let playerLayer = AVPlayerLayer(player: player)
         playerLayer.videoGravity = .resizeAspect
+        playerLayer.needsDisplayOnBoundsChange = true
+        // 背景プレースホルダで完全透明フレーム時の視認性を確保
+        playerLayer.backgroundColor = UIColor.clear.cgColor
         view.layer.addSublayer(playerLayer)
+
+        // 初回フレームが描画可能になってから再生
+        context.coordinator.readyObservation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { layer, _ in
+            if layer.isReadyForDisplay {
+                self.player.seek(to: .zero)
+                self.player.play()
+            }
+        }
         return view
     }
-    
+
     func updateUIView(_ uiView: UIView, context: Context) {
         if let playerLayer = uiView.layer.sublayers?.first as? AVPlayerLayer {
             playerLayer.frame = uiView.bounds

@@ -29,7 +29,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             // CloudKitChatManagerの初期化と共有データベースサブスクリプション設定
             _ = CloudKitChatManager.shared
             try? await CloudKitChatManager.shared.setupSharedDatabaseSubscriptions()
-            log("CloudKitChatManager initialized with shared DB subscriptions", category: "AppDelegate")
+            try? await CloudKitChatManager.shared.setupPrivateDatabaseSubscription()
+            log("CloudKitChatManager initialized with DB subscriptions (shared/private)", category: "AppDelegate")
+
+            // Start CKSyncEngine (iOS 17+)
+            if #available(iOS 17.0, *) {
+                await CKSyncEngineManager.shared.start()
+                log("CKSyncEngine started (private/shared)", category: "AppDelegate")
+            }
         }
         
         // Initialize MessageSyncService (iOS 17+ 前提)
@@ -129,6 +136,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 let roomID = zoneID.zoneName
                 log("Targeted sync via CKQueryNotification for roomID: \(roomID)", category: "AppDelegate")
                 MessageSyncService.shared.checkForUpdates(roomID: roomID)
+                // P2Pシグナリングも即時確認（ゾーン変化＝RTCSignalの可能性）
+                P2PController.shared.onZoneChanged(roomID: roomID)
                 return .newData
             }
             if let zoneNotif = cloudKitNotification as? CKRecordZoneNotification,
@@ -136,11 +145,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 let roomID = zoneID.zoneName
                 log("Targeted sync via CKRecordZoneNotification for roomID: \(roomID)", category: "AppDelegate")
                 MessageSyncService.shared.checkForUpdates(roomID: roomID)
+                P2PController.shared.onZoneChanged(roomID: roomID)
                 return .newData
             }
             // Database通知など（共有DB）は対象不明 → 全体チェック
             MessageSyncService.shared.checkForUpdates()
             log("Triggered MessageSyncService global update (database notification)", category: "AppDelegate")
+            // 共有DBのDatabase通知には 'ck.met.zid' が含まれることがあるため、可能ならP2Pにも転送
+            if let ck = userInfo["ck"] as? [String: Any],
+               let met = ck["met"] as? [String: Any],
+               let zid = met["zid"] as? String, !zid.isEmpty {
+                P2PController.shared.onZoneChanged(roomID: zid)
+            }
             return .newData
         }
         

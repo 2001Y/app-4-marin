@@ -33,7 +33,7 @@ struct AudioSessionManager {
         previousCategory = avSession.category
         previousOptions = avSession.categoryOptions
         do {
-            try avSession.setCategory(.playAndRecord, options: [.defaultToSpeaker, .allowBluetooth])
+            try avSession.setCategory(.playAndRecord, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try avSession.setActive(true, options: [])
         } catch {
             log("Failed to elevate category - \(error)", category: "AudioSessionManager")

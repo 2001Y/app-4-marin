@@ -4,21 +4,16 @@ import UIKit
 import SwiftUI
 
 /// CloudKit招待URL管理クラス
-/// UICloudSharingControllerを使用してチャットルームの招待機能を提供
+/// CKShareのURLを生成してシェアシートへ橋渡しする
 @MainActor
-class InvitationManager: NSObject, ObservableObject {
+class InvitationManager: NSObject, ObservableObject, UICloudSharingControllerDelegate {
     static let shared = InvitationManager()
     
     private let container = CloudKitChatManager.shared.containerForSharing
     private let chatManager = CloudKitChatManager.shared
     
-    @Published var isShowingShareSheet = false
     @Published var lastInvitationURL: URL?
     @Published var lastError: Error?
-    
-    // 現在処理中の共有情報
-    private var currentShare: CKShare?
-    private var currentRoomRecord: CKRecord?
     
     private override init() {
         super.init()
@@ -26,118 +21,88 @@ class InvitationManager: NSObject, ObservableObject {
     
     // MARK: - Public API
     
-    /// チャットルームの招待URLを生成してシェアシートを表示
-    func createAndShareInvitation(
-        for remoteUserID: String,
-        from viewController: UIViewController
-    ) async {
-        do {
-            log("Creating invitation for user: \(remoteUserID)", category: "InvitationManager")
-            
-            // 1. 共有チャットルームを作成（ゾーン名=roomID を先に確定）
-            let roomID = "chat-\(UUID().uuidString.prefix(8))"
-            let share = try await chatManager.createSharedChatRoom(roomID: roomID, invitedUserID: remoteUserID)
-            let roomRecord = try await chatManager.getRoomRecord(roomID: roomID)
-            
-            // 2. 現在の共有情報を保存
-            currentRoomRecord = roomRecord
-            currentShare = share
-            
-            // 3. UICloudSharingControllerを表示
-            await presentCloudSharingController(
-                share: share,
-                container: container,
-                from: viewController
-            )
-            
-            log("Invitation created successfully", category: "InvitationManager")
-            
-        } catch {
-            log("Failed to create invitation: \(error)", category: "InvitationManager")
-            lastError = error
-        }
-    }
-    
-    /// 既存のチャットルームの招待URLを再共有
+    /// 既存チャットルームの共有URLを取得してシェアシートを表示
     func reshareExistingInvitation(
         roomID: String,
         from viewController: UIViewController
     ) async {
+        lastError = nil
         do {
-            log("Resharing existing invitation for room: \(roomID)", category: "InvitationManager")
-            
-            // 1. 既存のルームレコードを取得
-            let roomRecord = try await chatManager.getRoomRecord(roomID: roomID)
-            
-            // 2. 関連するCKShareを検索
-            let share = try await findShareForRoom(roomRecord: roomRecord)
-            
-            // 3. 現在の共有情報を保存
-            currentRoomRecord = roomRecord
-            currentShare = share
-            
-            // 4. UICloudSharingControllerを表示
-            await presentCloudSharingController(
-                share: share,
-                container: container,
-                from: viewController
-            )
-            
-            log("Existing invitation reshared successfully", category: "InvitationManager")
-            
+            let descriptor = try await chatManager.fetchShare(for: roomID)
+            lastInvitationURL = descriptor.shareURL
+            presentCloudShareController(descriptor: descriptor, from: viewController)
+            log("✅ [InvitationManager] Reshared invitation roomID=\(roomID)", category: "InvitationManager")
         } catch {
-            log("Failed to reshare invitation: \(error)", category: "InvitationManager")
             lastError = error
+            log("❌ [InvitationManager] Failed to reshare invitation roomID=\(roomID): \(error)", category: "InvitationManager")
+        }
+    }
+    
+    /// 新しいチャットルームを作成し、共有URLを生成してシェアシートを表示
+    func createAndShareInvitation(
+        for contactIdentifier: String,
+        from viewController: UIViewController
+    ) async {
+        lastError = nil
+        let trimmed = contactIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            lastError = CloudKitChatManager.CloudKitChatError.invalidUserID
+            log("⚠️ [InvitationManager] Empty invitee identifier", category: "InvitationManager")
+            return
+        }
+        do {
+            let roomID = CKSchema.makeZoneName()
+            let descriptor = try await chatManager.createSharedChatRoom(roomID: roomID, invitedUserID: trimmed)
+            lastInvitationURL = descriptor.shareURL
+            presentCloudShareController(descriptor: descriptor, from: viewController)
+            log("✅ [InvitationManager] Created invitation roomID=\(roomID)", category: "InvitationManager")
+        } catch {
+            lastError = error
+            log("❌ [InvitationManager] Failed to create invitation: \(error)", category: "InvitationManager")
         }
     }
     
     /// 招待URLから直接チャットルームに参加（iOS 17+ 前提: モダンAPIのみ）
     func acceptInvitation(from url: URL) async -> Bool {
         do {
-            log("Accepting invitation from URL: \(url)", category: "InvitationManager")
+            log("⬇️ [InvitationManager] Accepting invitation from URL: \(url)", category: "InvitationManager")
             let metadata = try await container.shareMetadata(for: url)
             let share = try await container.accept(metadata)
-            log("Successfully accepted share: \(share.recordID)", category: "InvitationManager")
+            log("✅ [InvitationManager] Accepted share: \(share.recordID.recordName)", category: "InvitationManager")
             return true
         } catch {
-            log("Failed to accept invitation: \(error)", category: "InvitationManager")
+            log("❌ [InvitationManager] Failed to accept invitation: \(error)", category: "InvitationManager")
             lastError = error
             return false
         }
     }
-    
-    // MARK: - Private Methods
-    
-    /// UICloudSharingControllerを表示
-    private func presentCloudSharingController(
-        share: CKShare,
-        container: CKContainer,
-        from viewController: UIViewController
-    ) async {
-        // SwiftUIの統一モーダル（EnhancedCloudSharingView）で表示
-        let hosting = UIHostingController(
-            rootView: EnhancedCloudSharingView(
-                share: share,
-                container: container,
-                onDismiss: { viewController.dismiss(animated: true) }
-            )
-        )
-        hosting.modalPresentationStyle = .formSheet
-        viewController.present(hosting, animated: true)
-    }
-    
-    /// ルームレコードに関連するCKShareを検索
-    private func findShareForRoom(roomRecord: CKRecord) async throws -> CKShare {
-        // ゾーン共有に統一: ゾーン内の cloudkit.share を検索
-        let zoneID = roomRecord.recordID.zoneID
-        let query = CKQuery(recordType: "cloudkit.share", predicate: NSPredicate(value: true))
-        let (results, _) = try await container.privateCloudDatabase.records(matching: query, inZoneWith: zoneID)
-        for (_, result) in results {
-            if let share = try? result.get() as? CKShare {
-                return share
+
+    /// ローカルに保持している招待参照（URL）が既に無効な場合にクリーンアップ（冪等）
+    func cleanupOrphanedInviteReferences() async {
+        guard let url = lastInvitationURL else { return }
+        do {
+            _ = try await container.shareMetadata(for: url)
+        } catch {
+            if let ck = error as? CKError, ck.code == .unknownItem {
+                lastInvitationURL = nil
+                log("🧹 [InvitationManager] Removed orphaned local invite reference (unknownItem)", category: "InvitationManager")
+            } else {
+                log("⚠️ [InvitationManager] Failed to validate local invite reference: \(error)", category: "InvitationManager")
             }
         }
-        throw InvitationError.shareNotFound
+    }
+    
+    // MARK: - Helpers
+    
+    private func presentCloudShareController(
+        descriptor: CloudKitChatManager.ChatShareDescriptor,
+        from viewController: UIViewController
+    ) {
+        let controller = UICloudSharingController(share: descriptor.share, container: container)
+        controller.availablePermissions = [.allowReadWrite, .allowPrivate]
+        controller.delegate = self
+        controller.modalPresentationStyle = .formSheet
+        viewController.present(controller, animated: true)
     }
     
     /// SwiftUI用のビューコントローラーを取得
@@ -148,74 +113,6 @@ class InvitationManager: NSObject, ObservableObject {
         }
         
         return window.rootViewController?.topMostViewController()
-    }
-}
-
-// MARK: - UICloudSharingControllerDelegate
-
-extension InvitationManager: UICloudSharingControllerDelegate {
-    
-    func cloudSharingController(
-        _ csc: UICloudSharingController,
-        failedToSaveShareWithError error: Error
-    ) {
-        log("Failed to save share: \(error)", category: "InvitationManager")
-        lastError = error
-        csc.dismiss(animated: true)
-    }
-    
-    func itemTitle(for csc: UICloudSharingController) -> String? {
-        return "4-Marinチャット招待"
-    }
-    
-    func itemThumbnailData(for csc: UICloudSharingController) -> Data? {
-        // アプリアイコンのサムネイルデータを返す（オプション）
-        return nil
-    }
-    
-    func itemType(for csc: UICloudSharingController) -> String? {
-        return "com.formarin.chat.invitation"
-    }
-    
-    func cloudSharingControllerDidSaveShare(_ csc: UICloudSharingController) {
-        log("Share saved successfully", category: "InvitationManager")
-        
-        // 共有URLを保存
-        if let share = currentShare {
-            lastInvitationURL = share.url
-        }
-        
-        csc.dismiss(animated: true)
-    }
-    
-    func cloudSharingControllerDidStopSharing(_ csc: UICloudSharingController) {
-        log("Sharing stopped", category: "InvitationManager")
-        csc.dismiss(animated: true)
-    }
-}
-
-// MARK: - Error Types
-
-enum InvitationError: LocalizedError {
-    case roomNotFound
-    case shareNotFound
-    case invalidURL
-    case shareAcceptanceFailed
-    case userNotAuthenticated
-    
-    var errorDescription: String? {
-        switch self {
-        case .roomNotFound:
-            return "チャットルームが見つかりません"
-        case .shareNotFound:
-            return "共有情報が見つかりません"
-        case .invalidURL:
-            return "無効な招待URLです"
-        case .shareAcceptanceFailed:
-            return "招待の受け入れに失敗しました"
-        case .userNotAuthenticated:
-            return "ユーザー認証が必要です"
-        }
     }
 }
 
@@ -239,6 +136,23 @@ extension UIViewController {
     }
 }
 
-// MARK: - SwiftUI Integration
+// MARK: - UICloudSharingControllerDelegate
 
-// InvitationView は未使用のため削除しました（CloudSharingControllerView/EnhancedCloudSharingView を使用）
+extension InvitationManager {
+    func cloudSharingControllerDidSaveShare(_ csc: UICloudSharingController) {
+        log("✅ [InvitationManager] Share dialog completed", category: "InvitationManager")
+    }
+
+    func cloudSharingControllerDidStopSharing(_ csc: UICloudSharingController) {
+        log("ℹ️ [InvitationManager] Share dialog dismissed", category: "InvitationManager")
+    }
+
+    func cloudSharingController(_ csc: UICloudSharingController, failedToSaveShareWithError error: Error) {
+        lastError = error
+        log("❌ [InvitationManager] Share dialog failed: \(error)", category: "InvitationManager")
+    }
+
+    func itemTitle(for csc: UICloudSharingController) -> String? {
+        "4-Marinチャット"
+    }
+}

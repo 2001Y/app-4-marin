@@ -45,6 +45,8 @@ struct forMarinApp: App {
         // 一度だけ初期化
         sharedModelContainer = container
 
+        ModelContainerBroker.shared.register(container)
+
         // アラート表示用 State を初期化（初回起動時は表示しない）
         self._showDBResetAlert = State(initialValue: didReset && !isFirstLaunch)
         
@@ -66,7 +68,6 @@ struct forMarinApp: App {
             log("CloudKit initialization completed", category: "forMarinApp")
         }
     }
-
     /// 既存ストアをそのまま開き、失敗時のみ削除してリセット。
     /// - Parameter resetOccurred: リセットが行われた場合 true がセットされる
     /// - Returns: 正常に作成できたコンテナ（失敗時は nil）
@@ -131,10 +132,11 @@ struct forMarinApp: App {
 struct RootView: View {
     // チャット一覧を取得（最後のメッセージ日時で降順）
     @Query(sort: \ChatRoom.lastMessageDate, order: .reverse) private var chatRooms: [ChatRoom]
+    // 表示名（CloudKitから取得して判定）
+    @State private var myDisplayNameCloud: String? = nil
     // NavigationStack 用のパス
     @State private var navigationPath = NavigationPath()
-    // 初回アプリ起動判定（単一チャット時の自動遷移に使用）
-    @State private var isFirstLaunch = true
+    @State private var lastOpenedChatRoomID: String? = nil
     // ウェルカムモーダルの表示管理
     @AppStorage("hasShownWelcome") private var hasShownWelcomeStorage = false
     @State private var shouldShowWelcome: Bool
@@ -153,11 +155,11 @@ struct RootView: View {
     // URL管理
     @StateObject private var urlManager = URLManager.shared
     // 特徴ページの初回表示管理
-    @AppStorage("hasSeenFeatures") private var hasSeenFeatures: Bool = false
     
     init() {
         // ウェルカムモーダルの初期表示判定をストレージから読み取り
         self._shouldShowWelcome = State(initialValue: !UserDefaults.standard.bool(forKey: "hasShownWelcome"))
+        // Cloud名の取得は .task で行う（init内のEscapingクロージャでselfをキャプチャしない）
     }
 
     var body: some View {
@@ -169,10 +171,28 @@ struct RootView: View {
                         ChatView(chatRoom: room)
                     }
             }
+            .task(id: myDisplayNameCloud == nil) {
+                if myDisplayNameCloud == nil {
+                    let name = await CloudKitChatManager.shared.fetchMyDisplayNameFromCloud()
+                    await MainActor.run { self.myDisplayNameCloud = name }
+                }
+            }
+            // 表示名更新の通知を受けて、即座にルートの表示判定を切り替える
+            .onReceive(NotificationCenter.default.publisher(for: .displayNameUpdated)) { notif in
+                if let name = notif.userInfo?["name"] as? String {
+                    myDisplayNameCloud = name
+                } else {
+                    // name未添付ならクラウド再フェッチ
+                    Task {
+                        let name = await CloudKitChatManager.shared.fetchMyDisplayNameFromCloud()
+                        await MainActor.run { self.myDisplayNameCloud = name }
+                    }
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .openChatRoom)) { notif in
                 // QR読み取りなどからの遷移要求を受け取って対象チャットへ遷移
                 if let room = notif.userInfo?["room"] as? ChatRoom {
-                    navigationPath.append(room)
+                    openChat(room)
                     isLoadingOverlayVisible = false
                 } else if let roomID = notif.userInfo?["roomID"] as? String {
                     do {
@@ -180,24 +200,29 @@ struct RootView: View {
                             predicate: #Predicate<ChatRoom> { $0.roomID == roomID }
                         )
                         if let found = try? modelContext.fetch(descriptor).first {
-                            navigationPath.append(found)
+                            openChat(found)
                             isLoadingOverlayVisible = false
                         }
                     }
                 }
             }
             // ローディングの表示指示（通知名は生文字列で最小実装）
-            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("showGlobalLoading"))) { notif in
+            .onReceive(NotificationCenter.default.publisher(for: .showGlobalLoading)) { notif in
                 loadingOverlayTitle = (notif.userInfo?["title"] as? String) ?? nil
                 isLoadingOverlayVisible = true
                 log("UI: showGlobalLoading (title=\(loadingOverlayTitle ?? "nil"))", category: "UI")
             }
-            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("hideGlobalLoading"))) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .hideGlobalLoading)) { _ in
                 isLoadingOverlayVisible = false
                 log("UI: hideGlobalLoading", category: "UI")
             }
             .onChange(of: scenePhase) { newPhase, _ in
                 if newPhase == .active {
+                    Task {
+                        if #available(iOS 17.0, *) {
+                            _ = await CKSyncEngineManager.shared.fetchChanges(reason: "scene:active")
+                        }
+                    }
                     Task { @MainActor in
                         await CloudKitChatManager.shared.bootstrapOwnedRooms(modelContext: modelContext)
                         await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
@@ -214,11 +239,20 @@ struct RootView: View {
                     }
                     shouldShowWelcome = false
                 }
-                
-                if isFirstLaunch, let first = chatRooms.first, chatRooms.count == 1 {
-                    navigationPath.append(first)
+
+                // 起動直後のみ自動オープン（フラグは使わず、初回タスクで一度だけ評価）
+            }
+            .task {
+                do {
+                    try await PermissionManager.shared.requestCameraPermissionIfNeeded()
+                } catch {
+                    log("Camera permission request failed: \(error)", category: "Permissions")
                 }
-                isFirstLaunch = false
+            }
+            .task {
+                if chatRooms.count == 1 && navigationPath.isEmpty {
+                    openChat(chatRooms[0])
+                }
             }
             
             // ウェルカムモーダル（経緯）オーバーレイ
@@ -247,6 +281,13 @@ struct RootView: View {
                 .accessibilityLabel(Text(loadingOverlayTitle ?? "読み込み中"))
             }
         }
+        .onChange(of: navigationPath.count) { oldCount, newCount in
+            guard oldCount != newCount else { return }
+            if newCount == 0, let roomID = lastOpenedChatRoomID {
+                P2PController.shared.closeIfCurrent(roomID: roomID, reason: "navigation-pop")
+                lastOpenedChatRoomID = nil
+            }
+        }
         // CloudKitリセットアラート
         .alert("CloudKitデータをリセットしました", isPresented: $showCloudKitResetAlert) {
             Button("OK", role: .cancel) { 
@@ -256,6 +297,9 @@ struct RootView: View {
             Text("旧形式のCloudKitデータが検出されたため、クラウドデータを初期化しました。新しい共有チャット機能をお楽しみください。")
         }
         .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .background || newPhase == .inactive {
+                P2PController.shared.closeIfCurrent(roomID: lastOpenedChatRoomID, reason: "scenePhase-\(newPhase)")
+            }
             if newPhase == .background {
                 // バックグラウンドに移行時にタスクをスケジュール（テスト中は除く）
                 BackgroundTaskManager.shared.scheduleNextRefreshIfNotInTestMode()
@@ -275,20 +319,15 @@ struct RootView: View {
             if let error = cloudKitManager.lastError {
                 log("CloudKit error detected: \(error)", category: "RootView")
                 // 特定のエラーの場合はリセットアラートを表示
-                if let ckError = error as? CloudKitChatError,
+                if let ckError = error as? CloudKitChatManager.CloudKitChatError,
                    case .roomNotFound = ckError {
                     showCloudKitResetAlert = true
                 }
             }
         }
-        .onChange(of: cloudKitManager.hasPerformedReset) { _, hasReset in
-            // CloudKitリセット実行の監視
-            if hasReset {
-                log("CloudKit reset detected, showing alert", category: "RootView")
-                showCloudKitResetAlert = true
-                // フラグをリセット（一度だけ表示するため）
-                cloudKitManager.hasPerformedReset = false
-            }
+        .onReceive(NotificationCenter.default.publisher(for: .cloudKitResetPerformed)) { _ in
+            log("CloudKit reset detected, showing alert", category: "RootView")
+            showCloudKitResetAlert = true
         }
         .onOpenURL { url in
             // 🌟 [IDEAL SHARING] CloudKit招待URLとレガシー招待URLの処理
@@ -304,24 +343,20 @@ struct RootView: View {
     // MARK: - ルートごとのコンテンツ
     @ViewBuilder
     private var contentView: some View {
-        // 初回は特徴ページをルート表示（名前の有無では判定しない）
-        if hasSeenFeatures == false {
+        // 表示名（Cloud）未設定ならウェルカム（特徴）ページを表示
+        if (myDisplayNameCloud?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
             FeaturesPage(
                 showWelcomeModalOnAppear: false,
                 onChatCreated: { room in
-                    // チャット作成後にリスト/チャットへ遷移
-                    hasSeenFeatures = true
-                    navigationPath.append(room)
+                    openChat(room)
                 },
                 onDismiss: {
                     // 読み込み完了などの合図でチャットリストへ
-                    hasSeenFeatures = true
                 }
             )
         } else {
-            // それ以外はチャットリストをルート表示
             ChatListView { selected in
-                navigationPath.append(selected)
+                openChat(selected)
             }
         }
     }
@@ -358,7 +393,7 @@ struct RootView: View {
             log("✅ [IDEAL SHARING] Accepted CloudKit share via in-app fallback", category: "RootView")
             // 共有ゾーンからローカルをブートストラップして一覧に反映
             await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
-            await MainActor.run { hasSeenFeatures = true }
+            // ウェルカム表示判定は部屋数で行うため、フラグ更新は不要
         } else {
             log("⚠️ [IDEAL SHARING] In-app acceptance failed (OS may still complete later)", category: "RootView")
         }
@@ -377,9 +412,7 @@ struct RootView: View {
         if let newRoom = await urlManager.createChatFromInvite(userID: userID, modelContext: modelContext) {
             await MainActor.run {
                 log("Successfully created chat from invite", category: "RootView")
-                hasSeenFeatures = true
-                // 新しいチャットルームに遷移
-                navigationPath.append(newRoom)
+                openChat(newRoom)
             }
         } else {
             await MainActor.run {
@@ -388,4 +421,14 @@ struct RootView: View {
             }
         }
     }
+
+    // MARK: - Unified Chat Open
+    private func openChat(_ room: ChatRoom) {
+        // 共通ロジック: 未読数クリア + 画面遷移（ログ付き）
+        log("UI: openChat room=\(room.roomID)", category: "RootView")
+        room.unreadCount = 0
+        lastOpenedChatRoomID = room.roomID
+        navigationPath.append(room)
+    }
+    
 }

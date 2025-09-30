@@ -220,9 +220,9 @@ class BackgroundTaskManager {
             formatter.timeStyle = .medium
             formatter.locale = Locale.current
             let modeText = isTestMode ? "[テスト]" : "[通常]"
-            log("\(modeText) バックグラウンドタスクをスケジュール: \(formatter.string(from: nextRunDate))", category: "App")
+            log("\(modeText) バックグラウンドタスクをスケジュール: \(formatter.string(from: nextRunDate))", category: "bg.task")
         } catch {
-            log("バックグラウンドタスクのスケジュールに失敗: \(error)", category: "App")
+            log("バックグラウンドタスクのスケジュールに失敗: \(error)", category: "bg.task")
         }
     }
     
@@ -245,12 +245,17 @@ class BackgroundTaskManager {
                 scheduleNextRefreshIfNotInTestMode()
             }
         }
-        
-        log("バックグラウンドタスク実行開始 - \(Date())", category: "Debug")
-        
+
+        log("バックグラウンドタスク実行開始 - \(Date())", category: "bg.task")
+
+        if #available(iOS 17.0, *) {
+            let triggered = await CKSyncEngineManager.shared.fetchChanges(reason: "bg:app_refresh")
+            log("[BG] CKSyncEngine fetch triggered=\(triggered)", category: "CKSyncEngine")
+        }
+
         await MainActor.run {
-            log("Thread: \(Thread.current)", category: "Debug")
-            log("アプリ状態: \(UIApplication.shared.applicationState.rawValue)", category: "Debug")
+            log("Thread: \(Thread.current)", category: "bg.task")
+            log("アプリ状態: \(UIApplication.shared.applicationState.rawValue)", category: "bg.task")
             let connectivityManager = ConnectivityManager.shared
             let offline = connectivityManager.isCurrentlyOffline()
             let lastOnline = connectivityManager.lastOnlineAt()
@@ -258,27 +263,27 @@ class BackgroundTaskManager {
             let longEnough = offlineDuration >= OfflinePolicy.minSecondsToNotify
             let debugMode = UserDefaults.standard.bool(forKey: UserDefaultsKeys.debugNotificationsEnabled)
             
-            log("バックグラウンド実行 - オフライン: \(offline), 継続時間: \(offlineDuration)秒, デバッグモード: \(debugMode), テストモード: \(isInTestMode)", category: "Debug")
+            log("バックグラウンド実行 - オフライン: \(offline), 継続時間: \(offlineDuration)秒, デバッグモード: \(debugMode), テストモード: \(isInTestMode)", category: "bg.task")
             
             // デバッグモードでは常に通知、通常モードではオフラインかつ時間経過時のみ
             if debugMode || (offline && longEnough) {
                 Task {
-                    log("通知送信を開始", category: "Debug")
+                    log("通知送信を開始", category: "bg.task")
                     if debugMode {
                         let status = offline ? "オフライン" : "オンライン"
-                        log("デバッグ通知を送信: \(status)", category: "Debug")
+                        log("デバッグ通知を送信: \(status)", category: "bg.task")
                         await NotificationManager.shared.sendDebugNotification(
                             title: "バックグラウンドタスク実行",
                             body: "\(status) - 継続時間: \(Int(offlineDuration))秒"
                         )
                     } else {
-                        log("オフライン通知を送信", category: "Debug")
+                        log("オフライン通知を送信", category: "bg.task")
                         await NotificationManager.shared.notifyOfflineIfNeeded()
                     }
-                    log("通知送信完了", category: "Debug")
+                    log("通知送信完了", category: "bg.task")
                 }
             } else {
-                log("通知条件を満たさないためスキップ", category: "Debug")
+                log("通知条件を満たさないためスキップ", category: "bg.task")
             }
         }
     }

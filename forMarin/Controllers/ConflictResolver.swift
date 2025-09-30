@@ -9,7 +9,6 @@ class ConflictResolver: ObservableObject {
     
     enum ConflictResolutionStrategy {
         case lastWriterWins          // タイムスタンプベース（デフォルト）
-        case manualMerge            // 手動マージ（将来の拡張）
         case contentPreservation    // 内容保持優先
     }
     
@@ -33,8 +32,6 @@ class ConflictResolver: ObservableObject {
         case .contentPreservation:
             return resolveWithContentPreservation(localRecord: localRecord, serverRecord: serverRecord)
             
-        case .manualMerge:
-            return await resolveWithManualMerge(localRecord: localRecord, serverRecord: serverRecord)
         }
     }
     
@@ -49,17 +46,15 @@ class ConflictResolver: ObservableObject {
         case .contentPreservation:
             return resolveMessageWithContentPreservation(local: localMessage, server: serverMessage)
             
-        case .manualMerge:
-            // For now, fall back to LWW for messages
-            return localMessage.createdAt > serverMessage.createdAt ? localMessage : serverMessage
         }
     }
     
     // MARK: - Resolution Strategies
     
     private func resolveWithLastWriterWins(localRecord: CKRecord, serverRecord: CKRecord) -> CKRecord {
-        guard let localDate = localRecord["createdAt"] as? Date,
-              let serverDate = serverRecord["createdAt"] as? Date else {
+        // 現行スキーマは Message.timestamp を使用（フォールバックなし）
+        guard let localDate = localRecord["timestamp"] as? Date,
+              let serverDate = serverRecord["timestamp"] as? Date else {
             log("Unable to compare timestamps, using server record", category: "ConflictResolver")
             return serverRecord
         }
@@ -74,41 +69,17 @@ class ConflictResolver: ObservableObject {
     }
     
     private func resolveWithContentPreservation(localRecord: CKRecord, serverRecord: CKRecord) -> CKRecord {
-        // Merge strategy that preserves content changes
+        // 反応は正規化レコード（Reaction）へ移行済みのため本文のみを比較
         let mergedRecord = serverRecord.copy() as! CKRecord
-        
-        // Preserve local body changes if they exist and are different
-        if let localBody = localRecord["body"] as? String,
-           let serverBody = serverRecord["body"] as? String,
-           localBody != serverBody && !localBody.isEmpty {
-            mergedRecord["body"] = localBody as CKRecordValue
-            log("Preserved local body changes", category: "ConflictResolver")
+        if let localText = localRecord["text"] as? String,
+           let serverText = serverRecord["text"] as? String,
+           localText != serverText,
+           !localText.isEmpty {
+            mergedRecord["text"] = localText as CKRecordValue
+            log("Preserved local text changes", category: "ConflictResolver")
         }
-        
-        // Merge reactions (combine both)
-        let localReactions = localRecord["reactions"] as? String ?? ""
-        let serverReactions = serverRecord["reactions"] as? String ?? ""
-        let mergedReactions = mergeReactions(local: localReactions, server: serverReactions)
-        mergedRecord["reactions"] = mergedReactions as CKRecordValue
-        
-        log("Content preservation merge completed", category: "ConflictResolver")
+        log("Content preservation merge completed (reactions normalized)", category: "ConflictResolver")
         return mergedRecord
-    }
-    
-    private func resolveWithManualMerge(localRecord: CKRecord, serverRecord: CKRecord) async -> CKRecord {
-        // Create conflicted message for manual resolution
-        let conflictedMessage = ConflictedMessage(
-            recordID: localRecord.recordID.recordName,
-            localRecord: localRecord,
-            serverRecord: serverRecord,
-            conflictDetectedAt: Date()
-        )
-        
-        conflictedMessages.append(conflictedMessage)
-        log("Added message to manual conflict resolution queue", category: "ConflictResolver")
-        
-        // For now, use LWW as fallback
-        return resolveWithLastWriterWins(localRecord: localRecord, serverRecord: serverRecord)
     }
     
     private func resolveMessageWithContentPreservation(local: Message, server: Message) -> Message {
@@ -138,34 +109,6 @@ class ConflictResolver: ObservableObject {
     
     // MARK: - Manual Conflict Resolution
     
-    func resolveManualConflict(_ conflictedMessage: ConflictedMessage, chooseLocal: Bool) {
-        log("Manually resolving conflict: \(conflictedMessage.recordID)", category: "ConflictResolver")
-        
-        // Remove from pending conflicts
-        conflictedMessages.removeAll { $0.id == conflictedMessage.id }
-        
-        // Apply resolution (implementation would depend on integration with MessageStore)
-        let chosenRecord = chooseLocal ? conflictedMessage.localRecord : conflictedMessage.serverRecord
-        
-        // Notify observers about resolution
-        NotificationCenter.default.post(
-            name: .conflictResolved,
-            object: nil,
-            userInfo: [
-                "recordID": conflictedMessage.recordID,
-                "resolvedRecord": chosenRecord,
-                "chosenLocal": chooseLocal
-            ]
-        )
-        
-        log("Manual conflict resolved, chose \(chooseLocal ? "local" : "server") version", category: "ConflictResolver")
-    }
-    
-    func dismissConflict(_ conflictedMessage: ConflictedMessage) {
-        conflictedMessages.removeAll { $0.id == conflictedMessage.id }
-        log("Conflict dismissed: \(conflictedMessage.recordID)", category: "ConflictResolver")
-    }
-    
     // MARK: - Conflict Prevention
     
     /// Generates a deterministic record name to reduce conflicts
@@ -180,14 +123,14 @@ class ConflictResolver: ObservableObject {
         // Check required fields
         guard record["roomID"] as? String != nil,
               record["senderID"] as? String != nil,
-              record["createdAt"] as? Date != nil else {
+              ((record["timestamp"] as? Date) ?? record.creationDate) != nil else {
             log("Record validation failed: missing required fields", category: "ConflictResolver")
             return false
         }
         
         // Check that either body or asset exists
-        let hasBody = (record["body"] as? String)?.isEmpty == false
-        let hasAsset = record["asset"] as? CKAsset != nil
+        let hasBody = (record["text"] as? String)?.isEmpty == false
+        let hasAsset = record["attachment"] as? CKAsset != nil
         
         guard hasBody || hasAsset else {
             log("Record validation failed: no content", category: "ConflictResolver")
@@ -259,9 +202,4 @@ struct ConflictStatistics {
     }
 }
 
-// MARK: - Notifications
-
-extension Notification.Name {
-    static let conflictResolved = Notification.Name("ConflictResolved")
-    static let conflictDetected = Notification.Name("ConflictDetected")
-}
+// MARK: - Notifications（既存の Notification+Extras に寄せる方針のためローカル定義は削除）

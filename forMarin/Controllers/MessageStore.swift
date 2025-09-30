@@ -45,17 +45,12 @@ class MessageStore: ObservableObject {
     private let modelContext: ModelContext
     private let roomID: String
     private var cancellables = Set<AnyCancellable>()
+    private var notificationTokens: [NSObjectProtocol] = []
     // 添付がメッセージ本体より先に届いた場合の一時キャッシュ（recordName -> localPath）
     private var pendingAttachmentPaths: [String: String] = [:]
     
     // Offline support
     private let offlineManager = OfflineManager.shared
-    
-    // Modern CKSyncEngine service (iOS 17+)
-    @available(iOS 17.0, *)
-    private var syncService: MessageSyncService {
-        return MessageSyncService.shared
-    }
     
     init(modelContext: ModelContext, roomID: String) {
         self.modelContext = modelContext
@@ -71,6 +66,12 @@ class MessageStore: ObservableObject {
         
         // デバッグ出力/定期チェックは抑制（必要時に明示的に呼び出す）
     }
+
+    deinit {
+        for token in notificationTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
     
     // MARK: - Setup
     
@@ -78,68 +79,97 @@ class MessageStore: ObservableObject {
         let currentRoomID = self.roomID
         
         if #available(iOS 17.0, *) {
-            // Subscribe to MessageSyncService events
-            syncService.messageReceived
-                .filter { message in message.roomID == currentRoomID }
-                .sink { [weak self] message in
-                    self?.handleReceivedMessage(message)
-                }
-                .store(in: &cancellables)
-            
-            syncService.messageDeleted
-                .sink { [weak self] messageID in
-                    self?.handleDeletedMessage(messageID)
-                }
-                .store(in: &cancellables)
-            
-            syncService.syncError
-                .sink { [weak self] error in
-                    self?.syncError = error
-                    log("Sync error: \(error)", category: "MessageStore")
-                }
-                .store(in: &cancellables)
-            
-            syncService.syncStatusChanged
-                .sink { [weak self] isSyncing in
-                    self?.isSyncing = isSyncing
-                }
-                .store(in: &cancellables)
+            // NOTE: MessageSyncPipeline 通知ベース。旧 MessageSyncService (Combine) は再導入しないこと。
+            let center = NotificationCenter.default
 
-            // Reactions updates for this room only
-            syncService.reactionsUpdated
-                .filter { $0.roomID == currentRoomID }
-                .sink { [weak self] payload in
-                    self?.refreshReactions(for: payload.messageRecordName)
-                }
-                .store(in: &cancellables)
+            notificationTokens.append(center.addObserver(forName: .messagePipelineDidReceiveMessage,
+                                                          object: nil,
+                                                          queue: nil) { [weak self] notification in
+                guard let self,
+                      let message = notification.userInfo?["message"] as? Message,
+                      message.roomID == currentRoomID else { return }
+                Task { @MainActor in self.handleReceivedMessage(message) }
+            })
 
-            // Attachments updates for this room only
-            if let svc = syncService as MessageSyncService? {
-                svc.attachmentsUpdated
-                    .filter { $0.roomID == currentRoomID }
-                    .sink { [weak self] payload in
-                        guard let self = self else { return }
-                        if let idx = self.messages.firstIndex(where: { $0.ckRecordName == payload.messageRecordName }) {
-                            self.messages[idx].assetPath = payload.localPath
-                            do { try self.modelContext.save() } catch { log("Failed to save attachment path: \(error)", category: "MessageStore") }
-                            log("Attachment updated for message=\(payload.messageRecordName)", level: "DEBUG", category: "MessageStore")
-                        } else {
-                            // メッセージ未着 → 後で反映
-                            self.pendingAttachmentPaths[payload.messageRecordName] = payload.localPath
-                            log("Attachment queued (message not yet in UI): record=\(payload.messageRecordName)", level: "DEBUG", category: "MessageStore")
-                        }
+            notificationTokens.append(center.addObserver(forName: .messagePipelineDidDeleteMessage,
+                                                          object: nil,
+                                                          queue: nil) { [weak self] notification in
+                guard let self,
+                      let messageID = notification.userInfo?["messageID"] as? String else { return }
+                Task { @MainActor in self.handleDeletedMessage(messageID) }
+            })
+
+            notificationTokens.append(center.addObserver(forName: .messagePipelineDidStart,
+                                                          object: nil,
+                                                          queue: nil) { [weak self] notification in
+                guard let self else { return }
+                let roomInfo = notification.userInfo?["roomID"] as? String
+                if roomInfo == nil || roomInfo == currentRoomID {
+                    Task { @MainActor in self.isSyncing = true }
+                }
+            })
+
+            notificationTokens.append(center.addObserver(forName: .messagePipelineDidFinish,
+                                                          object: nil,
+                                                          queue: nil) { [weak self] notification in
+                guard let self else { return }
+                let roomInfo = notification.userInfo?["roomID"] as? String
+                if roomInfo == nil || roomInfo == currentRoomID {
+                    Task { @MainActor in self.isSyncing = false }
+                }
+            })
+
+            notificationTokens.append(center.addObserver(forName: .messagePipelineDidFail,
+                                                          object: nil,
+                                                          queue: nil) { [weak self] notification in
+                guard let self,
+                      let error = notification.userInfo?["error"] as? Error else { return }
+                let roomInfo = notification.userInfo?["roomID"] as? String
+                if roomInfo == nil || roomInfo == currentRoomID {
+                    Task { @MainActor in
+                        self.syncError = error
+                        self.isSyncing = false
+                        log("Sync error: \(error)", category: "MessageStore")
                     }
-                    .store(in: &cancellables)
-            }
+                }
+            })
+
+            notificationTokens.append(center.addObserver(forName: .messagePipelineDidUpdateReactions,
+                                                          object: nil,
+                                                          queue: nil) { [weak self] notification in
+                guard let self,
+                      let room = notification.userInfo?["roomID"] as? String,
+                      room == currentRoomID,
+                      let recordName = notification.userInfo?["recordName"] as? String else { return }
+                Task { @MainActor in self.refreshReactions(for: recordName) }
+            })
+
+            notificationTokens.append(center.addObserver(forName: .messagePipelineDidUpdateAttachment,
+                                                          object: nil,
+                                                          queue: nil) { [weak self] notification in
+                guard let self,
+                      let room = notification.userInfo?["roomID"] as? String,
+                      room == currentRoomID,
+                      let recordName = notification.userInfo?["recordName"] as? String,
+                      let localPath = notification.userInfo?["localPath"] as? String else { return }
+                Task { @MainActor in
+                    if let idx = self.messages.firstIndex(where: { $0.ckRecordName == recordName }) {
+                        self.messages[idx].assetPath = localPath
+                        do { try self.modelContext.save() } catch { log("Failed to save attachment path: \(error)", category: "MessageStore") }
+                        log("Attachment updated for message=\(recordName)", level: "DEBUG", category: "MessageStore")
+                    } else {
+                        self.pendingAttachmentPaths[recordName] = localPath
+                        log("Attachment queued (message not yet in UI): record=\(recordName)", level: "DEBUG", category: "MessageStore")
+                    }
+                }
+            })
         }
         
         // Subscribe to offline manager events
         offlineManager.$isOnline
             .sink { [weak self] isOnline in
-                if isOnline {
-                    self?.handleNetworkRestored()
-                } else {
-                    self?.handleNetworkLost()
+                Task { @MainActor in
+                    if isOnline { self?.handleNetworkRestored() } else { self?.handleNetworkLost() }
                 }
             }
             .store(in: &cancellables)
@@ -147,9 +177,11 @@ class MessageStore: ObservableObject {
         // Subscribe to failed message notifications
         NotificationCenter.default.publisher(for: .messageFailedPermanently)
             .sink { [weak self] notification in
-                if let message = notification.userInfo?["message"] as? Message,
-                   message.roomID == currentRoomID {
-                    self?.handleMessageFailedPermanently(message)
+                Task { @MainActor in
+                    if let message = notification.userInfo?["message"] as? Message,
+                       message.roomID == currentRoomID {
+                        self?.handleMessageFailedPermanently(message)
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -157,8 +189,10 @@ class MessageStore: ObservableObject {
         // Subscribe to schema ready notifications
         NotificationCenter.default.publisher(for: .cloudKitSchemaReady)
             .sink { [weak self] _ in
-                log("CloudKit schema is ready, retrying failed messages", category: "MessageStore")
-                self?.retryFailedMessages()
+                Task { @MainActor in
+                    log("CloudKit schema is ready, retrying failed messages", category: "MessageStore")
+                    self?.retryFailedMessages()
+                }
             }
             .store(in: &cancellables)
         
@@ -198,7 +232,7 @@ class MessageStore: ObservableObject {
         
         // Trigger sync check
         if #available(iOS 17.0, *) {
-            syncService.checkForUpdates(roomID: roomID)
+            MessageSyncPipeline.shared.checkForUpdates(roomID: roomID)
         }
     }
     
@@ -217,10 +251,7 @@ func sendMessage(_ text: String) {
             isSent: false
         )
         
-        // 特定のメッセージを追跡
-        if text.contains("たああ") || text.contains("たあああ") {
-            log("🎯 SENDING TRACKED MESSAGE: '\(text)' - Message ID: \(message.id)", category: "MessageStore")
-        }
+        // 追跡用の一時デバッグは削除（方針準拠）
         
         // Optimistic UI update with batch processing
         _ = message.generateRecordName()
@@ -236,11 +267,7 @@ func sendMessage(_ text: String) {
         do {
             try modelContext.save()
             log("Message saved locally: \(message.id)", category: "MessageStore")
-            
-            // 特定のメッセージの保存を追跡
-            if text.contains("たああ") || text.contains("たあああ") {
-                log("🎯 TRACKED MESSAGE SAVED TO LOCAL DB: '\(text)'", category: "MessageStore")
-            }
+            // 一時デバッグロギングを撤去
         } catch {
             // Remove from UI if save failed
             if let index = messages.firstIndex(of: message) {
@@ -367,11 +394,9 @@ func sendMessage(_ text: String) {
                     log("✏️ [UI UPDATE] queued to Engine id=\(message.id) record=\(recNameInfo)", category: "MessageStore")
                 }
             } else {
-                #if ENGINE_ONLY
-                log("❌ [UI UPDATE] ENGINE_ONLY defined but iOS < 17 path encountered", category: "MessageStore")
-                #else
+                
                 log("⚠️ [UI UPDATE] CKSyncEngine not available on this OS version", category: "MessageStore")
-                #endif
+                
             }
         }
     }
@@ -403,35 +428,18 @@ func sendMessage(_ text: String) {
         }
         
         // Sync deletion via CKSyncEngine (WorkItem)
-        if let recordName = message.ckRecordName {
+        if let recordName = message.ckRecordName, #available(iOS 17.0, *) {
             Task { @MainActor in
-                if #available(iOS 17.0, *) {
-                    await CKSyncEngineManager.shared.queueDeleteMessage(recordName: recordName, roomID: message.roomID)
-                    log("🗑️ [UI DELETE] queued to Engine record=\(recordName)", category: "MessageStore")
-                } else {
-                    #if ENGINE_ONLY
-                    log("❌ [UI DELETE] ENGINE_ONLY defined but iOS < 17 path encountered", category: "MessageStore")
-                    #else
-                    // iOS 16以下のためのフォールバック（基本17+想定）
-                    do {
-                        try await CloudKitChatManager.shared.deleteMessage(recordName: recordName, roomID: message.roomID)
-                        log("🗑️ [UI DELETE] deleted from CloudKit record=\(recordName)", category: "MessageStore")
-                    } catch {
-                        syncError = error
-                        log("❌ [UI DELETE] CloudKit delete failed record=\(recordName) error=\(error)", category: "MessageStore")
-                    }
-                    #endif
-                }
+                await CKSyncEngineManager.shared.queueDeleteMessage(recordName: recordName, roomID: message.roomID)
+                log("🗑️ [UI DELETE] queued to Engine record=\(recordName)", category: "MessageStore")
             }
         }
     }
     
     /// メッセージにリアクション絵文字を追加（CloudKit正規化レコードに一本化）
     func addReaction(_ emoji: String, to message: Message) {
-        // ローカルの reactionEmoji は更新しない（UIはCloudKitから集計表示）
         log("Reaction enqueue only (CloudKit): \(emoji) to id=\(message.id)", category: "MessageStore")
         
-        // CloudKitに同期
         guard let recordName = message.ckRecordName else {
             log("Cannot sync reaction: message has no CloudKit record name", category: "MessageStore")
             return
@@ -450,25 +458,13 @@ func sendMessage(_ text: String) {
                     log("Reaction enqueued to CKSyncEngine: \(emoji)", category: "MessageStore")
                 }
             } else {
-                #if ENGINE_ONLY
-                log("❌ Reaction sync skipped: ENGINE_ONLY on iOS < 17", category: "MessageStore")
-                #else
-                do {
-                    if let userID = CloudKitChatManager.shared.currentUserID {
-                        try await CloudKitChatManager.shared.addReactionToMessage(
-                            messageRecordName: recordName,
-                            roomID: message.roomID,
-                            emoji: emoji,
-                            userID: userID
-                        )
-                        message.isSent = true
-                        log("Reaction synced to CloudKit (fallback): \(emoji)", category: "MessageStore")
-                    }
-                } catch {
-                    syncError = error
-                    log("Failed to sync reaction to CloudKit (fallback): \(error)", category: "MessageStore")
-                }
-                #endif
+                let error = NSError(
+                    domain: "MessageStore",
+                    code: -1001,
+                    userInfo: [NSLocalizedDescriptionKey: "iOS 17 or later is required for CloudKit reaction sync"]
+                )
+                syncError = error
+                log("❌ Reaction sync requires iOS 17+: \(error.localizedDescription)", category: "MessageStore")
             }
         }
     }
@@ -525,9 +521,7 @@ func sendMessage(_ text: String) {
             log("Message is not valid for sync: \(message.id)", category: "MessageStore")
             return
         }
-        if let body = message.body, (body.contains("たああ") || body.contains("たあああ")) {
-            log("ENQUEUE TRACKED MESSAGE (ENGINE): '\(body)' - Message ID: \(message.id)", category: "MessageStore")
-        }
+        // 一時デバッグロギングを撤去
         Task { @MainActor in
             if #available(iOS 17.0, *) {
                 await CKSyncEngineManager.shared.queueMessage(message)
@@ -700,11 +694,11 @@ func sendMessage(_ text: String) {
     
     // MARK: - Public Utilities
     
-func refresh() {
+    func refresh() {
         log("Manual refresh requested for roomID: \(roomID)", category: "MessageStore")
         
         if #available(iOS 17.0, *) {
-            syncService.checkForUpdates(roomID: roomID)
+            MessageSyncPipeline.shared.checkForUpdates(roomID: roomID)
         } else {
             // Manual refresh for legacy implementation
             loadInitialMessages()
@@ -783,7 +777,7 @@ func refresh() {
         
         // Refresh to get latest messages
         if #available(iOS 17.0, *) {
-            syncService.checkForUpdates(roomID: roomID)
+            MessageSyncPipeline.shared.checkForUpdates(roomID: roomID)
         }
         
         // Retry failed messages
@@ -833,10 +827,7 @@ func refresh() {
                     
                     log("🔍 [\(String(format: "%02d", index))] \(isSent) '\(body)' | Room:\(roomID) | Sender:\(String(senderID.prefix(8))) | Record:\(String(recordName.prefix(8))) | \(msg.createdAt)", category: "MessageStore")
                     
-                    // 特定のメッセージをハイライト
-                    if body.contains("たああ") || body.contains("たああ") {
-                        log("🎯 *** TRACKED MESSAGE FOUND IN DB *** '\(body)'", category: "MessageStore")
-                    }
+                    // 一時デバッグロギングを撤去
                 }
                 
                 log("==================================================", category: "App")

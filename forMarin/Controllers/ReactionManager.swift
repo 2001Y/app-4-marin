@@ -41,8 +41,13 @@ class ReactionManager: ObservableObject {
     
     /// おすすめの絵文字を取得（最近使用した絵文字 + 人気の絵文字）
     func getSuggestedEmojis() -> [String] {
-        let combined = recentEmojis + popularEmojis
-        return Array(NSOrderedSet(array: combined)) as! [String] // 重複除去
+        // 安全に順序を保った重複排除
+        var seen = Set<String>()
+        var result: [String] = []
+        for e in (recentEmojis + popularEmojis) {
+            if seen.insert(e).inserted { result.append(e) }
+        }
+        return result
     }
     
     /// 特定のカテゴリの絵文字を取得

@@ -82,16 +82,14 @@ struct ChatListView: View {
                     
                     // 右側：新規追加と設定ボタン（設定はプロフィール画像に）
                     HStack(alignment: .center, spacing: 16) {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                showInviteModal = true
-                            }
-                        } label: {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 26, weight: .bold))
-                                .symbolRenderingMode(.hierarchical)
-                                .symbolEffect(.bounce, value: showInviteModal)
-                        }
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { showInviteModal = true }
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 26, weight: .bold))
+                            .symbolRenderingMode(.hierarchical)
+                            .symbolEffect(.bounce, value: showInviteModal)
+                    }
                         
                         Button {
                             withAnimation(.easeInOut(duration: 0.2)) {
@@ -134,27 +132,39 @@ struct ChatListView: View {
                 SettingsView()
             }
             .sheet(isPresented: $showInviteModal) {
-                InviteUnifiedSheet(onChatCreated: { newRoom in
-                    onChatSelected(newRoom)
-                }, onJoined: {
-                    // QR受諾後に必要があれば更新
-                }, onOpenQR: {
-                    // 先に自分を閉じてからQRを開く（排他）
-                    showInviteModal = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        showQRScanner = true
-                    }
-                })
+                InviteUnifiedSheet(
+                    onChatCreated: { newRoom in onChatSelected(newRoom) },
+                    onJoined: nil,
+                    existingRoomID: nil,
+                    allowCreatingNewChat: true
+                )
             }
+            // 招待UIはChatView側で表示（メンバー不在時）
             .sheet(isPresented: $showQRScanner) {
                 QRScannerSheet(isPresented: $showQRScanner) {
                     // 受諾後にアップデート
-                    MessageSyncService.shared.checkForUpdates()
+                    MessageSyncPipeline.shared.checkForUpdates()
                 }
             }
             .task(id: uniqueChatRooms.map(\.roomID).joined(separator: ",")) {
                 await prefetchMissingDisplayNames()
             }
+    }
+
+    // MARK: - Actions
+    @MainActor
+    private func createNewChatAndOpen() async {
+        do {
+            let roomID = CKSchema.makeZoneName()
+            let descriptor = try await CloudKitChatManager.shared.createSharedChatRoom(roomID: roomID, invitedUserID: nil)
+            _ = descriptor // 生成・URLはChatView側で表示
+            let newRoom = ChatRoom(roomID: roomID, remoteUserID: "", displayName: nil)
+            modelContext.insert(newRoom)
+            try? modelContext.save()
+            onChatSelected(newRoom)
+        } catch {
+            log("❌ [ChatList] Failed to create chat: \(error)", category: "share")
+        }
     }
     
     private var chatListContent: some View {
@@ -168,8 +178,6 @@ struct ChatListView: View {
                             // セルタップ時にコールバック（アニメーション付き）
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 onChatSelected(chatRoom)
-                                // 未読数リセット
-                                chatRoom.unreadCount = 0
                             }
                         } label: {
                             ChatRowView(
@@ -185,6 +193,7 @@ struct ChatListView: View {
                 .animation(.easeInOut(duration: 0.2), value: uniqueChatRooms.count)
             }
         }
+        // 招待シートの表示は showInviteModal に統一
     }
 
     private var emptyStateView: some View {
@@ -207,9 +216,7 @@ struct ChatListView: View {
             }
             
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    showInviteModal = true
-                }
+                showInviteModal = true
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "square.and.arrow.up")
@@ -246,19 +253,23 @@ struct ChatListView: View {
 
         for room in targets {
             let uid = room.remoteUserID
-            // 空UIDはフェッチしない（診断ログのみ）
+            // 空UID: 一度だけ補完を試みる（成功すれば以降のフェッチが有効化）
             if uid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                log("ChatList: skip profile fetch (empty uid) room=\(room.roomID)", category: "ChatListView")
+                await CloudKitChatManager.shared.inferRemoteParticipantAndUpdateRoom(roomID: room.roomID, modelContext: modelContext)
+            }
+            let effectiveUID = room.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if effectiveUID.isEmpty {
+                log("ChatList: still empty uid after inference room=\(room.roomID)", category: "ChatListView")
                 continue
             }
             do {
                 // 共有ゾーンの参加者プロフィールを優先
-                let shared = try await CloudKitChatManager.shared.fetchParticipantProfile(userID: uid, roomID: room.roomID)
+                let shared = try await CloudKitChatManager.shared.fetchParticipantProfile(userID: effectiveUID, roomID: room.roomID)
                 var nameToUse: String? = shared.name
                 var avatarToUse: Data? = shared.avatarData
                 if (nameToUse == nil || nameToUse!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                     // フォールバック：従来のprivateプロフィール
-                    if let priv = try? await CloudKitChatManager.shared.fetchProfile(userID: uid) {
+                    if let priv = await CloudKitChatManager.shared.fetchProfile(userID: effectiveUID) {
                         nameToUse = priv.name
                         if avatarToUse == nil { avatarToUse = priv.avatarData }
                     }
@@ -293,7 +304,7 @@ struct ChatListView: View {
         }
     }
 
-    // 共有導線は InviteModalView 経由の共通モーダルに統一
+    // 共有導線は InviteUnifiedSheet に統一
     
     // アバター形状をシャッフル（ユーザーIDに基づいて一貫性を保つ）
     @ViewBuilder
@@ -399,6 +410,8 @@ extension ChatListView {
 struct ChatRowView: View {
     let chatRoom: ChatRoom
     let avatarView: AnyView
+    @Environment(\.modelContext) private var modelContext
+    @State private var resolvedTitle: String = ""
     
     init(chatRoom: ChatRoom, avatarView: some View) {
         self.chatRoom = chatRoom
@@ -412,7 +425,13 @@ struct ChatRowView: View {
             
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(chatRoom.displayName ?? chatRoom.remoteUserID)
+                    Text({
+                        let local = (chatRoom.displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !local.isEmpty { return local }
+                        if !resolvedTitle.isEmpty { return resolvedTitle }
+                        let rid = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return rid.isEmpty ? "新規チャット" : rid
+                    }())
                         .font(.title3.weight(.semibold))
                         .lineLimit(1)
                     Spacer()
@@ -447,6 +466,13 @@ struct ChatRowView: View {
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .onAppear {
+            Task { @MainActor in
+                let opener = CloudKitChatManager.shared.currentUserID ?? ""
+                await LocalRoomNameResolver.evaluateOnOpen(room: chatRoom, openerUserID: opener, modelContext: modelContext)
+                resolvedTitle = await LocalRoomNameResolver.effectiveTitle(room: chatRoom, openerUserID: opener, modelContext: modelContext)
+            }
+        }
     }
 }
 

@@ -460,9 +460,10 @@ struct DualCamRecorderView: View {
     private func saveAndPostPhoto(url: URL) {
         // 写真ライブラリへ保存 (失敗しても送信は継続)
         Task {
-            if let image = UIImage(contentsOfFile: url.path) {
+            if let original = UIImage(contentsOfFile: url.path) {
+                let stamped = imageByStampingLogo(on: original)
                 try? await PHPhotoLibrary.shared().performChanges {
-                    PHAssetChangeRequest.creationRequestForAsset(from: image)
+                    PHAssetChangeRequest.creationRequestForAsset(from: stamped)
                 }
             }
         }
@@ -470,6 +471,28 @@ struct DualCamRecorderView: View {
         NotificationCenter.default.post(name: .didFinishDualCamPhoto,
                                         object: nil,
                                         userInfo: ["photoURL": url])
+    }
+
+    private func imageByStampingLogo(on image: UIImage) -> UIImage {
+        guard let logo = UIImage(named: "AppLogo") else { return image }
+
+        let format = image.imageRendererFormat
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
+
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: image.size))
+
+            let baseWidth = image.size.width
+            let baseHeight = image.size.height
+            let logoWidth = baseWidth * 0.18
+            let aspectRatio = logo.size.height / max(logo.size.width, 1)
+            let logoSize = CGSize(width: logoWidth, height: logoWidth * aspectRatio)
+            let inset = max(baseWidth, baseHeight) * 0.04
+            let origin = CGPoint(x: baseWidth - logoSize.width - inset,
+                                 y: baseHeight - logoSize.height - inset)
+            logo.draw(in: CGRect(origin: origin, size: logoSize), blendMode: .normal, alpha: 0.9)
+        }
     }
     
     // ボタンの色を計算

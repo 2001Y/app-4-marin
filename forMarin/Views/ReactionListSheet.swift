@@ -56,9 +56,16 @@ struct ReactionListSheet: View {
             }
             .navigationTitle("リアクション一覧")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: { dismiss() }) { Image(systemName: "xmark") }
+                }
+            }
         }
         .onAppear(perform: load)
     }
+
+    @Environment(\.dismiss) private var dismiss
 
     private func load() {
         let recordName = message.ckRecordName ?? message.id.uuidString
@@ -76,14 +83,10 @@ struct ReactionListSheet: View {
                 for (userID, emojis) in summary.userReactions {
                     // CloudKit上のプロフィール名を試行、失敗時はフォールバック
                     var displayName: String = userID
-                    do {
-                        let prof = try await CloudKitChatManager.shared.fetchProfile(userID: userID)
-                        if let name = prof.name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            displayName = name
-                        } else {
-                            displayName = (userID == currentUserID) ? "あなた" : userID
-                        }
-                    } catch {
+                    let prof = await CloudKitChatManager.shared.fetchProfile(userID: userID)
+                    if let name = prof?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                        displayName = name
+                    } else {
                         displayName = (userID == currentUserID) ? "あなた" : userID
                     }
                     result.append((userID: userID, displayName: displayName, emojis: emojis))
@@ -114,4 +117,3 @@ struct ReactionListSheet: View {
         }
     }
 }
-

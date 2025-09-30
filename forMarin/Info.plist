@@ -45,5 +45,12 @@
             </array>
         </dict>
     </dict>
+    <!-- TURN検証 2025-09-11: UDP 3478 は ALLOCATE 成功。UDP 3480 は失敗、443/TLS は ALLOCATE 失敗、5349/TLS は未開放のため、3478/udp のみ使用。 -->
+    <key>WEBRTC_TURN_URL</key>
+    <string>turn:relay1.expressturn.com:3478?transport=udp</string>
+    <key>WEBRTC_TURN_USERNAME</key>
+    <string>efPU52K4SLOQ34W2QY</string>
+    <key>WEBRTC_TURN_PASSWORD</key>
+    <string>1TJPNFxHKXrZfelz</string>
 </dict>
 </plist>

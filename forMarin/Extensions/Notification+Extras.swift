@@ -10,4 +10,9 @@ extension Notification.Name {
     static let reactionsUpdated = Notification.Name("reactionsUpdated")
     // スキャン完了後に特定のチャットを開かせるための通知
     static let openChatRoom = Notification.Name("openChatRoom")
+    // グローバルなローディング表示/非表示
+    static let showGlobalLoading = Notification.Name("showGlobalLoading")
+    static let hideGlobalLoading = Notification.Name("hideGlobalLoading")
+    // 表示名が更新された（CloudKit保存完了後など）
+    static let displayNameUpdated = Notification.Name("displayNameUpdated")
 }

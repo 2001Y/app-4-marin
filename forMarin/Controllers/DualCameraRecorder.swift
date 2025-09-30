@@ -670,7 +670,7 @@ final class DualCameraRecorder: NSObject, ObservableObject, @unchecked Sendable 
 
         // 表示用に wide 基準で正規化（小数1桁に丸め）
         func round1(_ x: Double) -> Double { (x * 10).rounded() / 10 }
-        var display = rawCandidates.map { round1($0 / wideBaselineRawZoom) }
+        let display = rawCandidates.map { round1($0 / wideBaselineRawZoom) }
         // 近接の重複（±0.05）を除去
         var uniq: [Double] = []
         for v in display.sorted() {

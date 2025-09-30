@@ -1,8 +1,29 @@
 import UIKit
 import UserNotifications
 import CloudKit
+import Network
+import os.log
+import os.signpost
+import CryptoKit
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    private let pushLog = OSLog(subsystem: "com.fourmarin.app", category: "push.receive")
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "com.fourmarin.app.pushPathMonitor")
+    private var latestPath: NWPath?
+
+    override init() {
+        super.init()
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            self?.latestPath = path
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
+    }
+
+    deinit {
+        pathMonitor.cancel()
+    }
+
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
@@ -26,11 +47,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         
         // CloudKit subscriptions setup (共有DB使用)
         Task {
-            // CloudKitChatManagerの初期化と共有データベースサブスクリプション設定
-            _ = CloudKitChatManager.shared
-            try? await CloudKitChatManager.shared.setupSharedDatabaseSubscriptions()
-            try? await CloudKitChatManager.shared.setupPrivateDatabaseSubscription()
-            log("CloudKitChatManager initialized with DB subscriptions (shared/private)", category: "AppDelegate")
+            await CloudKitChatManager.shared.bootstrapIfNeeded()
 
             // Start CKSyncEngine (iOS 17+)
             if #available(iOS 17.0, *) {
@@ -39,9 +56,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             }
         }
         
-        // Initialize MessageSyncService (iOS 17+ 前提)
-        _ = MessageSyncService.shared
-        log("MessageSyncService initialized", category: "AppDelegate")
+        // Initialize MessageSyncPipeline (iOS 17+ 前提)
+        _ = MessageSyncPipeline.shared
+        log("MessageSyncPipeline initialized", category: "AppDelegate")
         
         // Register for remote notifications
         application.registerForRemoteNotifications()
@@ -123,56 +140,175 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     @MainActor
     func application(_ application: UIApplication,
                      didReceiveRemoteNotification userInfo: [AnyHashable : Any]) async -> UIBackgroundFetchResult {
-        log("Received remote notification: \(userInfo)", category: "AppDelegate")
-        
-        // Handle CloudKit notifications
-        if let cloudKitNotification = CKNotification(fromRemoteNotificationDictionary: userInfo) {
-            log("CloudKit notification type: \(cloudKitNotification.notificationType)", category: "AppDelegate")
-            
-            // iOS 17+: 可能ならルーム限定の再フェッチ（Query/Zone通知）に切替
-            // iOS17+ 前提: 可能ならルーム限定の再フェッチ（Query/Zone通知）に切替
-            if let queryNotif = cloudKitNotification as? CKQueryNotification,
-               let zoneID = queryNotif.recordID?.zoneID {
-                let roomID = zoneID.zoneName
-                log("Targeted sync via CKQueryNotification for roomID: \(roomID)", category: "AppDelegate")
-                MessageSyncService.shared.checkForUpdates(roomID: roomID)
-                // P2Pシグナリングも即時確認（ゾーン変化＝RTCSignalの可能性）
-                P2PController.shared.onZoneChanged(roomID: roomID)
-                return .newData
-            }
-            if let zoneNotif = cloudKitNotification as? CKRecordZoneNotification,
-               let zoneID = zoneNotif.recordZoneID {
-                let roomID = zoneID.zoneName
-                log("Targeted sync via CKRecordZoneNotification for roomID: \(roomID)", category: "AppDelegate")
-                MessageSyncService.shared.checkForUpdates(roomID: roomID)
-                P2PController.shared.onZoneChanged(roomID: roomID)
-                return .newData
-            }
-            // Database通知など（共有DB）は対象不明 → 全体チェック
-            MessageSyncService.shared.checkForUpdates()
-            log("Triggered MessageSyncService global update (database notification)", category: "AppDelegate")
-            // 共有DBのDatabase通知には 'ck.met.zid' が含まれることがあるため、可能ならP2Pにも転送
-            if let ck = userInfo["ck"] as? [String: Any],
-               let met = ck["met"] as? [String: Any],
-               let zid = met["zid"] as? String, !zid.isEmpty {
-                P2PController.shared.onZoneChanged(roomID: zid)
-            }
-            return .newData
+        let startedAt = Date()
+        let signpostID = OSSignpostID(log: pushLog)
+        let appStateDescription = appStateString(for: application.applicationState)
+        let (connectionDescription, constrained) = currentNetworkSummary()
+        let messageID = Self.messageID(from: userInfo)
+
+        os_signpost(.begin,
+                    log: pushLog,
+                    name: "remote_notification",
+                    signpostID: signpostID,
+                    "state=%{public}@ connection=%{public}@ constrained=%{public}@ messageID=%{public}@",
+                    appStateDescription,
+                    connectionDescription,
+                    constrained ? "true" : "false",
+                    messageID ?? "nil")
+
+        log("[PUSH] Received remote notification state=\(appStateDescription) connection=\(connectionDescription) constrained=\(constrained) messageID=\(messageID ?? "nil")", category: "AppDelegate")
+
+        guard let cloudKitNotification = CKNotification(fromRemoteNotificationDictionary: userInfo) else {
+            os_signpost(.end,
+                        log: pushLog,
+                        name: "remote_notification",
+                        signpostID: signpostID,
+                        "result=%{public}@",
+                        "ignored")
+            return .noData
         }
-        
-        // No CloudKit notification found
-        return .noData
+
+        log("CloudKit notification type: \(cloudKitNotification.notificationType)", category: "push.receive")
+
+        var fetchResult: UIBackgroundFetchResult = .noData
+
+        if #available(iOS 17.0, *) {
+            let handled = await CKSyncEngineManager.shared.handleRemoteNotification(userInfo: userInfo)
+            fetchResult = handled ? .newData : .noData
+        }
+
+        if let roomID = extractRoomID(from: cloudKitNotification, userInfo: userInfo) {
+            log("Targeted CloudKit push for roomID: \(roomID)", category: "push.receive")
+            P2PController.shared.onZoneChanged(roomID: roomID)
+        } else {
+            log("CloudKit push without specific room hint — relying on database-wide refresh", category: "push.receive")
+        }
+
+        os_signpost(.end,
+                    log: pushLog,
+                    name: "remote_notification",
+                    signpostID: signpostID,
+                    "result=%{public}@ fetch=%{public}@",
+                    "completed",
+                    fetchResult.description)
+
+        let durationMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        log("[PUSH] Completed handling. result=\(fetchResult.description) duration_ms=\(durationMs)", category: "push.receive")
+
+        return fetchResult
     }
     
+    private func extractRoomID(from notification: CKNotification, userInfo: [AnyHashable: Any]) -> String? {
+        if let query = notification as? CKQueryNotification, let zoneID = query.recordID?.zoneID {
+            return zoneID.zoneName
+        }
+        if let zoneNotification = notification as? CKRecordZoneNotification, let zoneID = zoneNotification.recordZoneID {
+            return zoneID.zoneName
+        }
+        if let ckPayload = userInfo["ck"] as? [String: Any] {
+            if let met = ckPayload["met"] as? [String: Any], let zid = met["zid"] as? String, !zid.isEmpty {
+                return zid
+            }
+            if let fet = ckPayload["fet"] as? [String: Any], let zid = fet["zid"] as? String, !zid.isEmpty {
+                return zid
+            }
+        }
+        return nil
+    }
+
     // MARK: - Push Notification Registration
     
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        log("Successfully registered for remote notifications", category: "AppDelegate")
-        let tokenString = deviceToken.map { String(format: "%02.2hhx", $0) }.joined()
-        log("Device token: \(tokenString)", category: "AppDelegate")
+        log("Successfully registered for remote notifications", category: "push.register")
+        // 生トークンは記録しない。SHA-256 をログ用に計測
+        let tokenHash = SHA256.hash(data: deviceToken).compactMap { String(format: "%02x", $0) }.joined()
+        let env = CloudKitChatManager.shared.checkIsProductionEnvironment() ? "prod" : "nonprod"
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let bg = application.backgroundRefreshStatus
+        let bgText: String = {
+            switch bg {
+            case .available: return "available"
+            case .denied: return "denied"
+            case .restricted: return "restricted"
+            @unknown default: return "unknown"
+            }
+        }()
+        // 通知権限の詳細を取得して追記
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let auth: String
+            switch settings.authorizationStatus {
+            case .authorized: auth = "authorized"
+            case .denied: auth = "denied"
+            case .notDetermined: auth = "undetermined"
+            case .provisional: auth = "provisional"
+            case .ephemeral: auth = "ephemeral"
+            @unknown default: auth = "unknown"
+            }
+            log("[PUSH.REG] env=\(env) tokenHash=\(tokenHash) ts=\(ts) auth=\(auth) alert=\(settings.alertSetting.rawValue) badge=\(settings.badgeSetting.rawValue) sound=\(settings.soundSetting.rawValue) bgRefresh=\(bgText)", category: "push.register")
+        }
     }
     
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         log("Failed to register for remote notifications: \(error)", category: "AppDelegate")
     }
-} 
+}
+
+private extension UIBackgroundFetchResult {
+    var description: String {
+        switch self {
+        case .newData: return "newData"
+        case .noData: return "noData"
+        case .failed: return "failed"
+        @unknown default: return "unknown"
+        }
+    }
+}
+
+private extension AppDelegate {
+    static func messageID(from userInfo: [AnyHashable: Any]) -> String? {
+        if let ckPayload = userInfo["ck"] as? [String: Any] {
+            if let notificationID = ckPayload["nid"] as? String, !notificationID.isEmpty {
+                return notificationID
+            }
+            if let subscriptionID = ckPayload["sid"] as? String, !subscriptionID.isEmpty {
+                return subscriptionID
+            }
+        }
+        return nil
+    }
+
+    static func cloudKitIDs(from userInfo: [AnyHashable: Any]) -> (sid: String?, nid: String?) {
+        guard let ckPayload = userInfo["ck"] as? [String: Any] else { return (nil, nil) }
+        let sid = ckPayload["sid"] as? String
+        let nid = ckPayload["nid"] as? String
+        return (sid, nid)
+    }
+
+    func appStateString(for state: UIApplication.State) -> String {
+        switch state {
+        case .active: return "active"
+        case .background: return "background"
+        case .inactive: return "inactive"
+        @unknown default: return "unknown"
+        }
+    }
+
+    func currentNetworkSummary() -> (String, Bool) {
+        if let path = latestPath {
+            let type: String
+            if path.usesInterfaceType(.wifi) {
+                type = "wifi"
+            } else if path.usesInterfaceType(.cellular) {
+                type = "cellular"
+            } else if path.usesInterfaceType(.wiredEthernet) {
+                type = "ethernet"
+            } else if path.usesInterfaceType(.loopback) {
+                type = "loopback"
+            } else {
+                type = "other"
+            }
+            return (type, path.isConstrained)
+        }
+        return ("unknown", false)
+    }
+}

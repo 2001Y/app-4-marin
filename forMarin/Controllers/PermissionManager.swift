@@ -52,11 +52,11 @@ final class PermissionManager: ObservableObject {
     
     /// チャット画面表示時に呼ぶ - カメラと通知権限を申請
     func requestChatPermissions() async throws {
-        try await requestCameraPermission()
+        try await requestCameraPermissionIfNeeded()
         try await requestNotificationPermission()
     }
     
-    private func requestCameraPermission() async throws {
+    func requestCameraPermissionIfNeeded() async throws {
         switch cameraStatus {
         case .notDetermined:
             let granted = await AVCaptureDevice.requestAccess(for: .video)
@@ -86,13 +86,11 @@ final class PermissionManager: ObservableObject {
             if !granted {
                 throw PermissionError.notificationAccessDenied
             }
-            // 権限許可後にremote notification登録
-            UIApplication.shared.registerForRemoteNotifications()
+            // Remote notification登録はAppDelegate側で一元管理
         case .denied:
             throw PermissionError.notificationAccessDenied
         case .authorized, .provisional, .ephemeral:
-            // 既に権限があってもremote notification登録を確認
-            UIApplication.shared.registerForRemoteNotifications()
+            // Remote notification登録はAppDelegate側で一元管理
             break
         @unknown default:
             throw PermissionError.notificationAccessDenied

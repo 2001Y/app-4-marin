@@ -7,6 +7,13 @@ import UniformTypeIdentifiers
 
 extension ChatView {
     // グループ（同一送信者の連続メディア）用のCloudKit集計リアクションバー
+    struct MessageGroup: Identifiable {
+        let id = UUID()
+        let messages: [Message]
+        let isImageGroup: Bool
+        let senderID: String
+    }
+
     private struct ReactionGroupOverlay: View {
         let group: MessageGroup
         let roomID: String
@@ -62,6 +69,7 @@ extension ChatView {
     // MARK: - Helper Methods
     
     // MARK: - Actions
+    @MainActor
     func sendMessage(_ text: String) {
         // Use MessageStore for sending messages
         guard let messageStore = messageStore else {
@@ -77,6 +85,7 @@ extension ChatView {
     }
 
     // 編集も含めた送信コミット関数
+    @MainActor
     func commitSend(with content: String) {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -96,7 +105,7 @@ extension ChatView {
                     self.sendMessage(trimmed)
                 }
             }
-            // リセット
+            // リセット（UIはメインスレッドで確実に反映）
             log("Edit: commit updated id=\(target.id)", category: "ChatView")
             editingMessage = nil
             text = ""
@@ -357,7 +366,6 @@ extension ChatView {
     }
     
     func handleViewAppearance() {
-        // 外部オーディオを停止させない設定を再適用
         AudioSessionManager.configureForAmbient()
 
         UNUserNotificationCenter.current().getNotificationSettings { settings in
@@ -371,44 +379,49 @@ extension ChatView {
         if recentEmojisString.isEmpty {
             recentEmojisString = "😀,👍,🎉"
         }
-        P2PController.shared.startIfNeeded(roomID: roomID, myID: myID)
 
-        // Refresh MessageStore for real-time sync
         messageStore?.refresh()
         log("ChatView appeared. MessageStore refreshed", category: "DEBUG")
-        
-        // 自動の大規模デバッグ出力は抑止（必要時はツールバーの手動ボタンで実行）
-        
+
         if chatRoom.autoDownloadImages {
             autoDownloadNewImages()
         }
-        if remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            log("ChatView: skip participant profile fetch (empty uid) room=\(roomID)", category: "ChatView")
-        } else {
+
         Task {
             do {
-                // 共有ゾーンに自分の最新プロフィールを公開
+                var effectiveRemoteID = remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                if effectiveRemoteID.isEmpty {
+                    await CloudKitChatManager.shared.inferRemoteParticipantAndUpdateRoom(roomID: roomID, modelContext: modelContext)
+                    effectiveRemoteID = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+
+                guard !effectiveRemoteID.isEmpty else {
+                    log("ChatView: skip participant profile fetch (empty uid) room=\(roomID)", category: "ChatView")
+                    return
+                }
+
+                P2PController.shared.startIfNeeded(roomID: roomID, myID: myID, remoteID: effectiveRemoteID)
+
                 let myName = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let myAvatar = UserDefaults.standard.data(forKey: "myAvatarData") ?? Data()
-                try? await CloudKitChatManager.shared.upsertParticipantProfile(in: roomID, name: myName, avatarData: myAvatar)
+                try await CloudKitChatManager.shared.upsertParticipantProfile(in: roomID, name: myName, avatarData: myAvatar)
 
-                // 相手プロフィールは共有ゾーンから取得、無ければ従来のprivateプロフィールにフォールバック
-                let sharedResult = try await CloudKitChatManager.shared.fetchParticipantProfile(userID: remoteUserID, roomID: roomID)
+                let sharedResult = try await CloudKitChatManager.shared.fetchParticipantProfile(userID: effectiveRemoteID, roomID: roomID)
                 var nameToUse: String? = sharedResult.name
                 var avatarToUse: Data? = sharedResult.avatarData
                 if (nameToUse == nil || nameToUse!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
-                    let privateResult = try? await CloudKitChatManager.shared.fetchProfile(userID: remoteUserID)
-                    if let privateResult { nameToUse = privateResult.name; avatarToUse = avatarToUse ?? privateResult.avatarData }
+                    let privateResult = await CloudKitChatManager.shared.fetchProfile(userID: effectiveRemoteID)
+                    if let privateResult {
+                        nameToUse = privateResult.name
+                        if avatarToUse == nil { avatarToUse = privateResult.avatarData }
+                    }
                 }
                 if let name = nameToUse { partnerName = name }
                 if let data = avatarToUse { partnerAvatar = UIImage(data: data) }
             } catch {
-                log("Failed to fetch participant profile for userID: \(remoteUserID) - \(error)", category: "ChatView")
+                log("Failed to refresh participant profile for roomID=\(roomID): \(error)", category: "ChatView")
             }
         }
-        
-        }
-        // チュートリアルはルーム作成時にCloudKitへ投入済み
     }
     
     func handleMessagesCountChange(_ newCount: Int) {
@@ -439,7 +452,6 @@ extension ChatView {
                         .id("__bottom__")
                 }
                 // 入力欄の実高さぶんを確保（メッセージが隠れないように）
-                .padding(.bottom, composerHeight)
                 .animation(.easeInOut(duration: 0.2), value: messages.count)
             }
             // キーボードによるセーフエリア縮小を無視（レイアウトシフトを避ける）
@@ -461,11 +473,6 @@ extension ChatView {
                             proxy.scrollTo("__bottom__", anchor: .bottom)
                         }
                     }
-                }
-            }
-            .onChange(of: composerHeight) { _, _ in
-                DispatchQueue.main.async {
-                    proxy.scrollTo("__bottom__", anchor: .bottom)
                 }
             }
             .onAppear {
@@ -518,13 +525,6 @@ extension ChatView {
     }
     
     // MARK: - Message Grouping
-    struct MessageGroup: Identifiable {
-        let id = UUID()
-        let messages: [Message]
-        let isImageGroup: Bool
-        let senderID: String
-    }
-    
     var groupedMessages: [MessageGroup] {
         var groups: [MessageGroup] = []
         var currentImageGroup: [Message] = []

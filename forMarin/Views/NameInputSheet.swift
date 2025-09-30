@@ -10,92 +10,72 @@ struct NameInputSheet: View {
     @State private var saving = false
     @State private var photosPickerItem: PhotosPickerItem? = nil
     @State private var selectedImage: UIImage? = nil
+    @FocusState private var focusedField: Field?
+    @State private var detentSelection: PresentationDetent = .medium
+
+    private enum Field: Hashable {
+        case displayName
+    }
 
     var body: some View {
-        VStack(spacing: 16) {
-            Capsule().fill(Color.secondary.opacity(0.3)).frame(width: 40, height: 5).padding(.top, 8)
-            // プロフィール画像（デフォルトアイコン）
-            Button {
-                // PhotosPickerは背景に載せるためアクション不要
-            } label: {
-                Group {
-                    if let image = selectedImage {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 96, height: 96)
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                    } else if !myAvatarData.isEmpty, let image = UIImage(data: myAvatarData) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 96, height: 96)
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                    } else {
-                        ZStack {
-                            Circle()
-                                .fill(Color.gray.opacity(0.15))
-                                .frame(width: 96, height: 96)
-                            Image(systemName: "person.crop.circle.fill")
-                                .font(.system(size: 56))
-                                .foregroundColor(.gray)
+        NavigationStack {
+            Form {
+                Section {
+                    VStack(spacing: 12) {
+                        PhotosPicker(selection: $photosPickerItem,
+                                     matching: .images,
+                                     photoLibrary: .shared()) {
+                            avatarView
                         }
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .background(
-                PhotosPicker(selection: $photosPickerItem,
-                            matching: .images,
-                            photoLibrary: .shared()) {
-                    Color.clear
-                }
-            )
-            .padding(.top, 4)
-            Text("アイコンをタップして画像を選択")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Text("あなたの名前は？")
-                .font(.headline)
-            // 入力エリアの高さ・角丸を統一
-            HStack { 
-                TextField("表示名", text: $tempName)
-                    .textInputAutocapitalization(.words)
-                    .autocorrectionDisabled()
-                    .font(.system(size: 16))
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 48)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.gray.opacity(0.2), lineWidth: 1))
-            .padding(.horizontal)
+                        .buttonStyle(.plain)
 
-            // ボタンの高さ・角丸を統一（52pt / 12R）
-            Button {
-                Task { await save() }
-            } label: {
-                HStack {
-                    if saving {
-                        ProgressView().tint(.white)
-                    } else {
-                        Text("つづける")
+                        Text("アイコンをタップして画像を選択")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                }
+
+                Section("表示名") {
+                    TextField("表示名", text: $tempName)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                        .focused($focusedField, equals: .displayName)
+                        .submitLabel(.done)
+                }
+            }
+            .formStyle(.grouped)
+            .scrollIndicators(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: { isPresented = false }) { Image(systemName: "xmark") }
+                }
+
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完了") {
+                        focusedField = nil
                     }
                 }
-                .font(.system(size: 16, weight: .semibold))
-                .frame(maxWidth: .infinity, minHeight: 52)
-                .foregroundColor(.white)
-                .background(Color.accentColor)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
-            .disabled(tempName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || saving)
-            .padding(.horizontal)
-            Spacer(minLength: 12)
+            .navigationTitle("あなたの名前は？")
+            .navigationBarTitleDisplayMode(.inline)
         }
+        .presentationDetents([.medium, .large], selection: $detentSelection)
+        .presentationDragIndicator(.visible)
+        .safeAreaInset(edge: .bottom) { bottomActionArea.ignoresSafeArea(.keyboard) }
         .onAppear {
             tempName = myDisplayName
             if !myAvatarData.isEmpty { selectedImage = UIImage(data: myAvatarData) }
+            scheduleFocus()
+        }
+        .onChange(of: focusedField) { _, newValue in
+            if newValue != nil {
+                detentSelection = .large
+            }
         }
         .onChange(of: photosPickerItem) { _, newItem in
             Task { @MainActor in
@@ -110,8 +90,6 @@ struct NameInputSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.visible)
     }
 
     @MainActor
@@ -126,8 +104,72 @@ struct NameInputSheet: View {
         // 共有中の全ゾーンへ同報
         await CloudKitChatManager.shared.updateParticipantProfileInAllZones(name: name, avatarData: myAvatarData)
         log("NameInputSheet: saved displayName=\(name)", category: "Onboarding")
+        focusedField = nil
+        // ルート判定用に表示名更新を通知
+        NotificationCenter.default.post(name: .displayNameUpdated, object: nil, userInfo: ["name": name])
         // 呼び出し元へ登録完了を通知
         onSaved?()
         isPresented = false
+    }
+
+    @ViewBuilder
+    private var avatarView: some View {
+        Group {
+            if let image = selectedImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if !myAvatarData.isEmpty, let image = UIImage(data: myAvatarData) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ZStack {
+                    Circle()
+                        .fill(Color.gray.opacity(0.15))
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.system(size: 54))
+                        .foregroundColor(.gray)
+                }
+            }
+        }
+        .frame(width: 100, height: 100)
+        .clipShape(Circle())
+        .overlay(Circle().stroke(Color.gray.opacity(0.25), lineWidth: 1))
+        .contentShape(Circle())
+        .accessibilityLabel("プロフィール画像を選択")
+    }
+
+    private var bottomActionArea: some View {
+        VStack(spacing: 12) {
+            Button {
+                Task { await save() }
+            } label: {
+                HStack(spacing: 8) {
+                    if saving {
+                        ProgressView()
+                    }
+                    Text("つづける")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(tempName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || saving)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 12)
+        .padding(.bottom, 16)
+        .frame(maxWidth: .infinity)
+        .background(.regularMaterial)
+        .shadow(color: Color.black.opacity(0.08), radius: 16, y: -2)
+    }
+
+    private func scheduleFocus() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            focusedField = .displayName
+        }
     }
 }

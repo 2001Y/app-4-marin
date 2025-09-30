@@ -3,6 +3,7 @@ import UIKit
 import SwiftData
 import PhotosUI
 import AVKit
+import CloudKit
 
 
 
@@ -90,6 +91,10 @@ struct ChatView: View {
     @State var showHero: Bool = false
     
     @State var showProfileSheet: Bool = false
+    @State private var showOwnerInviteSheet: Bool = false
+    @State private var hasEvaluatedOwnerInvite: Bool = false
+    // ルーム名の動的解決（ローカル空/CloudKit名/ローカル推論）用
+    @State private var resolvedRoomTitle: String = ""
     
     // 長押し中のメッセージID（押している間だけ拡大表現）
     @State var pressingMessageID: UUID? = nil
@@ -98,8 +103,7 @@ struct ChatView: View {
     // ChatViewMessageBubble.swift（別ファイルの拡張）から参照するためprivateを外す
     @State var reactionPickerMessage: Message? = nil
     @AppStorage("myDisplayName") var myDisplayName: String = ""
-    // 入力バーの実高さ（safeAreaInsetで配置したコンポーザの高さ）
-    @State var composerHeight: CGFloat = 0
+    // 入力バーの実高さ: safeAreaInset採用のため不要（padding相殺をやめ、OS任せ）
     
     // Filtered anniversaries for current room
     var roomAnniversaries: [Anniversary] {
@@ -137,12 +141,20 @@ struct ChatView: View {
 
     func buildBody() -> some View {
         // 1) タブ + ナビゲーション基本設定（AnyViewで型を単純化）
+        let titleToUse: String = {
+            let local = (chatRoom.displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !local.isEmpty { return local }
+            if !resolvedRoomTitle.isEmpty { return resolvedRoomTitle }
+            let rid = remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+            return rid.isEmpty ? "新規チャット" : rid
+        }()
+
         let base = AnyView(
             tabsView()
                 .tabViewStyle(.page(indexDisplayMode: .never))
                 .indexViewStyle(.page(backgroundDisplayMode: .never))
                 .allowsHitTesting(true)
-                .navigationTitle(partnerName.isEmpty ? remoteUserID : partnerName)
+                .navigationTitle(titleToUse)
                 .navigationBarTitleDisplayMode(.inline)
         )
 
@@ -151,7 +163,7 @@ struct ChatView: View {
             base.toolbar {
                 ToolbarItem(placement: .principal) {
                     VStack(spacing: 2) {
-                        Text(partnerName.isEmpty ? remoteUserID : partnerName)
+                        Text(titleToUse)
                             .font(.headline)
                         Text("あと\(daysUntilAnniversary)日")
                             .font(.caption)
@@ -173,117 +185,132 @@ struct ChatView: View {
             }
         )
 
-        // 3) 各種シート/オーバーレイ/通知ハンドラを適用
-        let finalView = AnyView(
+        // 3) ComposeBar などのオーバーレイ + シート類
+        let withModifiers = AnyView(
             withActions
-                .onChange(of: selectedTab) { _, _ in
-                    // タブ移動時にフォーカス解除（キーボードを閉じる）
-                    isTextFieldFocused = false
+                .modifier(KeyboardLoggingModifier())
+                .modifier(MediaPreviewModifier(
+                    isVideoPlayerShown: $isVideoPlayerShown,
+                    videoPlayerURL: $videoPlayerURL,
+                    isPreviewShown: $isPreviewShown,
+                    previewMediaItems: $previewMediaItems,
+                    previewImages: $previewImages,
+                    previewStartIndex: $previewStartIndex,
+                    heroNamespace: heroNS,
+                    heroImageID: heroImageID
+                ))
+        )
+
+        // 段階的に合成して型推論負荷を抑える
+        let overlaid = AnyView(
+            withModifiers.overlay {
+                if showHero, let img = heroImage {
+                    FullScreenPreviewView(
+                        images: [img],
+                        startIndex: 0,
+                        onDismiss: { withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) { showHero = false } },
+                        namespace: heroNS,
+                        geometryIDs: [heroImageID]
+                    )
+                    .transition(.opacity)
                 }
-                .fullScreenCover(isPresented: $isVideoPlayerShown) {
-                    if let url = videoPlayerURL {
-                        VideoPlayer(player: AVPlayer(url: url))
-                            .ignoresSafeArea()
-                    }
-                }
-                .fullScreenCover(isPresented: $isPreviewShown) {
-                    if !previewMediaItems.isEmpty {
-                        FullScreenPreviewView(
-                            images: [],
-                            startIndex: previewStartIndex,
-                            onDismiss: { isPreviewShown = false },
-                            namespace: heroNS,
-                            geometryIDs: previewMediaItems.enumerated().map { index, _ in "preview_\(index)" },
-                            mediaItems: previewMediaItems
-                        )
-                    } else {
-                        FullScreenPreviewView(
-                            images: previewImages,
-                            startIndex: previewStartIndex,
-                            onDismiss: { isPreviewShown = false },
-                            namespace: heroNS,
-                            geometryIDs: previewImages.enumerated().map { index, _ in previewImages.count == 1 ? heroImageID : "preview_\(index)" }
-                        )
-                    }
-                }
-                .overlay {
-                    if showHero, let img = heroImage {
-                        FullScreenPreviewView(
-                            images: [img],
-                            startIndex: 0,
-                            onDismiss: { withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) { showHero = false } },
-                            namespace: heroNS,
-                            geometryIDs: [heroImageID]
-                        )
-                        .transition(.opacity)
-                    }
-                }
-                .sheet(isPresented: $isEmojiPickerShown) {
-                    MCEmojiPickerSheet(selectedEmoji: $pickedEmoji)
-                        .presentationDetents([.medium, .large])
-                }
+            }
+        )
+
+        let ownerInviteApplied = AnyView(
+            overlaid.sheet(isPresented: $showOwnerInviteSheet, onDismiss: { hasEvaluatedOwnerInvite = true }) {
+                InviteUnifiedSheet(
+                    onChatCreated: { _ in },
+                    onJoined: nil,
+                    existingRoomID: roomID,
+                    allowCreatingNewChat: false
+                )
+            }
+        )
+
+        let emojiSheetApplied = AnyView(
+            ownerInviteApplied.sheet(isPresented: $isEmojiPickerShown) {
+                MCEmojiPickerSheet(selectedEmoji: $pickedEmoji)
+                    .presentationDetents([.medium, .large])
+            }
+        )
+
+        let commonSheetsApplied = AnyView(
+            emojiSheetApplied
                 .fullScreenCover(isPresented: $showDualCameraRecorder) { DualCamRecorderView() }
-                .sheet(isPresented: $showProfileSheet) { ProfileDetailView(chatRoom: chatRoom, partnerAvatar: partnerAvatar) }
-                .sheet(isPresented: Binding(
-                    get: { actionSheetMessage != nil },
-                    set: { newVal in
-                        if newVal == false {
+                .sheet(isPresented: $showProfileSheet) { RoomDetailSheet(chatRoom: chatRoom, partnerAvatar: partnerAvatar) }
+        )
+
+        let actionSheetApplied = AnyView(
+            commonSheetsApplied.sheet(isPresented: Binding(
+                get: { actionSheetMessage != nil },
+                set: { newVal in
+                    if newVal == false {
+                        actionSheetMessage = nil
+                        actionSheetTargetGroup = nil
+                        log("ActionSheet: dismissed by user", category: "ChatView")
+                    }
+                }
+            )) {
+                if let target = actionSheetMessage {
+                    MessageActionSheet(
+                        message: target,
+                        isMine: target.senderID == effectiveMyID,
+                        onReact: { emoji in
+                            let targets = actionSheetTargetGroup ?? [target]
+                            for msg in targets { Task { _ = await ReactionManager.shared.addReaction(emoji, to: msg) } }
+                            log("ActionSheet: Added reaction(CloudKit) \(emoji) to \(targets.count) message(s)", category: "ChatView")
+                            updateRecentEmoji(emoji)
                             actionSheetMessage = nil
                             actionSheetTargetGroup = nil
-                            log("ActionSheet: dismissed by user", category: "ChatView")
+                        },
+                        onEdit: {
+                            guard target.senderID == effectiveMyID else { return }
+                            editingMessage = target
+                            text = target.body ?? ""
+                            isTextFieldFocused = true
+                            log("Edit: enter edit mode id=\(target.id)", category: "ChatView")
+                            actionSheetMessage = nil
+                            actionSheetTargetGroup = nil
+                        },
+                        onCopy: {
+                            if let body = target.body { UIPasteboard.general.string = body }
+                            log("ActionSheet: Copied text from message id=\(target.id)", category: "ChatView")
+                            actionSheetMessage = nil
+                            actionSheetTargetGroup = nil
+                        },
+                        onDelete: {
+                            deleteMessage(target)
+                            log("ActionSheet: Deleted message id=\(target.id)", category: "ChatView")
+                            actionSheetMessage = nil
+                            actionSheetTargetGroup = nil
+                        },
+                        onDismiss: {
+                            actionSheetMessage = nil
+                            actionSheetTargetGroup = nil
                         }
-                    }
-                )) {
-                    if let target = actionSheetMessage {
-                        MessageActionSheet(
-                            message: target,
-                            isMine: target.senderID == myID,
-                            onReact: { emoji in
-                                let targets = actionSheetTargetGroup ?? [target]
-                                for msg in targets {
-                                    Task { _ = await ReactionManager.shared.addReaction(emoji, to: msg) }
-                                }
-                                log("ActionSheet: Added reaction(CloudKit) \(emoji) to \(targets.count) message(s)", category: "ChatView")
-                                updateRecentEmoji(emoji)
-                                actionSheetMessage = nil
-                                actionSheetTargetGroup = nil
-                            },
-                            onEdit: {
-                                guard target.senderID == myID else { return }
-                                editingMessage = target
-                                text = target.body ?? ""
-                                isTextFieldFocused = true
-                                log("Edit: enter edit mode id=\(target.id)", category: "ChatView")
-                                actionSheetMessage = nil
-                                actionSheetTargetGroup = nil
-                            },
-                            onCopy: {
-                                if let body = target.body { UIPasteboard.general.string = body }
-                                log("ActionSheet: Copied text from message id=\(target.id)", category: "ChatView")
-                                actionSheetMessage = nil
-                                actionSheetTargetGroup = nil
-                            },
-                            onDelete: {
-                                deleteMessage(target)
-                                log("ActionSheet: Deleted message id=\(target.id)", category: "ChatView")
-                                actionSheetMessage = nil
-                                actionSheetTargetGroup = nil
-                            },
-                            onDismiss: {
-                                actionSheetMessage = nil
-                                actionSheetTargetGroup = nil
-                            }
-                        )
-                        .presentationDetents([.fraction(0.33)])
-                    }
+                    )
+                    .presentationDetents([.fraction(0.33)])
                 }
-                .sheet(item: $reactionPickerMessage) { msg in
-                    ReactionListSheet(message: msg, roomID: roomID, currentUserID: myID)
-                        .onAppear { log("ReactionList: open for id=\(msg.id)", category: "ChatView") }
-                        .presentationDetents([.medium])
-                }
-                .onChange(of: pickedEmoji) { newValue, _ in handleEmojiSelection(newValue) }
+            }
+        )
+
+        let reactionSheetApplied = AnyView(
+            actionSheetApplied.sheet(item: $reactionPickerMessage) { msg in
+                ReactionListSheet(message: msg, roomID: roomID, currentUserID: effectiveMyID)
+                    .onAppear { log("ReactionList: open for id=\(msg.id)", category: "ChatView") }
+                    .presentationDetents([.medium])
+            }
+        )
+
+        let finalView = AnyView(
+            reactionSheetApplied
+                .onChange(of: pickedEmoji) { _, newValue in handleEmojiSelection(newValue) }
                 .onAppear {
+                    guard roomID.hasPrefix(CKSchema.zonePrefix) else {
+                        log("[BLOCK] Non room_* ChatView ignored: roomID=\(roomID)", category: "ChatView")
+                        return
+                    }
                     if messageStore == nil {
                         messageStore = MessageStore(modelContext: modelContext, roomID: roomID)
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { messageStore?.refresh() }
@@ -291,29 +318,52 @@ struct ChatView: View {
                     handleViewAppearance()
                     requestChatPermissions()
                     Task {
-                        if let userID = CloudKitChatManager.shared.currentUserID {
+                        if let userID = try? await CloudKitChatManager.shared.ensureCurrentUserID() {
                             myID = userID
-                            log("[ChatView] myID set onAppear (immediate): \(String(myID.prefix(8)))", category: "DEBUG")
-                        } else {
-                            while !CloudKitChatManager.shared.isInitialized { try? await Task.sleep(nanoseconds: 100_000_000) }
-                            if let userID = CloudKitChatManager.shared.currentUserID {
-                                myID = userID
-                                log("[ChatView] myID set onAppear (after init): \(String(myID.prefix(8)))", category: "DEBUG")
-                            }
+                            log("[ChatView] myID set onAppear: \(String(myID.prefix(8)))", category: "DEBUG")
+                            // ルーム名ロジック（表示用解決 + 3名以上時のCloudKit反映）
+                            await LocalRoomNameResolver.evaluateOnOpen(room: chatRoom, openerUserID: myID, modelContext: modelContext)
+                            resolvedRoomTitle = await LocalRoomNameResolver.effectiveTitle(room: chatRoom, openerUserID: myID, modelContext: modelContext)
                         }
+                    }
+                    Task { await evaluateOwnerInvitePromptIfNeeded() }
+                }
+                // remoteUserID が空→実IDに変化したらP2Pを追随起動（空のままでも再評価しない）
+                .onChange(of: chatRoom.remoteUserID) { _, newID in
+                    let me = CloudKitChatManager.shared.currentUserID ?? myID
+                    if !newID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       !me.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        log("[P2P] remoteUserID changed -> starting P2P (my=\(String(me.prefix(8))) remote=\(String(newID.prefix(8))))", category: "P2P")
+                        P2PController.shared.startIfNeeded(roomID: roomID, myID: me, remoteID: newID)
+                        showOwnerInviteSheet = false
                     }
                 }
                 .onReceive(chatManager.$currentUserID) { uid in
                     if let uid, uid != myID {
                         myID = uid
                         log("[ChatView] myID updated via publisher: \(String(uid.prefix(8)))", category: "DEBUG")
+                        let remote = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !remote.isEmpty {
+                            log("[P2P] myID update -> starting P2P (my=\(String(uid.prefix(8))) remote=\(String(remote.prefix(8))))", category: "P2P")
+                            P2PController.shared.startIfNeeded(roomID: roomID, myID: uid, remoteID: chatRoom.remoteUserID)
+                        }
                     }
                 }
                 .onChange(of: messages.count) { _, newCount in
                     if chatRoom.autoDownloadImages { autoDownloadNewImages() }
                     handleMessagesCountChange(newCount)
+                    // 参加者増減（[SYS:JOIN]等）に伴うルーム名再評価
+                    Task { @MainActor in
+                        await LocalRoomNameResolver.evaluateOnOpen(room: chatRoom,
+                                                                   openerUserID: effectiveMyID,
+                                                                   modelContext: modelContext)
+                        resolvedRoomTitle = await LocalRoomNameResolver.effectiveTitle(room: chatRoom,
+                                                                                        openerUserID: effectiveMyID,
+                                                                                        modelContext: modelContext)
+                    }
                 }
-                .onDisappear { P2PController.shared.close() }
+                // Viewの短時間な遷移（シート/プッシュ等）でP2Pが切断されないよう、
+                // 画面消滅時の自動closeは行わない。明示的な離脱時にのみclose。
                 .onReceive(NotificationCenter.default.publisher(for: .didFinishDualCamRecording)) { notif in
                     log("ChatView: Received .didFinishDualCamRecording notification", category: "DEBUG")
                     if let url = notif.userInfo?["videoURL"] as? URL {
@@ -395,7 +445,6 @@ struct ChatView: View {
         // 入力欄はセーフエリア下端に常設（キーボード追従はOS任せ）
         .safeAreaInset(edge: .bottom) {
             composeBarView()
-                .readHeight($composerHeight)
                 .background(Color(UIColor.systemBackground))
         }
     }
@@ -577,7 +626,7 @@ struct ChatView: View {
             albumMissingImagePlaceholder(size: cellSize)
         }
     }
-    
+
     @ViewBuilder
     private func albumMissingImagePlaceholder(size: CGFloat) -> some View {
         VStack(spacing: 4) {
@@ -614,9 +663,40 @@ struct ChatView: View {
         previewStartIndex = imageMessages.firstIndex(of: message) ?? 0
         isPreviewShown = true
     }
-    
+
     // MARK: - Permission Requests
-    
+
+    @MainActor
+    private func evaluateOwnerInvitePromptIfNeeded() async {
+        // 重複表示防止
+        guard !hasEvaluatedOwnerInvite else { return }
+        // オーナーのみ
+        guard CloudKitChatManager.shared.isOwnerCached(roomID) == true else { return }
+        // 低レイヤー判定に変更: リモート参加者IDが未確定のときのみ
+        let remoteEmpty = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if remoteEmpty {
+            hasEvaluatedOwnerInvite = true
+            showOwnerInviteSheet = true
+        }
+    }
+
+    @MainActor
+    private func fetchParticipantCount() async -> Int {
+        do {
+            let rec = try await CloudKitChatManager.shared.getRoomRecord(roomID: roomID)
+            let zoneID = rec.recordID.zoneID
+            let isPrivate = zoneID.ownerName.isEmpty
+            let db = isPrivate ? CloudKitChatManager.shared.privateDB : CloudKitChatManager.shared.sharedDB
+            let query = CKQuery(recordType: CKSchema.SharedType.roomMember, predicate: NSPredicate(value: true))
+            let (results, _) = try await db.records(matching: query, inZoneWith: zoneID)
+            var cnt = 0
+            for (_, r) in results { if case .success = r { cnt += 1 } }
+            return cnt
+        } catch {
+            return 1
+        }
+    }
+
     private func requestChatPermissions() {
         Task {
             do {
@@ -630,4 +710,79 @@ struct ChatView: View {
         }
     }
     
+}
+
+// 共通の自己ID参照（CloudKitのcurrentUserIDがあればそれを優先）
+extension ChatView {
+    var effectiveMyID: String { CloudKitChatManager.shared.currentUserID ?? myID }
+}
+
+
+struct TabFocusModifier: ViewModifier {
+    var selectedTab: Binding<Int>
+    var textFieldFocus: FocusState<Bool>.Binding
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: selectedTab.wrappedValue) { _, _ in
+                textFieldFocus.wrappedValue = false
+            }
+    }
+}
+
+struct KeyboardLoggingModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notif in
+                if let frame = notif.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                    log("Keyboard: willShow height=\(Int(frame.height))", category: "ChatView")
+                } else {
+                    log("Keyboard: willShow (height unknown)", category: "ChatView")
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                log("Keyboard: willHide", category: "ChatView")
+            }
+    }
+}
+
+struct MediaPreviewModifier: ViewModifier {
+    @Binding var isVideoPlayerShown: Bool
+    @Binding var videoPlayerURL: URL?
+    @Binding var isPreviewShown: Bool
+    @Binding var previewMediaItems: [MediaItem]
+    @Binding var previewImages: [UIImage]
+    @Binding var previewStartIndex: Int
+    let heroNamespace: Namespace.ID
+    let heroImageID: String
+
+    func body(content: Content) -> some View {
+        content
+            .fullScreenCover(isPresented: $isVideoPlayerShown) {
+                if let url = videoPlayerURL {
+                    VideoPlayer(player: AVPlayer(url: url))
+                        .ignoresSafeArea()
+                }
+            }
+            .fullScreenCover(isPresented: $isPreviewShown) {
+                if !previewMediaItems.isEmpty {
+                    FullScreenPreviewView(
+                        images: [],
+                        startIndex: previewStartIndex,
+                        onDismiss: { isPreviewShown = false },
+                        namespace: heroNamespace,
+                        geometryIDs: previewMediaItems.enumerated().map { index, _ in "preview_\(index)" },
+                        mediaItems: previewMediaItems
+                    )
+                } else {
+                    FullScreenPreviewView(
+                        images: previewImages,
+                        startIndex: previewStartIndex,
+                        onDismiss: { isPreviewShown = false },
+                        namespace: heroNamespace,
+                        geometryIDs: previewImages.enumerated().map { index, _ in previewImages.count == 1 ? heroImageID : "preview_\(index)" }
+                    )
+                }
+            }
+    }
 }

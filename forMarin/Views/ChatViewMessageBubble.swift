@@ -171,9 +171,9 @@ extension ChatView {
     // 統一メディアバブル（画像・ビデオ対応）
     @ViewBuilder 
     func mediaBubble(for message: Message) -> some View {
-        VStack(alignment: message.senderID == myID ? .trailing : .leading, spacing: 4) {
+        VStack(alignment: message.senderID == effectiveMyID ? .trailing : .leading, spacing: 4) {
             HStack(alignment: .bottom, spacing: 6) {
-                if message.senderID != myID {
+                if message.senderID != effectiveMyID {
                     // 相手のメッセージ
                     ZStack(alignment: .bottomTrailing) {
                         // メディアコンテンツ表示
@@ -337,7 +337,7 @@ extension ChatView {
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
+        .frame(maxWidth: .infinity, alignment: message.senderID == effectiveMyID ? .trailing : .leading)
         .scaleEffect(pressingMessageID == message.id ? 1.03 : 1.0)
         .shadow(color: Color.primary.opacity(pressingMessageID == message.id ? 0.15 : 0.0), radius: pressingMessageID == message.id ? 8 : 0, y: pressingMessageID == message.id ? 4 : 0)
         .animation(.spring(response: 0.22, dampingFraction: 0.8), value: pressingMessageID == message.id)
@@ -378,9 +378,9 @@ extension ChatView {
             let emojiCount = message.body?.count ?? 0
             
             Group {
-                VStack(alignment: message.senderID == myID ? .trailing : .leading, spacing: 2) {
+                VStack(alignment: message.senderID == effectiveMyID ? .trailing : .leading, spacing: 2) {
                     HStack(alignment: .bottom, spacing: 6) {
-                        if message.senderID != myID {
+                        if message.senderID != effectiveMyID {
                             // Left side message
                             ZStack(alignment: .bottomTrailing) {
                                 if isEmojiOnly && emojiCount <= 3 {
@@ -450,7 +450,7 @@ extension ChatView {
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, alignment: message.senderID == myID ? .trailing : .leading)
+            .frame(maxWidth: .infinity, alignment: message.senderID == effectiveMyID ? .trailing : .leading)
             .scaleEffect(pressingMessageID == message.id ? 1.03 : 1.0)
             .shadow(color: Color.primary.opacity(pressingMessageID == message.id ? 0.12 : 0.0), radius: pressingMessageID == message.id ? 6 : 0, y: pressingMessageID == message.id ? 3 : 0)
             .animation(.spring(response: 0.22, dampingFraction: 0.8), value: pressingMessageID == message.id)

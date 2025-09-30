@@ -20,11 +20,20 @@ final class Message {
     // 単一画像メッセージの場合のローカルファイルパス
     var assetPath: String?
 
+    // 送信者 RoomMember レコード名（"RM_..."）
+    var senderMemberRecordName: String?
+
     // CloudKit record name for syncing append operations
     var ckRecordName: String?
 
     // Timestamp
     var createdAt: Date = Date()
+
+    // CloudKit メッセージタイプ ("txt" or "attachment")
+    var messageType: String = "txt"
+
+    // 添付タイプ ("image", "video" など)
+    var attachmentType: String?
 
     // Whether the message is already uploaded to CloudKit
     var isSent: Bool = false
@@ -37,8 +46,11 @@ final class Message {
          senderID: String,
          body: String? = nil,
          assetPath: String? = nil,
+         senderMemberRecordName: String? = nil,
          ckRecordName: String? = nil,
          createdAt: Date = Date(),
+         messageType: String = "txt",
+         attachmentType: String? = nil,
          isSent: Bool = false) {
         self.id = id
         self.roomID = roomID
@@ -47,74 +59,51 @@ final class Message {
         self.createdAt = createdAt
         self.isSent = isSent
         self.assetPath = assetPath
+        self.senderMemberRecordName = senderMemberRecordName
         self.ckRecordName = ckRecordName
+        self.messageType = messageType
+        self.attachmentType = attachmentType
     }
 }
 
 // MARK: - CloudKit Extensions
 extension Message {
-// MessageAttachment はCloudKit上の別レコード（ローカルのSwiftDataモデルは不要）
-    static let recordType = "Message"
-    
-    /// Converts this Message to a CKRecord for CloudKit synchronization
-    var cloudKitRecord: CKRecord {
-        // 一貫したレコード名: UUID（id.uuidString）を採用
-        let recordID = CKRecord.ID(recordName: ckRecordName ?? id.uuidString)
-        let record = CKRecord(recordType: Message.recordType, recordID: recordID)
-        
-        record["roomID"] = roomID as CKRecordValue
-        record["senderID"] = senderID as CKRecordValue
-        record["text"] = (body ?? "") as CKRecordValue
-        record["timestamp"] = createdAt as CKRecordValue
-        
-        // Handle asset attachment
-        if let assetPath = assetPath, FileManager.default.fileExists(atPath: assetPath) {
-            let assetURL = URL(fileURLWithPath: assetPath)
-            record["attachment"] = CKAsset(fileURL: assetURL)
-        }
-        
-        return record
-    }
-    
-    
     /// Updates this Message with data from a CKRecord (for conflict resolution)
     func update(from record: CKRecord) {
-        guard record.recordType == Message.recordType else { return }
+        guard record.recordType == CKSchema.SharedType.message else { return }
 
-        // Align with ideal schema keys: text / attachment / timestamp
-        if let text = record["text"] as? String { self.body = text }
-        if let ts = record["timestamp"] as? Date { self.createdAt = ts }
-        // senderID は理想スキーマでは必須。欠如時のフォールバックは行わない
-        if let sid = record["senderID"] as? String {
-            self.senderID = sid
+        if let text = record[CKSchema.FieldKey.text] as? String {
+            self.body = text
         }
-        // Reactions/isSent はCloudKitへは保存しない（正規化レコード/ローカル管理）
+        if let ts = record.creationDate {
+            self.createdAt = ts
+        }
+        if let type = record[CKSchema.FieldKey.type] as? String {
+            self.messageType = type
+        }
+        if let senderRef = record[CKSchema.FieldKey.senderMemberRef] as? CKRecord.Reference {
+            senderMemberRecordName = senderRef.recordID.recordName
+            if senderRef.recordID.recordName.hasPrefix("RM_") {
+                let trimmed = String(senderRef.recordID.recordName.dropFirst(3))
+                if !trimmed.isEmpty {
+                    senderID = trimmed
+                }
+            }
+        }
 
-        // Update record name if needed
         if ckRecordName != record.recordID.recordName {
             ckRecordName = record.recordID.recordName
         }
-        
-        // Handle asset updates
-        if let asset = record["attachment"] as? CKAsset,
-           let fileURL = asset.fileURL {
-            let localURL = AttachmentManager.makeFileURL(ext: fileURL.pathExtension)
-            do {
-                if !FileManager.default.fileExists(atPath: localURL.path) {
-                    try FileManager.default.copyItem(at: fileURL, to: localURL)
-                    assetPath = localURL.path
-                }
-            } catch {
-                log("Failed to update asset: \(error)", category: "Message")
-            }
-        }
     }
-    
+
     /// Validates if the message is ready for CloudKit sync
     var isValidForSync: Bool {
-        return !roomID.isEmpty && !senderID.isEmpty && (body != nil || assetPath != nil)
+        if messageType == "attachment" {
+            return !roomID.isEmpty && !senderID.isEmpty && assetPath != nil
+        }
+        return !roomID.isEmpty && !senderID.isEmpty
     }
-    
+
     /// Creates a conflict-free record name based on message properties
     func generateRecordName() -> String {
         if let existingName = ckRecordName { return existingName }
@@ -128,33 +117,79 @@ extension Message {
 extension Message {
     // システムメッセージの種類：FaceTime登録
     static let sysFaceTimePrefix = "[SYS:FT_REG]"
+    static let sysJoinPrefix = "[SYS:JOIN]"
 
     /// システム文（表示用）を返す。対象でない場合はnil
     static func systemDisplayText(for body: String?) -> String? {
         guard let body else { return nil }
-        guard body.hasPrefix(sysFaceTimePrefix) else { return nil }
-        // 形式: [SYS:FT_REG]|name=<name>|id=<faceTimeID>
-        let parts = body.components(separatedBy: "|")
-        var name: String? = nil
-        for p in parts {
-            if p.hasPrefix("name=") { name = String(p.dropFirst(5)) }
+
+        if body.hasPrefix(sysJoinPrefix) {
+            let fields = parseSystemFields(from: body, prefix: sysJoinPrefix)
+            let nameRaw = fields["name"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let uidRaw = fields["uid"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let display = (nameRaw?.isEmpty == false) ? nameRaw! : (uidRaw?.isEmpty == false ? uidRaw! : "参加者")
+            return "\(display) が参加しました"
         }
-        let dispName = (name?.isEmpty == false) ? name! : "相手"
-        return "\(dispName)さんがFaceTimeを登録しました"
+
+        if body.hasPrefix(sysFaceTimePrefix) {
+            let fields = parseSystemFields(from: body, prefix: sysFaceTimePrefix)
+            let rawName = fields["name"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let dispName = (rawName?.isEmpty == false) ? rawName! : "相手"
+            return "\(dispName)さんがFaceTimeを登録しました"
+        }
+
+        return nil
     }
 
     /// FaceTime登録システムメッセージ本文を作成
     static func makeFaceTimeRegisteredBody(name: String, faceTimeID: String) -> String {
-        return "\(sysFaceTimePrefix)|name=\(name)|id=\(faceTimeID)"
+        let safeName = sanitizeSystemValue(name)
+        let safeID = sanitizeSystemValue(faceTimeID)
+        return "\(sysFaceTimePrefix)|name=\(safeName)|id=\(safeID)"
+    }
+
+    /// 共有チャットへの参加完了メッセージ本文を作成
+    static func makeParticipantJoinedBody(name: String, userID: String) -> String {
+        let safeName = sanitizeSystemValue(name)
+        let safeID = sanitizeSystemValue(userID)
+        return "\(sysJoinPrefix)|name=\(safeName)|uid=\(safeID)"
     }
 
     /// FaceTime登録メッセージからFaceTimeIDを抽出
     static func extractFaceTimeID(from body: String?) -> String? {
         guard let body, body.hasPrefix(sysFaceTimePrefix) else { return nil }
-        let parts = body.components(separatedBy: "|")
-        for p in parts {
-            if p.hasPrefix("id=") { return String(p.dropFirst(3)) }
+        let fields = parseSystemFields(from: body, prefix: sysFaceTimePrefix)
+        return fields["id"]
+    }
+
+    /// 共有ルーム参加完了メッセージから名前とユーザIDを抽出
+    static func extractParticipantJoinedInfo(from body: String?) -> (name: String?, userID: String?)? {
+        guard let body, body.hasPrefix(sysJoinPrefix) else { return nil }
+        let fields = parseSystemFields(from: body, prefix: sysJoinPrefix)
+        let name = fields["name"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let uid = fields["uid"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedName = (name?.isEmpty == true) ? nil : name
+        let normalizedUID = (uid?.isEmpty == true) ? nil : uid
+        return (name: normalizedName, userID: normalizedUID)
+    }
+
+    private static func parseSystemFields(from body: String, prefix: String) -> [String: String] {
+        guard body.hasPrefix(prefix) else { return [:] }
+        let segments = body.components(separatedBy: "|").dropFirst()
+        var result: [String: String] = [:]
+        for segment in segments {
+            guard !segment.isEmpty else { continue }
+            let pair = segment.split(separator: "=", maxSplits: 1)
+            if pair.count == 2 {
+                result[String(pair[0])] = String(pair[1])
+            }
         }
-        return nil
+        return result
+    }
+
+    private static func sanitizeSystemValue(_ value: String) -> String {
+        var sanitized = value.replacingOccurrences(of: "|", with: "／")
+        sanitized = sanitized.replacingOccurrences(of: "\n", with: " ")
+        return sanitized
     }
 }

@@ -9,7 +9,7 @@ import SwiftData
 class UserIDManager: ObservableObject {
     static let shared = UserIDManager()
     
-    private let container = CKContainer(identifier: "iCloud.forMarin-test")
+    private let container = CloudKitChatManager.shared.containerForSharing
     
     @Published private(set) var unifiedUserID: String?
     @Published private(set) var isInitialized: Bool = false

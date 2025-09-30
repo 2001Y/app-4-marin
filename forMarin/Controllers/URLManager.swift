@@ -53,11 +53,8 @@ class URLManager: ObservableObject {
     /// 招待URLからチャットを作成（ゾーン名=roomID を先に確定し、そのroomIDで全体を駆動）
     func createChatFromInvite(userID: String, modelContext: ModelContext) async -> ChatRoom? {
         do {
-            // 統一ユーザーIDを取得
-            guard let myUserID = await UserIDManager.shared.getCurrentUserIDAsync() else {
-                log("Failed to get current user ID", category: "URLManager")
-                return nil
-            }
+            // CloudKitの単一ソースからUserIDを取得
+            let myUserID = try await CloudKitChatManager.shared.ensureCurrentUserID()
             
             // 自分自身のIDかチェック
             if userID == myUserID {
@@ -79,7 +76,7 @@ class URLManager: ObservableObject {
             }
             
             // ゾーン名（roomID）を先に確定
-            let roomID = "chat-\(UUID().uuidString.prefix(8))"
+            let roomID = CKSchema.makeZoneName()
 
             // CloudKit側にカスタムゾーン + ChatSession + CKShare(Zone Share) を作成
             do {

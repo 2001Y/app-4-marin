@@ -92,12 +92,10 @@ struct SettingsView: View {
                 }
                 // 権限状態を更新
                 refreshPermissionStatuses()
-                // ユーザーIDを取得
+                // ユーザーIDを取得（CloudKitの単一ソース）
                 Task {
-                    if let userID = await UserIDManager.shared.getCurrentUserIDAsync() {
-                        await MainActor.run {
-                            myUserID = userID
-                        }
+                    if let userID = try? await CloudKitChatManager.shared.ensureCurrentUserID() {
+                        await MainActor.run { myUserID = userID }
                     }
                 }
             }
@@ -125,85 +123,47 @@ struct SettingsView: View {
             dangerSection
         }
         .navigationTitle("設定")
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("閉じる") { dismiss() } } }
-        // Alerts
-        .alert("本当に削除しますか？", isPresented: $showClearChatAlert) {
-            Button("削除", role: .destructive) { clearMessages() }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("このデバイスに保存されているメッセージが全て消えます。")
-        }
-        .alert("画像キャッシュを削除しますか？", isPresented: $showClearCacheImagesAlert) {
-            Button("削除", role: .destructive) {
-                // 触覚フィードバック
-                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                impactFeedback.impactOccurred()
-                
-                ImageCacheManager.clearCache()
-                cacheSizeBytes = 0
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("閉じる") { dismiss() }
             }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("キャッシュフォルダ内の画像ファイルが削除されます。CloudKit から再取得可能です。")
         }
-        .alert("ログアウトしますか？", isPresented: $showLogoutAlert) {
-            Button("ログアウト", role: .destructive) { logout() }
-            Button("キャンセル", role: .cancel) {}
-        }
-        .alert("アプリ完全初期化", isPresented: $showResetAlert) {
-            Button("初期化", role: .destructive) { resetAppCompletely() }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("アプリを初回起動状態にリセットし、全てのデータが削除されます。初期化後、アプリを手動で再起動してください。")
-        }
-        .alert("スキーマ再構築完了", isPresented: $showSchemaRebuildAlert) {
-            Button("OK") {}
-        } message: {
-            Text("CloudKitスキーマの再構築が完了しました。アプリを再起動して変更を反映してください。")
-        }
-        .alert("CloudKit完全リセット", isPresented: $showCompleteResetAlert) {
-            Button("リセット", role: .destructive) {
-                // 実行先を完全クラウドリセットに統一（CloudKit→ローカル初期化）
-                performCompleteCloudReset()
-            }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("CloudKitデータベースを完全にリセットします。全てのチャットデータ、プロフィール、設定が削除されます。この操作は取り消せません。")
-        }
-        .alert("本番環境での緊急リセット", isPresented: $showProductionResetConfirm) {
-            Button("強制実行", role: .destructive) { performProductionEmergencyReset() }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("本番環境で緊急リセットを実行します。全てのユーザーデータが失われます。本当に実行しますか？")
-        }
-        .alert("緊急リセット", isPresented: $showEmergencyResetAlert) {
-            Button("実行", role: .destructive) { performEmergencyReset() }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("データ破損などの緊急時にリセットを実行します。\n\n\(resetErrorMessage)")
-        }
-        
-        // 統合リセット機能のアラート
-        .alert("ローカルリセット", isPresented: $showLocalResetAlert) {
-            Button("リセット", role: .destructive) { 
-                Task { 
-                    performLocalReset()
-                } 
-            }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("ローカルキャッシュ、画像キャッシュ、設定をクリアします。\nCloudKitのデータは保持されます。")
-        }
-        
-        .alert("完全初期化（CloudKit含む）", isPresented: $showCompleteCloudResetAlert) {
-            Button("完全初期化", role: .destructive) {
-                // 統一方針：CloudKit完全リセット後にローカルも完全初期化
-                performCompleteCloudReset()
-            }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("CloudKit・ローカルを含む全てのデータを削除します。\n⚠️ この操作は取り消せません")
-        }
+        .modifier(
+            PrimaryAlertsModifier(
+                showClearChatAlert: $showClearChatAlert,
+                showClearCacheImagesAlert: $showClearCacheImagesAlert,
+                showLogoutAlert: $showLogoutAlert,
+                onClearMessages: clearMessages,
+                onClearCacheConfirmed: clearImageCache,
+                onLogout: logout
+            )
+        )
+        .modifier(
+            ResetAlertsModifier(
+                showResetAlert: $showResetAlert,
+                showSchemaRebuildAlert: $showSchemaRebuildAlert,
+                showCompleteResetAlert: $showCompleteResetAlert,
+                onResetApp: resetAppCompletely,
+                onCompleteCloudReset: performCompleteCloudReset
+            )
+        )
+        .modifier(
+            EmergencyAlertsModifier(
+                showProductionResetConfirm: $showProductionResetConfirm,
+                showEmergencyResetAlert: $showEmergencyResetAlert,
+                resetErrorMessage: resetErrorMessage,
+                onPerformProductionEmergencyReset: performProductionEmergencyReset,
+                onPerformEmergencyReset: performEmergencyReset
+            )
+        )
+        .modifier(
+            UnifiedResetAlertsModifier(
+                showLocalResetAlert: $showLocalResetAlert,
+                showCompleteCloudResetAlert: $showCompleteCloudResetAlert,
+                onPerformLocalReset: performLocalReset,
+                onPerformCompleteCloudReset: performCompleteCloudReset
+            )
+        )
         // ページ遷移に統一（シートは使用しない）
         .sheet(isPresented: $showLogShareSheet) {
             if let url = logFileURL {
@@ -328,28 +288,7 @@ struct SettingsView: View {
             .padding(.vertical, 4)
             
             Button {
-                let shareText = """
-                4-Marinで一緒にチャットしませんか？ 🌊
-                
-                私のID: \(myUserID)
-                
-                アプリをダウンロードして、上記のIDを追加してください！
-                遠距離でも、一緒に開いてる時は顔が見える特別なメッセージアプリです。
-                
-                https://apps.apple.com/app/4-marin/id123456789
-                """
-                
-                let activityVC = UIActivityViewController(
-                    activityItems: [shareText],
-                    applicationActivities: nil
-                )
-                
-                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let window = windowScene.windows.first,
-                   let rootVC = window.rootViewController {
-                    activityVC.popoverPresentationController?.sourceView = window
-                    rootVC.present(activityVC, animated: true)
-                }
+                presentInviteShareSheet()
             } label: {
                 HStack {
                     Image(systemName: "square.and.arrow.up")
@@ -732,6 +671,14 @@ struct SettingsView: View {
             let all = try modelContext.fetch(FetchDescriptor<Message>())
             for m in all { modelContext.delete(m) }
         } catch { log("Error: \(error)", category: "App") }
+    }
+
+    private func clearImageCache() {
+        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+        impactFeedback.impactOccurred()
+
+        ImageCacheManager.clearCache()
+        cacheSizeBytes = 0
     }
 
     private func logout() {
@@ -1182,9 +1129,141 @@ struct SettingsView: View {
             }
         }
     }
-    }
     
-    // MARK: - 画像ダウンロード設定案内ハーフモーダル
+    // Extracted function to reduce complexity in view builder
+    // MARK: - View Modifiers
+    private struct PrimaryAlertsModifier: ViewModifier {
+        @Binding var showClearChatAlert: Bool
+        @Binding var showClearCacheImagesAlert: Bool
+        @Binding var showLogoutAlert: Bool
+        let onClearMessages: () -> Void
+        let onClearCacheConfirmed: () -> Void
+        let onLogout: () -> Void
+
+        func body(content: Content) -> some View {
+            content
+                .alert("本当に削除しますか？", isPresented: $showClearChatAlert) {
+                    Button("削除", role: .destructive, action: onClearMessages)
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("このデバイスに保存されているメッセージが全て消えます。")
+                }
+                .alert("画像キャッシュを削除しますか？", isPresented: $showClearCacheImagesAlert) {
+                    Button("削除", role: .destructive, action: onClearCacheConfirmed)
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("キャッシュフォルダ内の画像ファイルが削除されます。CloudKit から再取得可能です。")
+                }
+                .alert("ログアウトしますか？", isPresented: $showLogoutAlert) {
+                    Button("ログアウト", role: .destructive, action: onLogout)
+                    Button("キャンセル", role: .cancel) {}
+                }
+        }
+    }
+
+    private struct ResetAlertsModifier: ViewModifier {
+        @Binding var showResetAlert: Bool
+        @Binding var showSchemaRebuildAlert: Bool
+        @Binding var showCompleteResetAlert: Bool
+        let onResetApp: () -> Void
+        let onCompleteCloudReset: () -> Void
+
+        func body(content: Content) -> some View {
+            content
+                .alert("アプリ完全初期化", isPresented: $showResetAlert) {
+                    Button("初期化", role: .destructive, action: onResetApp)
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("アプリを初回起動状態にリセットし、全てのデータが削除されます。初期化後、アプリを手動で再起動してください。")
+                }
+                .alert("スキーマ再構築完了", isPresented: $showSchemaRebuildAlert) {
+                    Button("OK") {}
+                } message: {
+                    Text("CloudKitスキーマの再構築が完了しました。アプリを再起動して変更を反映してください。")
+                }
+                .alert("CloudKit完全リセット", isPresented: $showCompleteResetAlert) {
+                    Button("リセット", role: .destructive, action: onCompleteCloudReset)
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("CloudKitデータベースを完全にリセットします。全てのチャットデータ、プロフィール、設定が削除されます。この操作は取り消せません。")
+                }
+        }
+    }
+
+    private struct EmergencyAlertsModifier: ViewModifier {
+        @Binding var showProductionResetConfirm: Bool
+        @Binding var showEmergencyResetAlert: Bool
+        let resetErrorMessage: String
+        let onPerformProductionEmergencyReset: () -> Void
+        let onPerformEmergencyReset: () -> Void
+
+        func body(content: Content) -> some View {
+            content
+                .alert("本番環境での緊急リセット", isPresented: $showProductionResetConfirm) {
+                    Button("強制実行", role: .destructive, action: onPerformProductionEmergencyReset)
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("本番環境で緊急リセットを実行します。全てのユーザーデータが失われます。本当に実行しますか？")
+                }
+                .alert("緊急リセット", isPresented: $showEmergencyResetAlert) {
+                    Button("実行", role: .destructive, action: onPerformEmergencyReset)
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("データ破損などの緊急時にリセットを実行します。\n\n\(resetErrorMessage)")
+                }
+        }
+    }
+
+    private struct UnifiedResetAlertsModifier: ViewModifier {
+        @Binding var showLocalResetAlert: Bool
+        @Binding var showCompleteCloudResetAlert: Bool
+        let onPerformLocalReset: () -> Void
+        let onPerformCompleteCloudReset: () -> Void
+
+        func body(content: Content) -> some View {
+            content
+                .alert("ローカルリセット", isPresented: $showLocalResetAlert) {
+                    Button("リセット", role: .destructive, action: onPerformLocalReset)
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("ローカルキャッシュ、画像キャッシュ、設定をクリアします。\nCloudKitのデータは保持されます。")
+                }
+                .alert("完全初期化（CloudKit含む）", isPresented: $showCompleteCloudResetAlert) {
+                    Button("完全初期化", role: .destructive, action: onPerformCompleteCloudReset)
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("CloudKit・ローカルを含む全てのデータを削除します。\n⚠️ この操作は取り消せません")
+                }
+        }
+    }
+
+    private func presentInviteShareSheet() {
+        let shareText = """
+        4-Marinで一緒にチャットしませんか？ 🌊
+        
+        私のID: \(myUserID)
+        
+        アプリをダウンロードして、上記のIDを追加してください！
+        遠距離でも、一緒に開いてる時は顔が見える特別なメッセージアプリです。
+        
+        https://apps.apple.com/app/4-marin/id123456789
+        """
+
+        let activityVC = UIActivityViewController(
+            activityItems: [shareText],
+            applicationActivities: nil
+        )
+
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let window = windowScene.windows.first,
+           let rootVC = window.rootViewController {
+            activityVC.popoverPresentationController?.sourceView = window
+            rootVC.present(activityVC, animated: true)
+        }
+    }
+}
+    
+// MARK: - 画像ダウンロード設定案内ハーフモーダル
 struct ImageDownloadModalView: View {
     @Environment(\.dismiss) private var dismiss
     

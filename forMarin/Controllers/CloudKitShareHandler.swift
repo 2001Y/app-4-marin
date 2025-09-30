@@ -1,5 +1,6 @@
 import Foundation
 import CloudKit
+import SwiftData
 
 /// 🌟 [IDEAL SHARING] CloudKit共有招待の統一受諾管理
 final class CloudKitShareHandler {
@@ -93,7 +94,7 @@ final class CloudKitShareHandler {
                     
                     // 受諾成功後の処理
                     log("🔄 [SUCCESS] Starting post-acceptance handling", category: "CloudKitShareHandler")
-                    await self?.handleSuccessfulAcceptance(share: share)
+                    await self?.handleSuccessfulAcceptance(share: share, metadata: receivedMetadata)
                     
                 case .failure(let error):
                     log("💥 [FAILURE] Share acceptance failed with error", category: "CloudKitShareHandler")
@@ -148,35 +149,117 @@ final class CloudKitShareHandler {
     
     /// 🎉 [SUCCESS HANDLER] 共有受諾成功後の処理
     @MainActor
-    private func handleSuccessfulAcceptance(share: CKShare) async {
+    private func handleSuccessfulAcceptance(share: CKShare, metadata: CKShare.Metadata) async {
         log("🎉 [IDEAL SHARING] Share acceptance successful - performing post-acceptance verification", category: "CloudKitShareHandler")
-        
-        // 🔍 [VERIFICATION] Shared DBの状態をログ出力と検証
+
         await logSharedDatabaseState()
-        
-        // 🔍 [VERIFICATION] 受諾したShareが実際にアクセス可能かテスト
         await verifyShareAccess(share: share)
-        
-        // MessageSyncServiceに更新をトリガー
-        if #available(iOS 17.0, *) {
-            MessageSyncService.shared.checkForUpdates()
-            log("🔄 [IDEAL SHARING] Triggered MessageSyncService update", category: "CloudKitShareHandler")
+
+        // iOS 16+ では metadata.rootRecord が nil のことがあるため、share.recordID.zoneID をフォールバックに使用
+        let zoneIDForPost: CKRecordZone.ID
+        let inferredRoomID: String
+        if let rootRecord = metadata.rootRecord {
+            zoneIDForPost = rootRecord.recordID.zoneID
+            inferredRoomID = zoneIDForPost.zoneName
+        } else {
+            log("⚠️ [SYSJOIN] Missing rootRecord in share metadata — using share.recordID.zoneID as fallback", category: "CloudKitShareHandler")
+            zoneIDForPost = metadata.share.recordID.zoneID
+            inferredRoomID = zoneIDForPost.zoneName
         }
-        
-        // CloudKitChatManagerに通知
-        NotificationCenter.default.post(name: .cloudKitShareAccepted, object: share)
-        
-        // UIに成功を通知（必要に応じて）
-        NotificationCenter.default.post(name: Notification.Name("CloudKitShareAcceptedSuccessfully"), object: share)
-        
-        log("✅ [IDEAL SHARING] Post-acceptance processing completed", category: "CloudKitShareHandler")
+        guard !inferredRoomID.isEmpty else {
+            log("⚠️ [SYSJOIN] Unable to infer roomID from share metadata/zoneID", category: "CloudKitShareHandler")
+            return
+        }
+
+        let container = CKContainer(identifier: metadata.containerIdentifier)
+
+        log("✅ [SYSJOIN] Participant joined room=\(inferredRoomID)", category: "CloudKitShareHandler")
+        await postJoinSystemMessage(to: zoneIDForPost, container: container, roomID: inferredRoomID)
+
+        if #available(iOS 17.0, *) {
+            await MainActor.run {
+                MessageSyncPipeline.shared.checkForUpdates(roomID: inferredRoomID)
+                log("🔄 [IDEAL SHARING] Triggered MessageSyncPipeline update for room=\(inferredRoomID)", category: "CloudKitShareHandler")
+            }
+        }
+
+        // ローカルDBへ即時反映（遷移失敗の回避）
+        await MainActor.run {
+            do {
+                let context = try ModelContainerBroker.shared.mainContext()
+                Task { @MainActor in
+                    await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: context)
+                }
+            } catch {
+                log("⚠️ [BOOTSTRAP] ModelContainer not available: \(error)", category: "CloudKitShareHandler")
+            }
+        }
+
+        // 三人目以降の命名は「参加してきた側」だけが実行する
+        await setRoomNameIfThresholdReached(container: container, zoneID: zoneIDForPost, roomID: inferredRoomID)
+
+        // 共有受諾後の画面遷移はroomIDのみ通知（UI側で安全に処理）
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .openChatRoom, object: nil, userInfo: ["roomID": inferredRoomID])
+            NotificationCenter.default.post(name: .cloudKitShareAccepted, object: share)
+            NotificationCenter.default.post(name: Notification.Name("CloudKitShareAcceptedSuccessfully"), object: share)
+            NotificationCenter.default.post(name: .hideGlobalLoading, object: nil)
+        }
+        log("✅ [IDEAL SHARING] Post-acceptance processing completed — hideGlobalLoading posted", category: "CloudKitShareHandler")
+    }
+
+    /// 三人目以降の命名: RoomMemberが3名以上、かつRoom.nameが未設定なら、3名連結名を設定
+    @MainActor
+    private func setRoomNameIfThresholdReached(container: CKContainer, zoneID: CKRecordZone.ID, roomID: String) async {
+        do {
+            let sharedDB = container.sharedCloudDatabase
+            // 参加者数チェック
+            let query = CKQuery(recordType: CKSchema.SharedType.roomMember, predicate: NSPredicate(value: true))
+            let (results, _) = try await sharedDB.records(matching: query, inZoneWith: zoneID)
+            var ids: [String] = []
+            var nameMap: [String: String] = [:]
+            for (_, r) in results {
+                if case .success(let rec) = r {
+                    if let uid = rec[CKSchema.FieldKey.userId] as? String {
+                        let trimmed = uid.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { ids.append(trimmed) }
+                        if let dn = rec[CKSchema.FieldKey.displayName] as? String {
+                            let n = dn.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !n.isEmpty { nameMap[trimmed] = n }
+                        }
+                    }
+                }
+            }
+            guard ids.count >= 3 else { return }
+
+            // 既にCloudKitのRoom.nameが設定済みなら何もしない
+            let roomRecordID = CKSchema.roomRecordID(for: roomID, zoneID: zoneID)
+            let roomRecord = try await sharedDB.record(for: roomRecordID)
+            if let currentName = roomRecord[CKSchema.FieldKey.name] as? String, !currentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return
+            }
+
+            // ID昇順の先頭3名の名前を連結（自分を含む）
+            let top3 = ids.sorted().prefix(3)
+            let names = top3.map { uid in
+                let n = nameMap[uid]?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (n?.isEmpty == false) ? n! : String(uid.prefix(8))
+            }
+            let joined = names.joined(separator: "、")
+
+            roomRecord[CKSchema.FieldKey.name] = joined as CKRecordValue
+            _ = try await sharedDB.save(roomRecord)
+            log("✅ [JOINER NAMING] Set Room.name to '" + joined + "' for room=\(roomID)", category: "CloudKitShareHandler")
+        } catch {
+            log("⚠️ [JOINER NAMING] Failed to set Room.name: \(error)", category: "CloudKitShareHandler")
+        }
     }
     
     /// 🔍 [VERIFICATION] 受諾したShareへのアクセス検証
     @MainActor
     private func verifyShareAccess(share: CKShare) async {
         do {
-            let container = CKContainer(identifier: "iCloud.forMarin-test")
+            let container = CloudKitChatManager.shared.containerForSharing
             let sharedDB = container.sharedCloudDatabase
             
             // 🔍 [VERIFICATION] CKShareの詳細情報をログ出力
@@ -186,6 +269,10 @@ final class CloudKitShareHandler {
             log("🔍 [VERIFICATION] CKShare participants count: \(share.participants.count)", category: "CloudKitShareHandler")
             if let perm = share.currentUserParticipant?.permission {
                 log("🔍 [VERIFICATION] My permission: \(perm)", category: "CloudKitShareHandler")
+                if perm != .readWrite {
+                    let isProd = CloudKitChatManager.shared.checkIsProductionEnvironment()
+                    log("🧭 [GUIDE] 現在の権限が READ_WRITE ではありません。Console(\(isProd ? "Production" : "Development")) で当該共有の参加者 Permission を READ_WRITE に変更してください。", category: "CloudKitShareHandler")
+                }
             }
             for p in share.participants {
                 let name = p.userIdentity.nameComponents?.formatted() ?? "<unknown>"
@@ -199,27 +286,46 @@ final class CloudKitShareHandler {
                 log("🔍 [VERIFICATION] Zone: \(zone.zoneID.zoneName) (owner: \(zone.zoneID.ownerName))", category: "CloudKitShareHandler")
             }
             
-            // ChatSessionレコードの検索
-            let query = CKQuery(recordType: "ChatSession", predicate: NSPredicate(value: true))
-            let (results, _) = try await sharedDB.records(matching: query, resultsLimit: 10)
-            log("🔍 [VERIFICATION] ChatSession records in Shared DB: \(results.count)", category: "CloudKitShareHandler")
-            
-            for (recordID, result) in results {
-                switch result {
-                case .success(let record):
-                    if let roomID = record["roomID"] as? String {
-                        log("🔍 [VERIFICATION] Found ChatSession: \(roomID) in zone: \(recordID.zoneID.zoneName)", category: "CloudKitShareHandler")
-                    }
-                case .failure(let error):
-                    log("⚠️ [VERIFICATION] Failed to fetch ChatSession record: \(error)", category: "CloudKitShareHandler")
-                }
-            }
+            // SharedDB ではゾーン横断のクエリを避け、ゾーン一覧ログのみに留める（公式推奨に準拠）
             
         } catch {
             log("❌ [VERIFICATION] Failed to verify share access: \(error)", category: "CloudKitShareHandler")
             if let ckError = error as? CKError {
                 log("❌ [VERIFICATION] CKError code: \(ckError.code.rawValue)", category: "CloudKitShareHandler")
                 log("❌ [VERIFICATION] CKError description: \(ckError.localizedDescription)", category: "CloudKitShareHandler")
+            }
+        }
+    }
+
+    @MainActor
+    private func postJoinSystemMessage(to zoneID: CKRecordZone.ID, container: CKContainer, roomID: String) async {
+        do {
+            let userID = try await CloudKitChatManager.shared.ensureCurrentUserID()
+            let rawName = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayName = rawName.isEmpty ? userID : rawName
+            let body = Message.makeParticipantJoinedBody(name: displayName, userID: userID)
+
+            let recordID = CKRecord.ID(recordName: UUID().uuidString, zoneID: zoneID)
+            let record = CKRecord(recordType: CKSchema.SharedType.message, recordID: recordID)
+            record["roomID"] = roomID as CKRecordValue
+            record["senderID"] = userID as CKRecordValue
+            record["text"] = body as CKRecordValue
+            record["timestamp"] = Date() as CKRecordValue
+
+            let savedRecord = try await container.sharedCloudDatabase.save(record)
+            log("✅ [SYSJOIN] Posted join system message record=\(savedRecord.recordID.recordName) room=\(roomID)", category: "CloudKitShareHandler")
+        } catch {
+            log("⚠️ [SYSJOIN] Failed to post join system message for room=\(roomID): \(error)", category: "CloudKitShareHandler")
+            if let ck = error as? CKError {
+                log("⚠️ [SYSJOIN] CKError code=\(ck.code.rawValue) desc=\(ck.localizedDescription)", category: "CloudKitShareHandler")
+                let containerID = container.containerIdentifier ?? "<unknown>"
+                let isProd = CloudKitChatManager.shared.checkIsProductionEnvironment()
+                if ck.code == .permissionFailure || ck.localizedDescription.lowercased().contains("shared zone update is not enabled") {
+                    log("🧭 [GUIDE] 書込失敗の可能因: 'Zone wide sharing' が無効 / 参加者が READ_ONLY", category: "CloudKitShareHandler")
+                    log("🧭 [GUIDE] Console(\(isProd ? "Production" : "Development")) → Data → Private Database → Zones → \(zoneID.zoneName) → Zone Details → 'Zone wide sharing is enabled' を ON", category: "CloudKitShareHandler")
+                    log("🧭 [GUIDE] 同ゾーンの CKShare で参加者 Permission を READ_WRITE に設定", category: "CloudKitShareHandler")
+                    log("🧭 [GUIDE] container=\(containerID) zoneOwner=\(zoneID.ownerName) zone=\(zoneID.zoneName) scope=shared", category: "CloudKitShareHandler")
+                }
             }
         }
     }
@@ -316,15 +422,21 @@ final class CloudKitShareHandler {
                 log("ℹ️ [IDEAL SHARING] Share already accepted (treating as success): \(ckError.code)", category: "CloudKitShareHandler")
                 // 既に受諾済みの場合も成功扱いで後続処理を実行
                 
-                // MessageSyncServiceに更新をトリガー
+                // MessageSyncPipelineに更新をトリガー
                 if #available(iOS 17.0, *) {
-                    MessageSyncService.shared.checkForUpdates()
+                    MessageSyncPipeline.shared.checkForUpdates()
                 }
                 return
             }
             
             if let userInfo = ckError.userInfo[NSUnderlyingErrorKey] as? Error {
                 log("❌ [IDEAL SHARING] Underlying error: \(userInfo)", category: "CloudKitShareHandler")
+            }
+            if ckError.code == .permissionFailure || ckError.localizedDescription.lowercased().contains("shared zone update is not enabled") {
+                let isProd = CloudKitChatManager.shared.checkIsProductionEnvironment()
+                log("🧭 [GUIDE] 共有受諾後の書込権限に問題の可能性（READ_ONLY / 'Zone wide sharing' がOFF）", category: "CloudKitShareHandler")
+                log("🧭 [GUIDE] Console(\(isProd ? "Production" : "Development")) → Data → Private Database → Zones → [該当ゾーン] → 'Zone wide sharing is enabled' を ON", category: "CloudKitShareHandler")
+                log("🧭 [GUIDE] CKShare の参加者 Permission を READ_WRITE に設定", category: "CloudKitShareHandler")
             }
         }
         
@@ -339,7 +451,7 @@ final class CloudKitShareHandler {
     @MainActor
     private func logSharedDatabaseState() async {
         do {
-            let container = CKContainer(identifier: "iCloud.forMarin-test")
+            let container = CloudKitChatManager.shared.containerForSharing
             let sharedDB = container.sharedCloudDatabase
             
             // Shared DBのゾーン一覧
@@ -349,11 +461,7 @@ final class CloudKitShareHandler {
                 log("🔍 [IDEAL SHARING] Zone: \(zone.zoneID.zoneName) (owner: \(zone.zoneID.ownerName))", category: "CloudKitShareHandler")
             }
             
-            // ChatSessionレコードの検索
-            let query = CKQuery(recordType: "ChatSession", predicate: NSPredicate(value: true))
-            let (results, _) = try await sharedDB.records(matching: query)
-            log("🔍 [IDEAL SHARING] ChatSession records in Shared DB: \(results.count)", category: "CloudKitShareHandler")
-            
+            // SharedDB ではゾーン横断のクエリを避ける（ここでは一覧ログのみ）
         } catch {
             log("⚠️ [IDEAL SHARING] Failed to query Shared DB state: \(error)", category: "CloudKitShareHandler")
         }

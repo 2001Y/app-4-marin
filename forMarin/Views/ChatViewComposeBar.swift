@@ -59,6 +59,7 @@ extension ChatView {
             }
             // 入力欄の下スワイプでのみキーボードを閉じる
             .dismissKeyboardOnDrag()
+            // 公式推奨の safeAreaInset 構成に従い、余計なガード処理を排除（必要時にのみ再検討）
     }
 
     @ViewBuilder 

@@ -15,39 +15,43 @@ struct QRScannerSheet: View {
     @State private var lastDetectionAt = Date.distantPast
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("QRを読み取る")
-                    .font(.headline)
-                Spacer()
-                Button(action: { torchOn.toggle() }) {
-                    Image(systemName: torchOn ? "flashlight.off.fill" : "flashlight.on.fill")
-                }
-                .buttonStyle(.bordered)
-                .disabled(useVisionKit) // VisionKitではトーチ制御は非対応
-            }
-            .padding(.horizontal)
-            .padding(.top, 8)
+        NavigationStack {
+            ZStack {
+                GeometryReader { geo in
+                    let roi = normalizedROI(in: geo.size)
+                    ZStack {
+                        if useVisionKit {
+                            DataScannerView(isRunning: isRunning, torchOn: torchOn, regionOfInterest: roi) { text in
+                                handleScan(text)
+                            }
+                            .ignoresSafeArea()
+                        } else {
+                            AVQRScannerView(isRunning: isRunning, torchOn: torchOn, regionOfInterest: roi) { text in
+                                handleScan(text)
+                            }
+                            .ignoresSafeArea()
+                        }
 
-            GeometryReader { geo in
-                let roi = normalizedROI(in: geo.size)
-                ZStack {
-                    if useVisionKit {
-                        DataScannerView(isRunning: isRunning, torchOn: torchOn, regionOfInterest: roi) { text in
-                            handleScan(text)
-                        }
-                        .ignoresSafeArea(edges: .bottom)
-                    } else {
-                        AVQRScannerView(isRunning: isRunning, torchOn: torchOn, regionOfInterest: roi) { text in
-                            handleScan(text)
-                        }
-                        .ignoresSafeArea(edges: .bottom)
+                        // Framing overlay
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.9), style: .init(lineWidth: 2, dash: [6,6]))
+                            .frame(width: geo.size.width * 0.8, height: geo.size.height * 0.22)
+                            .allowsHitTesting(false)
                     }
-
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.white.opacity(0.9), style: .init(lineWidth: 2, dash: [6,6]))
-                        .frame(width: geo.size.width * 0.8, height: geo.size.height * 0.22)
-                        .allowsHitTesting(false)
+                }
+            }
+            .navigationTitle("QRを読み取る")
+            .toolbarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(action: { isPresented = false }) {
+                        Image(systemName: "chevron.backward")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: { isPresented = false }) {
+                        Image(systemName: "xmark")
+                    }
                 }
             }
         }
@@ -75,40 +79,36 @@ struct QRScannerSheet: View {
 
         Task { @MainActor in
             // モーダル閉鎖後〜チャット遷移までの間にシステム風ローディングを表示（通知でRootに指示）
-            NotificationCenter.default.post(name: Notification.Name("showGlobalLoading"), object: nil, userInfo: ["title": "読み込み中…"])
+            NotificationCenter.default.post(name: .showGlobalLoading, object: nil, userInfo: ["title": "読み込み中…"])
             // 1) CloudKit招待URL（icloud.com）か、アプリ内カスタム招待かを判定
             if url.host?.contains("icloud.com") == true {
-                // 事前にメタデータからゾーン名(roomID)を取得
+                // 事前にメタデータからゾーン名(roomID)を推定
                 var scannedRoomID: String? = nil
                 do {
                     let container = CloudKitChatManager.shared.containerForSharing
                     let meta = try await container.shareMetadata(for: url)
                     scannedRoomID = meta.share.recordID.zoneID.zoneName
+                    // 推奨: 詳細な受諾ハンドラを使用
+                    CloudKitShareHandler.shared.acceptShare(from: meta)
                 } catch {
-                    // メタデータ取得に失敗しても受諾は試みる
                     log("QRScanner: Failed to fetch share metadata: \(error)", category: "Invite")
+                    NotificationCenter.default.post(name: .hideGlobalLoading, object: nil)
+                    return
                 }
 
-                let ok = await InvitationManager.shared.acceptInvitation(from: url)
-                if ok {
-                    // 受諾後にローカルのChatRoomをブートストラップ
-                    await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
-                    MessageSyncService.shared.checkForUpdates()
+                // 受諾後のブートストラップ
+                await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
+                MessageSyncPipeline.shared.checkForUpdates()
 
-                    // roomID からチャットを特定して遷移通知
-                    if let roomID = scannedRoomID {
-                        // まず同一Contextで検索
-                        if let found = try? modelContext.fetch(FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })).first {
-                            NotificationCenter.default.post(name: .openChatRoom, object: nil, userInfo: ["room": found])
-                        } else {
-                            NotificationCenter.default.post(name: .openChatRoom, object: nil, userInfo: ["roomID": roomID])
-                        }
+                if let roomID = scannedRoomID {
+                    // まず同一Contextで検索
+                    if let found = try? modelContext.fetch(FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })).first {
+                        NotificationCenter.default.post(name: .openChatRoom, object: nil, userInfo: ["room": found])
+                    } else {
+                        NotificationCenter.default.post(name: .openChatRoom, object: nil, userInfo: ["roomID": roomID])
                     }
-                    onAccepted?()
-                } else {
-                    // エラー時はHUDを閉じる（遷移は発生しない）
-                    NotificationCenter.default.post(name: Notification.Name("hideGlobalLoading"), object: nil)
                 }
+                onAccepted?()
             }
         }
     }

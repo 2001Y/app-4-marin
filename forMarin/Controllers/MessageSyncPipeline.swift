@@ -71,14 +71,15 @@ final class MessageSyncPipeline: NSObject {
         CKSchema.FieldKey.emoji,
         // MessageAttachment
         CKSchema.FieldKey.asset,
-        // RTCSignal
-        CKSchema.FieldKey.fromMemberRef,
-        CKSchema.FieldKey.toMemberRef,
-        CKSchema.FieldKey.signalType,
-        CKSchema.FieldKey.payload,
-        CKSchema.FieldKey.consumed,
-        CKSchema.FieldKey.ttlSeconds,
-        CKSchema.FieldKey.callId
+        // SignalMailbox
+        CKSchema.FieldKey.userId,
+        CKSchema.FieldKey.targetUserId,
+        CKSchema.FieldKey.intentEpoch,
+        CKSchema.FieldKey.callEpoch,
+        CKSchema.FieldKey.consumedEpoch,
+        CKSchema.FieldKey.lastSeenAt,
+        CKSchema.FieldKey.updatedAt,
+        CKSchema.FieldKey.mailboxPayload
     ]
     static let shared = MessageSyncPipeline()
     
@@ -287,6 +288,8 @@ final class MessageSyncPipeline: NSObject {
         do {
             // 送信先DBとゾーンを解決（オーナー=private / 参加者=shared）
             let (targetDB, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: message.roomID)
+            let scopeLabel = (targetDB.databaseScope == .shared) ? "shared" : "private"
+            log("[MSG] Sending message room=\(message.roomID) scope=\(scopeLabel) zone=\(zoneID.zoneName) id=\(message.id)", category: "MessageSyncPipeline")
             let record = createCKRecord(from: message, zoneID: zoneID)
             
             // 🌟 [IDEAL UPLOAD] 添付ファイルがある場合は長時間実行アップロードを使用
@@ -307,7 +310,7 @@ final class MessageSyncPipeline: NSObject {
                 if let _ = record["attachment"] as? CKAsset {
                     log("✅ [IDEAL UPLOAD] Message with attachment sent successfully: \(message.id)", category: "MessageSyncPipeline")
                 } else {
-                    log("Message sent successfully: \(message.id)", category: "MessageSyncPipeline")
+                    log("[MSG] Message send success id=\(message.id) scope=\(scopeLabel) zone=\(zoneID.zoneName)", category: "MessageSyncPipeline")
                 }
             }
         } catch {
@@ -332,7 +335,7 @@ final class MessageSyncPipeline: NSObject {
                 }
                 
                 notifySyncFailed(roomID: message.roomID, error: error)
-                log("Failed to send message: \(error)", category: "MessageSyncPipeline")
+                log("❌ [MSG] Message send failed id=\(message.id) room=\(message.roomID) error=\(error)", category: "MessageSyncPipeline")
             }
         }
     }
@@ -583,7 +586,7 @@ final class MessageSyncPipeline: NSObject {
         let reactionTypes: Set<String> = [CKSchema.SharedType.reaction, "MessageReaction"]
         var affectedReactions: Set<ReactionKey> = []
         var pendingAttachments: [(roomID: String, messageRecordName: String, fileURL: URL)] = []
-        var rtcApplied = 0
+        var mailboxApplied = 0
 
         for record in records {
             if reactionTypes.contains(record.recordType) {
@@ -615,54 +618,14 @@ final class MessageSyncPipeline: NSObject {
                 continue
             }
 
-            // P2P: RTCSignal の適用（iOS 17+）
-            if record.recordType == CKSchema.SharedType.rtcSignal {
+            if record.recordType == CKSchema.SharedType.signalMailbox {
                 let zoneRoomID = record.recordID.zoneID.zoneName
                 if let filter = roomFilter, filter != zoneRoomID { continue }
-                let myID = CloudKitChatManager.shared.currentUserID ?? ""
-                // 宛先が自分宛ではない場合は無視
-                if let toRef = record[CKSchema.FieldKey.toMemberRef] as? CKRecord.Reference {
-                    let expected = "RM_\(myID)"
-                    let actual = toRef.recordID.recordName
-                    if actual != expected {
-                        log("[P2P] Skip RTCSignal not addressed to me record=\(record.recordID.recordName) expected=\(expected) actual=\(actual) room=\(zoneRoomID)", level: "DEBUG", category: "MessageSyncPipeline")
-                        continue
-                    }
-                } else {
-                    log("[P2P] Skip RTCSignal missing toMemberRef record=\(record.recordID.recordName) room=\(zoneRoomID)", level: "DEBUG", category: "MessageSyncPipeline")
-                    continue
-                }
-
-                // 種別で適用
-                let type = (record[CKSchema.FieldKey.signalType] as? String) ?? ""
-                var applied = false
-                switch type {
-                case "offer":
-                    applied = await P2PController.shared.applyOfferRecord(record)
-                case "answer":
-                    applied = await P2PController.shared.applyAnswerRecord(record)
-                case "ice":
-                    applied = await P2PController.shared.applyCandidatesRecord(record)
-                case "bundle":
-                    applied = await P2PController.shared.applySignalBundle(record)
-                default:
-                    if record[CKSchema.FieldKey.signalPayload] != nil {
-                        applied = await P2PController.shared.applySignalBundle(record)
-                    } else {
-                        applied = false
-                    }
-                }
-
+                let applied = await P2PController.shared.applyMailboxRecord(record)
                 if applied {
-                    rtcApplied += 1
-                    // 消費済みは deleteSelf で削除
-                    do {
-                        let (db, _) = try await CloudKitChatManager.shared.resolveSignalingDatabase(for: zoneRoomID)
-                        try await CloudKitChatManager.shared.deleteRTCSignal(recordID: record.recordID, database: db)
-                    } catch {
-                        log("⚠️ Failed to delete RTCSignal: \(error)", category: "MessageSyncPipeline")
-                    }
+                    mailboxApplied += 1
                 }
+                continue
             }
         }
 
@@ -674,8 +637,8 @@ final class MessageSyncPipeline: NSObject {
             notifyAttachmentUpdated(roomID: item.roomID, messageRecordName: item.messageRecordName, localPath: item.fileURL.path)
         }
 
-        if rtcApplied > 0 {
-            log("[P2P] Applied RTCSignal records: \(rtcApplied)", category: "MessageSyncPipeline")
+        if mailboxApplied > 0 {
+            log("[P2P] Applied SignalMailbox records: \(mailboxApplied)", category: "MessageSyncPipeline")
         }
     }
 

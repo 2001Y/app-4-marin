@@ -32,6 +32,13 @@ class CloudKitChatManager: ObservableObject {
     private var zoneChangeTokens: [String: CKServerChangeToken] = [:]
     private let privateZoneCacheKey = "CloudKitChatManager.PrivateZoneCache"
     private let sharedZoneCacheKey = "CloudKitChatManager.SharedZoneCache"
+    private let mailboxEncoder = JSONEncoder()
+    private let mailboxDecoder = JSONDecoder()
+
+    enum ZonePurpose {
+        case message
+        case signal
+    }
 
     private enum RoomScope: String {
         case `private`
@@ -67,6 +74,48 @@ class CloudKitChatManager: ObservableObject {
                 return CKRecordZone.ID(zoneName: zoneName, ownerName: ownerName)
             }
             return CKRecordZone.ID(zoneName: zoneName)
+        }
+    }
+
+    /// SignalMailbox に保存するシグナルペイロード。
+    /// - offerSDP: 自分が最新で公開しているOffer
+    /// - answerSDP: 自分が最新で公開しているAnswer
+    /// - iceCandidates: 自分が追加済みのICE候補バンドル（Base64エンコード済み）
+    struct SignalMailboxPayload: Codable {
+        var offerSDP: String?
+        var answerSDP: String?
+        var iceCandidates: [String]
+
+        static let empty = SignalMailboxPayload(offerSDP: nil, answerSDP: nil, iceCandidates: [])
+
+        var isEmpty: Bool {
+            return offerSDP == nil && answerSDP == nil && iceCandidates.isEmpty
+        }
+    }
+
+    /// CloudKit 上の SignalMailbox レコードをスナップショット化したもの。
+    /// 1ユーザーにつき1レコードを前提とし、自分自身だけが書き込みを行う。
+    struct SignalMailboxRecord {
+        let recordID: CKRecord.ID
+        let ownerUserID: String
+        var targetUserID: String?
+        var intentEpoch: Int
+        var callEpoch: Int
+        var consumedEpoch: Int
+        var lastSeenAt: Date?
+        var updatedAt: Date?
+        var payload: SignalMailboxPayload
+
+        static func fresh(recordID: CKRecord.ID, ownerUserID: String, targetUserID: String?) -> SignalMailboxRecord {
+            return SignalMailboxRecord(recordID: recordID,
+                                       ownerUserID: ownerUserID,
+                                       targetUserID: targetUserID,
+                                       intentEpoch: 0,
+                                       callEpoch: 0,
+                                       consumedEpoch: 0,
+                                       lastSeenAt: Date(),
+                                       updatedAt: Date(),
+                                       payload: .empty)
         }
     }
 
@@ -126,7 +175,10 @@ class CloudKitChatManager: ObservableObject {
     private init() {
         self.privateDB = container.privateCloudDatabase
         self.sharedDB = container.sharedCloudDatabase
-        
+        if #available(iOS 15.0, *) {
+            mailboxEncoder.outputFormatting = [.sortedKeys]
+        }
+
         setupSyncNotificationObservers()
         
         // 永続化されたスコープ/ゾーンマップをロード
@@ -1697,60 +1749,79 @@ class CloudKitChatManager: ObservableObject {
         if let scopeString = roomScopeCache[roomID],
            let scope = RoomScope(rawValue: scopeString),
            let cachedZone = zoneFromCache(roomID: roomID, scope: scope) {
-            return (scope.databaseScope == .shared ? sharedDB : privateDB, cachedZone)
+            let db = scope.databaseScope == .shared ? sharedDB : privateDB
+            log("[ZONE] resolveDatabaseAndZone(cache) room=\(roomID) scope=\(scope) zone=\(cachedZone.zoneName)", category: "share")
+            return (db, cachedZone)
         }
 
         if let zoneID = privateZoneCache[roomID] {
             cache(roomID: roomID, scope: .private, zoneID: zoneID)
+            log("[ZONE] resolveDatabaseAndZone(privateCache) room=\(roomID) zone=\(zoneID.zoneName)", category: "share")
             return (privateDB, zoneID)
         }
 
         if let zoneID = sharedZoneCache[roomID] {
             cache(roomID: roomID, scope: .shared, zoneID: zoneID)
+            log("[ZONE] resolveDatabaseAndZone(sharedCache) room=\(roomID) zone=\(zoneID.zoneName)", category: "share")
             return (sharedDB, zoneID)
         }
 
         if let zoneID = try await findZone(named: roomID, in: privateDB) {
             cache(roomID: roomID, scope: .private, zoneID: zoneID)
+            log("[ZONE] resolveDatabaseAndZone(privateLookup) room=\(roomID) zone=\(zoneID.zoneName)", category: "share")
             return (privateDB, zoneID)
         }
 
         if let zoneID = try await findZone(named: roomID, in: sharedDB) {
             cache(roomID: roomID, scope: .shared, zoneID: zoneID)
+            log("[ZONE] resolveDatabaseAndZone(sharedLookup) room=\(roomID) zone=\(zoneID.zoneName)", category: "share")
             return (sharedDB, zoneID)
         }
 
+        log("[ZONE] resolveDatabaseAndZone failed room=\(roomID) — zone not found", category: "share")
         throw CloudKitChatError.roomNotFound
     }
 
-    func resolveSignalingDatabase(for roomID: String) async throws -> (CKDatabase, CKRecordZone.ID) {
-        if let sharedZone = try await resolveSharedZoneIDIfExists(roomID: roomID) {
-            return (sharedDB, sharedZone)
+    private func resolveZoneContext(for roomID: String) async throws -> (database: CKDatabase, zoneID: CKRecordZone.ID, scope: RoomScope) {
+        let (database, zoneID) = try await resolveDatabaseAndZone(for: roomID)
+        guard let scope = RoomScope(databaseScope: database.databaseScope) else {
+            log("❌ [ZONE] Unsupported database scope=\(database.databaseScope.rawValue) room=\(roomID)", category: "share")
+            throw CloudKitChatError.roomNotFound
         }
+        return (database, zoneID, scope)
+    }
 
-        let isOwner = await isOwnerOfRoom(roomID)
-        if isOwner {
-            do {
-                if let descriptor = try? await fetchShare(for: roomID) {
-                    await ensureOwnerParticipant(for: descriptor)
-                } else {
-                    let descriptor = try await createSharedChatRoom(roomID: roomID)
-                    await ensureOwnerParticipant(for: descriptor)
-                }
-            } catch {
-                log("⚠️ [SIGNAL] Failed to ensure share for room=\(roomID): \(error)", category: "share")
+    private func ensureOwnerShareForSignal(roomID: String) async {
+        do {
+            if let descriptor = try? await fetchShare(for: roomID) {
+                await ensureOwnerParticipant(for: descriptor)
+                return
             }
-            if let sharedZone = try await resolveSharedZoneIDIfExists(roomID: roomID) {
-                return (sharedDB, sharedZone)
+            let descriptor = try await createSharedChatRoom(roomID: roomID)
+            await ensureOwnerParticipant(for: descriptor)
+        } catch {
+            log("⚠️ [SIGNAL] Failed to ensure shared zone for room=\(roomID): \(error)", category: "share")
+        }
+    }
+
+    func resolveZone(for roomID: String, purpose: ZonePurpose) async throws -> (CKDatabase, CKRecordZone.ID) {
+        let context = try await resolveZoneContext(for: roomID)
+
+        switch purpose {
+        case .message:
+            log("[ZONE] resolveZone(message) room=\(roomID) scope=\(context.scope.rawValue) zone=\(context.zoneID.zoneName)", category: "share")
+            return (context.database, context.zoneID)
+        case .signal:
+            switch context.scope {
+            case .private:
+                await ensureOwnerShareForSignal(roomID: roomID)
+                log("[ZONE] resolveZone(signal) owner scope=private zone=\(context.zoneID.zoneName)", category: "share")
+                return (context.database, context.zoneID)
+            case .shared:
+                log("[ZONE] resolveZone(signal) participant scope=shared zone=\(context.zoneID.zoneName)", category: "share")
+                return (context.database, context.zoneID)
             }
         }
-
-        if let sharedZone = try await resolveSharedZoneIDIfExists(roomID: roomID) {
-            return (sharedDB, sharedZone)
-        }
-
-        log("❌ [SIGNAL] Shared zone unavailable for room=\(roomID). Rejecting signaling fallback.", category: "share")
-        throw CloudKitChatError.signalingZoneUnavailable
     }
 
     private func ensureOwnerParticipant(for descriptor: ChatShareDescriptor) async {
@@ -1903,7 +1974,7 @@ class CloudKitChatManager: ObservableObject {
 
     func setupRoomSubscription(for roomID: String) async throws {
         do {
-            let (database, zoneID) = try await resolveSignalingDatabase(for: roomID)
+            let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
             try await ensureSubscriptions()
             try await ensureZoneSubscription(zoneID: zoneID, database: database)
         } catch {
@@ -1912,38 +1983,180 @@ class CloudKitChatManager: ObservableObject {
         }
     }
 
-    func deleteRTCSignal(recordID: CKRecord.ID, database: CKDatabase) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let op = CKModifyRecordsOperation(recordsToSave: nil, recordIDsToDelete: [recordID])
-            op.savePolicy = .changedKeys
-            op.modifyRecordsResultBlock = { result in
-                switch result {
-                case .success:
-                    continuation.resume(returning: ())
-                case .failure(let error):
-                    continuation.resume(throwing: error)
-                }
+    // MARK: - Signal Mailbox
+
+    /// 自ユーザー用の SignalMailbox を確保し、lastSeenAt を更新する。
+    /// - Parameters:
+    ///   - roomID: チャットルームID（ゾーン名）
+    ///   - userID: 自ユーザーID
+    ///   - targetUserID: 呼びかけ先（1:1では相手ID）
+    func ensureSignalMailbox(roomID: String, userID: String, targetUserID: String? = nil) async throws -> SignalMailboxRecord {
+        return try await mutateSignalMailbox(roomID: roomID, userID: userID) { snapshot in
+            if let targetUserID, !targetUserID.isEmpty {
+                snapshot.targetUserID = targetUserID
             }
-            database.add(op)
+            snapshot.lastSeenAt = Date()
         }
     }
 
-    func cleanupExpiredSignals(roomID: String, maxAge: TimeInterval = 600) async {
+    /// 任意のユーザーの SignalMailbox を取得する。
+    func fetchSignalMailbox(roomID: String, userID: String) async throws -> SignalMailboxRecord? {
+        let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
+        let recordID = CKSchema.signalMailboxRecordID(userId: userID, zoneID: zoneID)
         do {
-            let (database, zoneID) = try await resolveSignalingDatabase(for: roomID)
+            let record = try await database.record(for: recordID)
+            return signalMailboxSnapshot(from: record)
+        } catch let error as CKError where error.code == .unknownItem {
+            return nil
+        } catch {
+            throw error
+        }
+    }
+
+    /// ルーム内の全 SignalMailbox を列挙する。
+    func fetchSignalMailboxes(roomID: String) async throws -> [SignalMailboxRecord] {
+        let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
+        let predicate = NSPredicate(value: true)
+        let query = CKQuery(recordType: CKSchema.SharedType.signalMailbox, predicate: predicate)
+        let (results, _) = try await database.records(matching: query, inZoneWith: zoneID)
+        return results.compactMap { entry -> SignalMailboxRecord? in
+            guard let record = try? entry.1.get() else { return nil }
+            return signalMailboxSnapshot(from: record)
+        }
+    }
+
+    /// Mailbox レコードを楽観的ロックで更新するユーティリティ。
+    /// 典型的な利用パターン:
+    /// 1. フォアグラウンドで `ensureSignalMailbox` を呼んで `lastSeenAt` を更新
+    /// 2. Offer/Answer/ICE を公開する際は `mutateSignalMailbox` で `callEpoch` と `payload` を更新
+    /// 3. 相手Mailboxを消費後は `mutateSignalMailbox` で `consumedEpoch` や `payload` をクリア
+    /// `mutate` クロージャはスナップショットを inout で受け取り、変更後の値を返す。
+    func mutateSignalMailbox(roomID: String,
+                              userID: String,
+                              mutate: (inout SignalMailboxRecord) -> Void) async throws -> SignalMailboxRecord {
+        let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
+        let recordID = CKSchema.signalMailboxRecordID(userId: userID, zoneID: zoneID)
+        var attempt = 0
+        var lastError: Error?
+
+        while attempt < 3 {
+            attempt += 1
+            do {
+                let existingRecord: CKRecord?
+                do {
+                    existingRecord = try await database.record(for: recordID)
+                } catch let error as CKError where error.code == .unknownItem {
+                    existingRecord = nil
+                }
+
+                var snapshot = existingRecord.map { signalMailboxSnapshot(from: $0) }
+                    ?? SignalMailboxRecord.fresh(recordID: recordID, ownerUserID: userID, targetUserID: nil)
+                mutate(&snapshot)
+                snapshot.updatedAt = Date()
+                if snapshot.lastSeenAt == nil {
+                    snapshot.lastSeenAt = Date()
+                }
+
+                let ckRecord = try makeSignalMailboxCKRecord(from: snapshot, existing: existingRecord)
+                let saved = try await database.save(ckRecord)
+                return signalMailboxSnapshot(from: saved)
+            } catch let error as CKError {
+                lastError = error
+                if (error.code == .serverRecordChanged || error.code == .zoneBusy || error.code == .serviceUnavailable) && attempt < 3 {
+                    let delay = UInt64(0.2 * Double(attempt) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: delay)
+                    continue
+                }
+                if error.code == .unknownItem && attempt < 3 {
+                    continue
+                }
+                throw error
+            } catch {
+                lastError = error
+                throw error
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+        throw CloudKitChatError.signalingZoneUnavailable
+    }
+
+    /// しばらく更新されていない Mailbox を削除する（古い callEpoch の掃除を含む）。
+    func cleanupStaleSignalMailboxes(roomID: String, maxAge: TimeInterval = 600) async {
+        do {
+            let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
             let cutoff = Date().addingTimeInterval(-maxAge)
             let predicate = NSPredicate(format: "%K < %@", CKSchema.FieldKey.updatedAt, cutoff as NSDate)
-            let query = CKQuery(recordType: CKSchema.SharedType.rtcSignal, predicate: predicate)
+            let query = CKQuery(recordType: CKSchema.SharedType.signalMailbox, predicate: predicate)
             let (results, _) = try await database.records(matching: query, inZoneWith: zoneID)
-            let staleIDs = results.compactMap { try? $0.1.get().recordID }
+            let staleIDs: [CKRecord.ID] = results.compactMap { entry in
+                guard let record = try? entry.1.get() else { return nil }
+                return record.recordID
+            }
             guard !staleIDs.isEmpty else { return }
             let op = CKModifyRecordsOperation(recordsToSave: nil, recordIDsToDelete: staleIDs)
             op.isAtomic = false
             database.add(op)
-            log("[SIGNAL] Cleaned \(staleIDs.count) expired RTCSignal records room=\(roomID)", category: "share")
+            log("[SIGNAL] Cleaned \(staleIDs.count) stale SignalMailbox records room=\(roomID)", category: "share")
         } catch {
-            log("⚠️ [SIGNAL] Failed to cleanup expired signals room=\(roomID): \(error)", category: "share")
+            log("⚠️ [SIGNAL] Failed to cleanup SignalMailbox records room=\(roomID): \(error)", category: "share")
         }
+    }
+
+    // 旧API互換。Mailbox移行後は呼び出し元を cleanupStaleSignalMailboxes に切り替えてこのメソッドを削除する。
+    func cleanupExpiredSignals(roomID: String, maxAge: TimeInterval = 600) async {
+        await cleanupStaleSignalMailboxes(roomID: roomID, maxAge: maxAge)
+    }
+
+    func signalMailboxSnapshot(from record: CKRecord) -> SignalMailboxRecord {
+        let owner = (record[CKSchema.FieldKey.userId] as? String) ?? ""
+        let target = record[CKSchema.FieldKey.targetUserId] as? String
+        let intent = record[CKSchema.FieldKey.intentEpoch] as? Int ?? 0
+        let callEpoch = record[CKSchema.FieldKey.callEpoch] as? Int ?? 0
+        let consumed = record[CKSchema.FieldKey.consumedEpoch] as? Int ?? 0
+        let lastSeen = record[CKSchema.FieldKey.lastSeenAt] as? Date
+        let updated = record[CKSchema.FieldKey.updatedAt] as? Date
+        let payloadString = (record[CKSchema.FieldKey.mailboxPayload] as? String) ?? ""
+        let payloadData = payloadString.data(using: .utf8) ?? Data()
+        let payload = (try? mailboxDecoder.decode(SignalMailboxPayload.self, from: payloadData)) ?? .empty
+        return SignalMailboxRecord(recordID: record.recordID,
+                                   ownerUserID: owner,
+                                   targetUserID: target,
+                                   intentEpoch: intent,
+                                   callEpoch: callEpoch,
+                                   consumedEpoch: consumed,
+                                   lastSeenAt: lastSeen,
+                                   updatedAt: updated,
+                                   payload: payload)
+    }
+
+    private func makeSignalMailboxCKRecord(from snapshot: SignalMailboxRecord, existing: CKRecord?) throws -> CKRecord {
+        let record = existing ?? CKRecord(recordType: CKSchema.SharedType.signalMailbox, recordID: snapshot.recordID)
+        record[CKSchema.FieldKey.userId] = snapshot.ownerUserID as CKRecordValue
+        if let target = snapshot.targetUserID, !target.isEmpty {
+            record[CKSchema.FieldKey.targetUserId] = target as CKRecordValue
+        } else {
+            record[CKSchema.FieldKey.targetUserId] = nil
+        }
+        record[CKSchema.FieldKey.intentEpoch] = snapshot.intentEpoch as CKRecordValue
+        record[CKSchema.FieldKey.callEpoch] = snapshot.callEpoch as CKRecordValue
+        record[CKSchema.FieldKey.consumedEpoch] = snapshot.consumedEpoch as CKRecordValue
+        if let lastSeen = snapshot.lastSeenAt {
+            record[CKSchema.FieldKey.lastSeenAt] = lastSeen as CKRecordValue
+        } else {
+            record[CKSchema.FieldKey.lastSeenAt] = nil
+        }
+        let updated = snapshot.updatedAt ?? Date()
+        record[CKSchema.FieldKey.updatedAt] = updated as CKRecordValue
+        let payloadData = try mailboxEncoder.encode(snapshot.payload)
+        if let payloadString = String(data: payloadData, encoding: .utf8) {
+            record[CKSchema.FieldKey.mailboxPayload] = payloadString as CKRecordValue
+        } else {
+            record[CKSchema.FieldKey.mailboxPayload] = nil
+        }
+        return record
     }
 
     // MARK: - Participant Profiles

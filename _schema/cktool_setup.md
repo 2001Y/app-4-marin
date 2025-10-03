@@ -1,7 +1,6 @@
 # CKTool セットアップメモ
-cktoolは、Appleが提供するCloudKit用コマンドラインツールで、スキーマのエクスポートやインポート、検証、トークン管理などをスクリプトやCIから自動化するための公式手段です。
 
-forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利用手順を「最小セットアップ → 動作確認 → 運用」の順に整理する。実行ログは 2025-10-03 の Codex セッションで取得したものを記録する。プロジェクトやユーザーごとに異なる値は【例：〜〜】で明示する。
+forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利用手順を「最小セットアップ → 動作確認 → 運用」の順に整理する。実行ログは 2025-10-03 の Codex セッションで取得したものを記録する。
 
 ## 1. 最小セットアップ
 
@@ -9,14 +8,14 @@ forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利�
 - cktool は Xcode 13 以降に同梱されるため別途インストール不要。`xcrun cktool` で常に現在選択中の Xcode のバンドルを呼び出せる。
 - Apple Developer Program の有効なメンバーシップ (個人 / 法人 / Enterprise) が必要。
 - CloudKit Console の Account 設定から CloudKit Management Token を発行し、安全に保管しておく (再表示不可)。
-- コマンド確認 (forMarin の例):
+- コマンド確認:
   - `xcrun -f cktool` → `/Applications/Xcode.app/Contents/Developer/usr/bin/cktool`
   - `xcrun cktool --version` → `1.0.23001`
 
 ### 1.2 認証トークン登録 (初回のみ)
 1. Apple ID で CloudKit Console にサインインし、管理トークンを発行。
 2. `xcrun cktool save-token --type management` を実行。Safari が開くので発行済みトークンを貼り付けて保存する (デフォルトでキーチェーン保管)。
-3. CI など対話できない環境では `CLOUDKIT_MANAGEMENT_TOKEN` 環境変数で渡す運用も可能。例: `export CLOUDKIT_MANAGEMENT_TOKEN="【例：abcdefg123456】"`。
+3. CI など対話できない環境では `CLOUDKIT_MANAGEMENT_TOKEN` 環境変数で渡す運用も可能。機密情報はシークレットストアに登録し、ジョブ開始時にエクスポートする。
 4. トークン不要時は `xcrun cktool remove-token --type management` で削除。
 5. ユーザーデータ操作が必要な場合は `--type user` でユーザートークンを保存。ただし有効期限が短いため常時運用には不向き。
 
@@ -38,8 +37,8 @@ forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利�
 1. **本番または基準環境のスキーマをエクスポートしソース管理する**
    ```bash
    xcrun cktool export-schema \
-     --team-id 【例：2YQ8WT2BZY】 \
-     --container-id 【例：iCloud.forMarin-test】 \
+     --team-id <TEAM_ID> \
+     --container-id <CONTAINER_ID> \
      --environment production \
      --output-file Schema/CloudKitSchema.ckdb
    ```
@@ -47,8 +46,8 @@ forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利�
 2. **インポート前に validate-schema で検証する**
    ```bash
    xcrun cktool validate-schema \
-     --team-id 【例：2YQ8WT2BZY】 \
-     --container-id 【例：iCloud.forMarin-test】 \
+     --team-id <TEAM_ID> \
+     --container-id <CONTAINER_ID> \
      --environment development \
      --file Schema/CloudKitSchema.ckdb
    ```
@@ -56,8 +55,8 @@ forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利�
 3. **開発環境へインポート**
    ```bash
    xcrun cktool import-schema \
-     --team-id 【例：2YQ8WT2BZY】 \
-     --container-id 【例：iCloud.forMarin-test】 \
+     --team-id <TEAM_ID> \
+     --container-id <CONTAINER_ID> \
      --environment development \
      --file Schema/CloudKitSchema.ckdb
    ```
@@ -65,8 +64,8 @@ forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利�
 4. **必要に応じて開発環境を本番定義にリセット**
    ```bash
    xcrun cktool reset-schema \
-     --team-id 【例：2YQ8WT2BZY】 \
-     --container-id 【例：iCloud.forMarin-test】
+     --team-id <TEAM_ID> \
+     --container-id <CONTAINER_ID>
    ```
    - 本番スキーマを複製しつつ開発データを削除する破壊的操作。実行タイミングと権限管理を明確化する。
 
@@ -77,7 +76,7 @@ forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利�
   - 11:09 JST: 成功。出力 `✅ Schema is valid.` を確認し、インポート前チェックが通ることを確認。
 
 ## 4. CI / 自動化のヒント
-- トークンは CI プラットフォームのシークレットに保存し、`CLOUDKIT_MANAGEMENT_TOKEN` として注入する。例: GitHub Actions の Secrets に `CLOUDKIT_MANAGEMENT_TOKEN=【例：abcdefg123456】` を登録。
+- トークンは CI プラットフォームのシークレットに保存し、`CLOUDKIT_MANAGEMENT_TOKEN` として注入する。`--token` 引数での直接指定はログ露出のリスクが高いため避ける。
 - 管理トークンの有効期限 (既定 1 年) を追跡し、失効前に再発行・更新するスケジュールを運用ルールに含める。
 - 複数の Xcode を併用する場合でも `xcrun` を通すことで選択中 Xcode の cktool が呼び出される。
 - CI ジョブでは `set -euo pipefail` などを付与し失敗時に早期検出できるようにする。
@@ -85,18 +84,18 @@ forMarin リポジトリにおける CloudKit Command Line Tool (cktool) の利�
 ## 5. データ操作の疎通確認 (任意)
 ```bash
 xcrun cktool query-records \
-  --team-id 【例：2YQ8WT2BZY】 \
-  --container-id 【例：iCloud.forMarin-test】 \
-  --zone-name 【例：_defaultZone】 \
+  --team-id <TEAM_ID> \
+  --container-id <CONTAINER_ID> \
+  --zone-name _defaultZone \
   --database-type public \
   --environment development \
-  --record-type 【例：Room】
+  --record-type <RECORD_TYPE>
 ```
 - レコード型に queryable フィールド (例: `___recordID`) がない場合はフィルタ条件を指定する。
 - ユーザートークンが必要。CI などでは短命なため、基本的には手動検証に留める。
 
 ## 6. よくある落とし穴
-- Team ID / Container ID の取り違え → `xcrun cktool get-teams` で Team ID を確定し、Container は CloudKit Console や Xcode の Signing & Capabilities で確認する (forMarin の例: `iCloud.forMarin-test`)。
+- Team ID / Container ID の取り違え → `xcrun cktool get-teams` で Team ID を確定し、Container は CloudKit Console や Xcode の Signing & Capabilities で確認する。
 - 環境指定ミス → `export-schema` は production / development から選択、`import-schema` は development へ、`reset-schema` は development を本番定義に戻す。
 - トークン露出 → 共有環境では `--token` 直渡しを避け、キーチェーン保存または環境変数経由に統一する。
 - ネットワーク制限 → Apple API ドメインへの到達性がないと get-teams などが失敗する。VPN/プロキシ設定や許可リストを事前に確認する。
@@ -114,16 +113,16 @@ xcrun cktool save-token --type management
 xcrun cktool get-teams
 
 # 3) 本番スキーマ→ファイル
-xcrun cktool export-schema --team-id 【例：2YQ8WT2BZY】 --container-id 【例：iCloud.forMarin-test】 --environment production --output-file Schema/CloudKitSchema.ckdb
+xcrun cktool export-schema --team-id <TEAM_ID> --container-id <CONTAINER_ID> --environment production --output-file Schema/CloudKitSchema.ckdb
 
 # 4) (任意) スキーマ整合性チェック
-xcrun cktool validate-schema --team-id 【例：2YQ8WT2BZY】 --container-id 【例：iCloud.forMarin-test】 --environment development --file Schema/CloudKitSchema.ckdb
+xcrun cktool validate-schema --team-id <TEAM_ID> --container-id <CONTAINER_ID> --environment development --file Schema/CloudKitSchema.ckdb
 
 # 5) 開発へ適用
-xcrun cktool import-schema --team-id 【例：2YQ8WT2BZY】 --container-id 【例：iCloud.forMarin-test】 --environment development --file Schema/CloudKitSchema.ckdb
+xcrun cktool import-schema --team-id <TEAM_ID> --container-id <CONTAINER_ID> --environment development --file Schema/CloudKitSchema.ckdb
 
 # 6) (必要時) 開発を本番定義にリセット
-xcrun cktool reset-schema --team-id 【例：2YQ8WT2BZY】 --container-id 【例：iCloud.forMarin-test】
+xcrun cktool reset-schema --team-id <TEAM_ID> --container-id <CONTAINER_ID>
 ```
 
 ## 8. 次のステップ

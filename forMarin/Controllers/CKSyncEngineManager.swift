@@ -34,6 +34,61 @@ actor CKSyncEngineManager: CKSyncEngineDelegate {
         self.sharedDB = container.sharedCloudDatabase
     }
 
+    private func engine(for scope: CKDatabase.Scope) -> CKSyncEngine? {
+        switch scope {
+        case .private:
+            return privateEngine
+        case .shared:
+            return sharedEngine
+        default:
+            return nil
+        }
+    }
+
+    private func enqueueRecord(
+        roomID: String,
+        purpose: CloudKitChatManager.ZonePurpose,
+        build: (CKRecordZone.ID, CKDatabase.Scope) -> CKRecord
+    ) async {
+        do {
+            let (database, zoneID) = try await CloudKitChatManager.shared.resolveZone(for: roomID, purpose: purpose)
+            guard let engine = engine(for: database.databaseScope) else { return }
+
+            engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
+
+            let record = build(zoneID, database.databaseScope)
+            let recordID = record.recordID
+            outboxRecords[recordID] = record
+            outboxAccess[recordID] = Date()
+
+            engine.state.add(pendingRecordZoneChanges: [.saveRecord(recordID)])
+            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
+        } catch {
+            let purposeLabel = (purpose == .message) ? "message" : "signal"
+            log("⚠️ [CKSyncEngine] Failed to enqueue record room=\(roomID) purpose=\(purposeLabel) error=\(error)", category: "CKSyncEngine")
+        }
+    }
+
+    private func enqueueDelete(
+        recordName: String,
+        roomID: String,
+        purpose: CloudKitChatManager.ZonePurpose
+    ) async {
+        do {
+            let (database, zoneID) = try await CloudKitChatManager.shared.resolveZone(for: roomID, purpose: purpose)
+            guard let engine = engine(for: database.databaseScope) else { return }
+
+            let recordID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
+            engine.state.add(pendingRecordZoneChanges: [.deleteRecord(recordID)])
+            outboxRecords.removeValue(forKey: recordID)
+            outboxAccess.removeValue(forKey: recordID)
+            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
+        } catch {
+            let purposeLabel = (purpose == .message) ? "message" : "signal"
+            log("⚠️ [CKSyncEngine] Failed to enqueue delete room=\(roomID) purpose=\(purposeLabel) error=\(error)", category: "CKSyncEngine")
+        }
+    }
+
     func start() async {
         await setupEngines()
     }
@@ -367,64 +422,32 @@ actor CKSyncEngineManager: CKSyncEngineDelegate {
 
     // MARK: - Public API (queue WorkItems)
     func queueMessage(_ message: Message) async {
-        do {
-            let (db, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: message.roomID)
-            let engine = (db.databaseScope == .private) ? privateEngine : sharedEngine
-            guard let engine else { return }
-
-            // ゾーン確保
-            engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
-
-            // Record 構築
+        let senderID: String = await MainActor.run { CloudKitChatManager.shared.currentUserID ?? "" }
+        await enqueueRecord(roomID: message.roomID, purpose: .message) { zoneID, _ in
             let recID = CKRecord.ID(recordName: message.id.uuidString, zoneID: zoneID)
             let record = CKRecord(recordType: "Message", recordID: recID)
             record["roomID"] = message.roomID as CKRecordValue
-            let senderID: String = await MainActor.run { CloudKitChatManager.shared.currentUserID ?? "" }
             record["senderID"] = senderID as CKRecordValue
             record["text"] = (message.body ?? "") as CKRecordValue
             record["timestamp"] = message.createdAt as CKRecordValue
-            outboxRecords[recID] = record
-            outboxAccess[recID] = Date()
-
-            // WorkItem 追加
-            engine.state.add(pendingRecordZoneChanges: [.saveRecord(recID)])
-            // 可能なら即時送信を軽く促す（スパムしない）
-            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
-        } catch {
-            // 失敗時は従来経路へ委譲しない（完全移行）
+            return record
         }
     }
 
     func queueAttachment(messageRecordName: String, roomID: String, localFileURL: URL) async {
-        do {
-            let (db, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: roomID)
-            let engine = (db.databaseScope == .private) ? privateEngine : sharedEngine
-            guard let engine else { return }
-
-            engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
-
+        await enqueueRecord(roomID: roomID, purpose: .message) { zoneID, _ in
             let recID = CKRecord.ID(recordName: UUID().uuidString, zoneID: zoneID)
             let record = CKRecord(recordType: "MessageAttachment", recordID: recID)
             let messageID = CKRecord.ID(recordName: messageRecordName, zoneID: zoneID)
             record["messageRef"] = CKRecord.Reference(recordID: messageID, action: .none)
             record["asset"] = CKAsset(fileURL: localFileURL)
             record["createdAt"] = Date() as CKRecordValue
-            outboxRecords[recID] = record
-            outboxAccess[recID] = Date()
-
-            engine.state.add(pendingRecordZoneChanges: [.saveRecord(recID)])
-            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
-        } catch { }
+            return record
+        }
     }
 
     func queueReaction(messageRecordName: String, roomID: String, emoji: String, userID: String) async {
-        do {
-            let (db, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: roomID)
-            let engine = (db.databaseScope == .private) ? privateEngine : sharedEngine
-            guard let engine else { return }
-
-            engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
-
+        await enqueueRecord(roomID: roomID, purpose: .message) { zoneID, _ in
             let reactionID = MessageReaction.createID(messageRecordName: messageRecordName, userID: userID, emoji: emoji)
             let reaction = MessageReaction(
                 id: reactionID,
@@ -433,14 +456,8 @@ actor CKSyncEngineManager: CKSyncEngineDelegate {
                 emoji: emoji,
                 createdAt: Date()
             )
-            let record = reaction.toCloudKitRecord(in: zoneID)
-            let recID = record.recordID
-            outboxRecords[recID] = record
-            outboxAccess[recID] = Date()
-
-            engine.state.add(pendingRecordZoneChanges: [.saveRecord(recID)])
-            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
-        } catch { }
+            return reaction.toCloudKitRecord(in: zoneID)
+        }
     }
 
     // MARK: - Public API (stats / control)
@@ -521,98 +538,48 @@ actor CKSyncEngineManager: CKSyncEngineDelegate {
 
     // MARK: - Public API (update/delete WorkItems)
     func queueUpdateMessage(recordName: String, roomID: String, newBody: String, newTimestamp: Date = Date()) async {
-        do {
-            let (db, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: roomID)
-            let engine = (db.databaseScope == .private) ? privateEngine : sharedEngine
-            guard let engine else { return }
-
-            engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
-
+        let uid: String? = await MainActor.run { CloudKitChatManager.shared.currentUserID }
+        await enqueueRecord(roomID: roomID, purpose: .message) { zoneID, _ in
             let recID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
             let record = CKRecord(recordType: "Message", recordID: recID)
             record["roomID"] = roomID as CKRecordValue
-            let uid: String? = await MainActor.run { CloudKitChatManager.shared.currentUserID }
             if let uid { record["senderID"] = uid as CKRecordValue }
             record["text"] = newBody as CKRecordValue
             record["timestamp"] = newTimestamp as CKRecordValue
-            outboxRecords[recID] = record
-            outboxAccess[recID] = Date()
-
-            engine.state.add(pendingRecordZoneChanges: [.saveRecord(recID)])
-            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
-        } catch { }
+            return record
+        }
     }
 
     func queueDeleteMessage(recordName: String, roomID: String) async {
-        do {
-            let (db, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: roomID)
-            let engine = (db.databaseScope == .private) ? privateEngine : sharedEngine
-            guard let engine else { return }
-
-            let recID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
-            engine.state.add(pendingRecordZoneChanges: [.deleteRecord(recID)])
-            outboxRecords.removeValue(forKey: recID)
-            outboxAccess.removeValue(forKey: recID)
-            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
-        } catch { }
+        await enqueueDelete(recordName: recordName, roomID: roomID, purpose: .message)
     }
 
     // MARK: - Public API (Anniversary WorkItems)
     func queueAnniversaryCreate(recordName: String, roomID: String, title: String, date: Date) async {
-        do {
-            let (db, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: roomID)
-            let engine = (db.databaseScope == .private) ? privateEngine : sharedEngine
-            guard let engine else { return }
-
-            // Ensure custom zone exists in engine state
-            engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
-
+        await enqueueRecord(roomID: roomID, purpose: .message) { zoneID, _ in
             let recID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
             let record = CKRecord(recordType: "CD_Anniversary", recordID: recID)
             record["title"] = title as CKRecordValue
             record["date"] = date as CKRecordValue
             record["roomID"] = roomID as CKRecordValue
             record["createdAt"] = Date() as CKRecordValue
-            outboxRecords[recID] = record
-            outboxAccess[recID] = Date()
-
-            engine.state.add(pendingRecordZoneChanges: [.saveRecord(recID)])
-            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
-        } catch { }
+            return record
+        }
     }
 
     func queueAnniversaryUpdate(recordName: String, roomID: String, title: String, date: Date) async {
-        do {
-            let (db, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: roomID)
-            let engine = (db.databaseScope == .private) ? privateEngine : sharedEngine
-            guard let engine else { return }
-
-            engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
-
+        await enqueueRecord(roomID: roomID, purpose: .message) { zoneID, _ in
             let recID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
             let record = CKRecord(recordType: "CD_Anniversary", recordID: recID)
             record["title"] = title as CKRecordValue
             record["date"] = date as CKRecordValue
             record["roomID"] = roomID as CKRecordValue
-            outboxRecords[recID] = record
-            outboxAccess[recID] = Date()
-
-            engine.state.add(pendingRecordZoneChanges: [.saveRecord(recID)])
-            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
-        } catch { }
+            record["updatedAt"] = Date() as CKRecordValue
+            return record
+        }
     }
 
     func queueAnniversaryDelete(recordName: String, roomID: String) async {
-        do {
-            let (db, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: roomID)
-            let engine = (db.databaseScope == .private) ? privateEngine : sharedEngine
-            guard let engine else { return }
-
-            let recID = CKRecord.ID(recordName: recordName, zoneID: zoneID)
-            engine.state.add(pendingRecordZoneChanges: [.deleteRecord(recID)])
-            outboxRecords.removeValue(forKey: recID)
-            outboxAccess.removeValue(forKey: recID)
-            try? await engine.sendChanges(CKSyncEngine.SendChangesOptions())
-        } catch { }
+        await enqueueDelete(recordName: recordName, roomID: roomID, purpose: .message)
     }
 }

@@ -12,7 +12,7 @@ enum CKSchema {
         static let message = "Message"
         static let messageAttachment = "MessageAttachment"
         static let reaction = "Reaction"
-        static let rtcSignal = "RTCSignal"
+        static let signalMailbox = "SignalMailbox"
     }
 
     // Record types (private DB)
@@ -48,19 +48,14 @@ enum CKSchema {
         static let memberRef = "memberRef"
         static let emoji = "emoji"
 
-        // RTCSignal
-        static let fromMemberRef = "fromMemberRef"
-        static let toMemberRef = "toMemberRef"
-        static let signalType = "type"     // "offer" | "answer" | "ice"
-        static let payload = "payload"     // SDP or ICE (encoded)
-        static let consumed = "consumed"
-        static let ttlSeconds = "ttlSeconds"
-        static let callId = "callId"
-        // Negotiation ordering / freshness
-        static let sdpRevision = "sdpRevision"   // Int: monotonic per-sender, increments on each localDescription set
-        static let epoch = "epoch"               // Int: session epoch (e.g., ms since epoch at start)
-        static let signalPayload = "signalPayload" // JSON bundle of offers/answers/candidates
-        static let updatedAt = "updatedAt"         // Date: latest mutation timestamp
+        // SignalMailbox（メンバー単位シグナル）
+        static let updatedAt = "updatedAt"
+        static let mailboxPayload = "mailboxPayload"
+        static let intentEpoch = "intentEpoch"
+        static let callEpoch = "callEpoch"
+        static let consumedEpoch = "consumedEpoch"
+        static let targetUserId = "targetUserId"
+        static let lastSeenAt = "lastSeenAt"
 
         // Private profile
         static let faceTimeID = "faceTimeID"
@@ -83,5 +78,9 @@ enum CKSchema {
 
     static func roomMemberRecordID(userId: String, zoneID: CKRecordZone.ID) -> CKRecord.ID {
         return CKRecord.ID(recordName: "RM_\(userId)", zoneID: zoneID)
+    }
+
+    static func signalMailboxRecordID(userId: String, zoneID: CKRecordZone.ID) -> CKRecord.ID {
+        return CKRecord.ID(recordName: "MB_\(userId)", zoneID: zoneID)
     }
 }

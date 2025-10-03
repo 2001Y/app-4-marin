@@ -330,23 +330,22 @@ struct ChatView: View {
                 }
                 // remoteUserID が空→実IDに変化したらP2Pを追随起動（空のままでも再評価しない）
                 .onChange(of: chatRoom.remoteUserID) { _, newID in
-                    let me = CloudKitChatManager.shared.currentUserID ?? myID
-                    if !newID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       !me.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        log("[P2P] remoteUserID changed -> starting P2P (my=\(String(me.prefix(8))) remote=\(String(newID.prefix(8))))", category: "P2P")
-                        P2PController.shared.startIfNeeded(roomID: roomID, myID: me, remoteID: newID)
-                        showOwnerInviteSheet = false
-                    }
+                    let me = (CloudKitChatManager.shared.currentUserID ?? myID).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !me.isEmpty else { return }
+                    let trimmedRemote = newID.trimmingCharacters(in: .whitespacesAndNewlines)
+                    log("[P2P] remoteUserID changed -> starting P2P (my=\(String(me.prefix(8))) remote=\(String(trimmedRemote.prefix(8))))", category: "P2P")
+                    let remoteArg = trimmedRemote.isEmpty ? nil : trimmedRemote
+                    P2PController.shared.startIfNeeded(roomID: roomID, myID: me, remoteID: remoteArg)
+                    if remoteArg != nil { showOwnerInviteSheet = false }
                 }
                 .onReceive(chatManager.$currentUserID) { uid in
                     if let uid, uid != myID {
                         myID = uid
                         log("[ChatView] myID updated via publisher: \(String(uid.prefix(8)))", category: "DEBUG")
                         let remote = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !remote.isEmpty {
-                            log("[P2P] myID update -> starting P2P (my=\(String(uid.prefix(8))) remote=\(String(remote.prefix(8))))", category: "P2P")
-                            P2PController.shared.startIfNeeded(roomID: roomID, myID: uid, remoteID: chatRoom.remoteUserID)
-                        }
+                        let remoteArg = remote.isEmpty ? nil : remote
+                        log("[P2P] myID update -> starting P2P (my=\(String(uid.prefix(8))) remote=\(String(remote.prefix(8))))", category: "P2P")
+                        P2PController.shared.startIfNeeded(roomID: roomID, myID: uid, remoteID: remoteArg)
                     }
                 }
                 .onChange(of: messages.count) { _, newCount in

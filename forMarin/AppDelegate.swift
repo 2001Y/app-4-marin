@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 CloudKitShareHandler.shared.acceptShare(from: meta)
             }
         }
-        
+
         // オフライン検知機能の初期化（通知権限のみ）
         Task {
             await NotificationManager.shared.requestAuthorizationIfNeeded()

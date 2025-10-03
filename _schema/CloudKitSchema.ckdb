@@ -1,0 +1,388 @@
+DEFINE SCHEMA
+
+    RECORD TYPE AnniversaryCK (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        annivDate       TIMESTAMP QUERYABLE SORTABLE,
+        createdAt       TIMESTAMP QUERYABLE SORTABLE,
+        repeatType      STRING QUERYABLE SEARCHABLE SORTABLE,
+        roomID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        title           STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE CD_Anniversary (
+        CD_ckRecordName STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_date         TIMESTAMP QUERYABLE SORTABLE,
+        CD_entityName   STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_id           STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_repeatType   BYTES QUERYABLE SORTABLE,
+        CD_roomID       STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_title        STRING QUERYABLE SEARCHABLE SORTABLE,
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        annivDate       TIMESTAMP QUERYABLE SORTABLE,
+        createdAt       TIMESTAMP QUERYABLE SORTABLE,
+        repeatType      STRING QUERYABLE SEARCHABLE SORTABLE,
+        roomID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        title           STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE CD_ChatRoom (
+        CD_autoDownloadImages INT64 QUERYABLE SORTABLE,
+        CD_createdAt          TIMESTAMP QUERYABLE SORTABLE,
+        CD_entityName         STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_id                 STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_lastMessageDate    TIMESTAMP QUERYABLE SORTABLE,
+        CD_lastMessageText    STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_remoteUserID       STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_roomID             STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_unreadCount        INT64 QUERYABLE SORTABLE,
+        "___createTime"       TIMESTAMP,
+        "___createdBy"        REFERENCE,
+        "___etag"             STRING,
+        "___modTime"          TIMESTAMP,
+        "___modifiedBy"       REFERENCE,
+        "___recordID"         REFERENCE,
+        createdAt             TIMESTAMP QUERYABLE SORTABLE,
+        createdBy             STRING QUERYABLE SEARCHABLE SORTABLE,
+        lastMessageDate       TIMESTAMP QUERYABLE SORTABLE,
+        lastMessageText       STRING QUERYABLE SEARCHABLE SORTABLE,
+        participants          LIST<STRING> QUERYABLE SEARCHABLE,
+        roomID                STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE CD_Message (
+        CD_assetPath          STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_body               STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_ckRecordName       STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_createdAt          TIMESTAMP QUERYABLE SORTABLE,
+        CD_entityName         STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_id                 STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_imageLocalURLsBlob BYTES QUERYABLE SORTABLE,
+        CD_isSent             INT64 QUERYABLE SORTABLE,
+        CD_reactionEmoji      STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_roomID             STRING QUERYABLE SEARCHABLE SORTABLE,
+        CD_senderID           STRING QUERYABLE SEARCHABLE SORTABLE,
+        "___createTime"       TIMESTAMP,
+        "___createdBy"        REFERENCE,
+        "___etag"             STRING,
+        "___modTime"          TIMESTAMP,
+        "___modifiedBy"       REFERENCE,
+        "___recordID"         REFERENCE,
+        body                  STRING QUERYABLE SEARCHABLE SORTABLE,
+        createdAt             TIMESTAMP QUERYABLE SORTABLE,
+        reactionEmoji         STRING QUERYABLE SEARCHABLE SORTABLE,
+        reactions             STRING QUERYABLE SEARCHABLE SORTABLE,
+        roomID                STRING QUERYABLE SEARCHABLE SORTABLE,
+        senderID              STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE CD_Profile (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        avatarData      BYTES QUERYABLE SORTABLE,
+        displayName     STRING QUERYABLE SEARCHABLE SORTABLE,
+        faceTimeID      STRING QUERYABLE SEARCHABLE SORTABLE,
+        updatedAt       TIMESTAMP QUERYABLE SORTABLE,
+        userID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE ChatSession (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        createdAt       TIMESTAMP QUERYABLE SORTABLE,
+        createdBy       STRING QUERYABLE SEARCHABLE SORTABLE,
+        ownerID         STRING QUERYABLE SEARCHABLE SORTABLE,
+        roomID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        timestamp       TIMESTAMP QUERYABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE Message (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        attachment      ASSET,
+        body            STRING QUERYABLE SEARCHABLE SORTABLE,
+        createdAt       TIMESTAMP QUERYABLE SORTABLE,
+        roomID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        senderID        STRING QUERYABLE SEARCHABLE SORTABLE,
+        senderMemberRef REFERENCE QUERYABLE,
+        text            STRING QUERYABLE SEARCHABLE SORTABLE,
+        timestamp       TIMESTAMP QUERYABLE SORTABLE,
+        type            STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE MessageAttachment (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        asset           ASSET,
+        createdAt       TIMESTAMP QUERYABLE SORTABLE,
+        messageRef      REFERENCE QUERYABLE,
+        type            STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE MessageCK (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        asset           ASSET,
+        body            STRING QUERYABLE SEARCHABLE SORTABLE,
+        createdAt       TIMESTAMP QUERYABLE SORTABLE,
+        reactions       STRING QUERYABLE SEARCHABLE SORTABLE,
+        roomID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        senderID        STRING QUERYABLE SEARCHABLE SORTABLE,
+        videoAsset      ASSET,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE MessageReaction (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        createdAt       TIMESTAMP QUERYABLE SORTABLE,
+        emoji           STRING QUERYABLE SEARCHABLE SORTABLE,
+        messageRef      REFERENCE QUERYABLE,
+        userID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE MyProfilePrivate (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        displayName     STRING QUERYABLE SEARCHABLE SORTABLE,
+        faceTimeID      STRING QUERYABLE SEARCHABLE SORTABLE,
+        userId          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE ParticipantProfile (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        avatarData      BYTES QUERYABLE SORTABLE,
+        avatarShape     INT64 QUERYABLE SORTABLE,
+        displayName     STRING QUERYABLE SEARCHABLE SORTABLE,
+        updatedAt       TIMESTAMP QUERYABLE SORTABLE,
+        userID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE PresenceCK (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        expires         TIMESTAMP QUERYABLE SORTABLE,
+        roomID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        userID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE ProfileCK (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        displayName     STRING QUERYABLE SEARCHABLE SORTABLE,
+        updatedAt       TIMESTAMP QUERYABLE SORTABLE,
+        userID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE RTCSignal (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        callId          STRING QUERYABLE SEARCHABLE SORTABLE,
+        candidates      LIST<STRING> QUERYABLE SEARCHABLE,
+        consumed        INT64 QUERYABLE SORTABLE,
+        createdAt       TIMESTAMP QUERYABLE SORTABLE,
+        fromMemberRef   REFERENCE QUERYABLE,
+        kind            STRING QUERYABLE SEARCHABLE SORTABLE,
+        payload         STRING QUERYABLE SEARCHABLE SORTABLE,
+        sdp             STRING QUERYABLE SEARCHABLE SORTABLE,
+        sdpMLineIndex   INT64 QUERYABLE SORTABLE,
+        sdpMid          STRING QUERYABLE SEARCHABLE SORTABLE,
+        senderID        STRING QUERYABLE SEARCHABLE SORTABLE,
+        signalPayload   STRING QUERYABLE SEARCHABLE SORTABLE,
+        toMemberRef     REFERENCE QUERYABLE,
+        ttlSeconds      INT64 QUERYABLE SORTABLE,
+        type            STRING QUERYABLE SEARCHABLE SORTABLE,
+        updatedAt       TIMESTAMP QUERYABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE Room (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        name            STRING QUERYABLE SEARCHABLE SORTABLE,
+        roomID          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE RoomListEntry (
+        "___createTime"     TIMESTAMP,
+        "___createdBy"      REFERENCE,
+        "___etag"           STRING,
+        "___modTime"        TIMESTAMP,
+        "___modifiedBy"     REFERENCE,
+        "___recordID"       REFERENCE,
+        lastMessageAt       TIMESTAMP QUERYABLE SORTABLE,
+        lastMessageText     STRING QUERYABLE SEARCHABLE SORTABLE,
+        lastReadAt          TIMESTAMP QUERYABLE SORTABLE,
+        roomName            STRING QUERYABLE SEARCHABLE SORTABLE,
+        roomRecordName      STRING QUERYABLE SEARCHABLE SORTABLE,
+        sharedZoneName      STRING QUERYABLE SEARCHABLE SORTABLE,
+        sharedZoneOwnerName STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE RoomMember (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        displayName     STRING QUERYABLE SEARCHABLE SORTABLE,
+        userId          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE SignalMailbox (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        callEpoch       INT64 QUERYABLE SORTABLE,
+        consumedEpoch   INT64 QUERYABLE SORTABLE,
+        intentEpoch     INT64 QUERYABLE SORTABLE,
+        lastSeenAt      TIMESTAMP QUERYABLE SORTABLE,
+        mailboxPayload  STRING QUERYABLE SEARCHABLE SORTABLE,
+        targetUserId    STRING QUERYABLE SEARCHABLE SORTABLE,
+        updatedAt       TIMESTAMP QUERYABLE SORTABLE,
+        userId          STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE Users (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE,
+        roles           LIST<INT64>,
+        GRANT WRITE TO "_creator",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE "cloudkit.share" (
+        "___createTime"               TIMESTAMP,
+        "___createdBy"                REFERENCE,
+        "___etag"                     STRING,
+        "___modTime"                  TIMESTAMP,
+        "___modifiedBy"               REFERENCE,
+        "___recordID"                 REFERENCE,
+        "cloudkit.thumbnailImageData" BYTES,
+        "cloudkit.title"              STRING,
+        "cloudkit.type"               STRING,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );

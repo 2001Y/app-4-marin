@@ -1,0 +1,12 @@
+**変更内容**
+- `OfflineStatusView` に接続状態のテキストとカラーをまとめて返す `connectionStatus` 計算プロパティを追加し、サークルとラベル双方で同じ三項演算子を二重に書かずに済むよう整理しました。これで状態表示に手を入れる際の修正箇所が一か所に集まり、読みやすさと保守性が向上します。`forMarin/Views/OfflineStatusView.swift:3-57`
+
+**確認状況**
+- UIリファクタのみのためビルド／テストは未実施です。必要であれば `OfflineStatusView` を含む画面のスナップショットテストや SwiftUI プレビュー確認をお願いします。
+
+**追加で検討すると良さそうな点**
+1. `OfflineStatusView` の `onChange` で `DispatchQueue.main.asyncAfter` を直接呼んでいるため、`Task.sleep` を使った async/await への置き換えで可読性と一貫性を高められます。
+2. `ConnectivityManager` の UserDefaults 管理キーが散在しているので、小さなラッパー型にまとめればキータイプミスの余地を減らせます。
+
+**補足**
+- 指示に従い MCP リソース一覧を取得しようとしましたが、`list_mcp_resources` からは空配列が返り Serena MCP を利用できませんでした。

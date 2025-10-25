@@ -2,6 +2,10 @@ import SwiftUI
 import PhotosUI
 
 extension ChatView {
+    /// トリミング後に入力が存在するかの共通判定
+    private var hasComposedText: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
     
     // MARK: - Compose Bar Views
     @ViewBuilder 
@@ -19,7 +23,7 @@ extension ChatView {
     // 以下 composeBarView のパーツをさらに分解
     @ViewBuilder 
     func composeLeadingTools() -> some View {
-        let hasText = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let hasText = hasComposedText
         HStack(spacing: 8) {
             if editingMessage == nil && !hasText {
                 // 写真/動画ピッカー（テキスト未入力時のみ）
@@ -64,7 +68,7 @@ extension ChatView {
 
     @ViewBuilder 
     func composeTrailingTools() -> some View {
-        let hasText = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let hasText = hasComposedText
         HStack(spacing: 8) {
             // 最近使った絵文字・ピッカーはテキスト未入力時のみ表示
             if editingMessage == nil && !hasText {

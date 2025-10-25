@@ -311,60 +311,15 @@ struct ChatListView: View {
     private func avatarView(for userID: String, displayText: Substring) -> some View {
         let shapeIndex = CloudKitChatManager.shared.getCachedAvatarShapeIndex(for: userID)
             ?? CloudKitChatManager.shared.stableShapeIndex(for: userID)
-        
-        Group {
-            switch shapeIndex {
-            case 0:
-                Circle()
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 60, height: 60)
-                    .overlay(
-                        Text(displayText)
-                            .font(.title2)
-                    )
-            case 1:
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 54, height: 54)
-                    .overlay(
-                        Text(displayText)
-                            .font(.title2)
-                    )
-            case 2:
-                PentagonShape()
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 58, height: 58)
-                    .overlay(
-                        Text(displayText)
-                            .font(.title2)
-                    )
-            case 3:
-                HexagonShape()
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 58, height: 58)
-                    .overlay(
-                        Text(displayText)
-                            .font(.title2)
-                    )
-            case 4:
-                OctagonShape()
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 58, height: 58)
-                    .overlay(
-                        Text(displayText)
-                            .font(.title2)
-                    )
-            default:
-                Circle()
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 60, height: 60)
-                    .overlay(
-                        Text(displayText)
-                            .font(.title2)
-                    )
-            }
-        }
-        .frame(width: 60, height: 60)
+        let config = AvatarPlaceholderConfig(shapeIndex: shapeIndex)
+        AvatarPlaceholderShape(style: config.style)
+            .fill(Color.gray.opacity(0.3))
+            .frame(width: config.size, height: config.size)
+            .overlay(
+                Text(displayText)
+                    .font(.title2)
+            )
+            .frame(width: 60, height: 60)
     }
 
     // 画像アバター優先版（表示名/IDからのイニシャルにフォールバック）
@@ -382,7 +337,78 @@ struct ChatListView: View {
             avatarView(for: room.remoteUserID, displayText: displayText)
         }
     }
+
+}
+
+// MARK: - Avatar Placeholder Helpers
+
+private struct AvatarPlaceholderConfig {
+    let style: AvatarPlaceholderShape.Style
+    let size: CGFloat
     
+    init(shapeIndex: Int) {
+        switch shapeIndex {
+        case 0:
+            style = .circle
+            size = 60
+        case 1:
+            style = .roundedRect(cornerRadius: 8)
+            size = 54
+        case 2:
+            style = .polygon(sides: 5)
+            size = 58
+        case 3:
+            style = .polygon(sides: 6)
+            size = 58
+        case 4:
+            style = .polygon(sides: 8)
+            size = 58
+        default:
+            style = .circle
+            size = 60
+        }
+    }
+}
+
+private struct AvatarPlaceholderShape: Shape {
+    enum Style {
+        case circle
+        case roundedRect(cornerRadius: CGFloat)
+        case polygon(sides: Int)
+    }
+    
+    var style: Style
+    
+    func path(in rect: CGRect) -> Path {
+        switch style {
+        case .circle:
+            return Circle().path(in: rect)
+        case let .roundedRect(cornerRadius):
+            return RoundedRectangle(cornerRadius: cornerRadius).path(in: rect)
+        case let .polygon(sides):
+            return polygonPath(sides: max(3, sides), in: rect)
+        }
+    }
+    
+    private func polygonPath(sides: Int, in rect: CGRect) -> Path {
+        var path = Path()
+        let centerX = rect.midX
+        let centerY = rect.midY
+        let radius = min(rect.width, rect.height) / 2
+        
+        for i in 0..<sides {
+            let angle = Double(i) * 2.0 * .pi / Double(sides) - .pi / 2.0
+            let x = centerX + radius * cos(angle)
+            let y = centerY + radius * sin(angle)
+            if i == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        path.closeSubpath()
+        return path
+    }
 }
 
 // MARK: - 重複検出ログ（診断用）
@@ -723,86 +749,5 @@ struct NewChatSheet: View {
                 isTextFieldFocused = true
             }
         }
-    }
-}
-
-// 五角形のShapeを定義
-struct PentagonShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        
-        let centerX = rect.midX
-        let centerY = rect.midY
-        let radius = min(rect.width, rect.height) / 2
-        
-        // 五角形の5つの頂点を定義（上から開始）
-        for i in 0..<5 {
-            let angle = Double(i) * 2.0 * .pi / 5.0 - .pi / 2.0 // 上から開始するため-π/2
-            let x = centerX + radius * cos(angle)
-            let y = centerY + radius * sin(angle)
-            
-            if i == 0 {
-                path.move(to: CGPoint(x: x, y: y))
-            } else {
-                path.addLine(to: CGPoint(x: x, y: y))
-            }
-        }
-        path.closeSubpath()
-        
-        return path
-    }
-}
-
-// 六角形のShapeを定義
-struct HexagonShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        
-        let centerX = rect.midX
-        let centerY = rect.midY
-        let radius = min(rect.width, rect.height) / 2
-        
-        // 六角形の6つの頂点を定義（上から開始）
-        for i in 0..<6 {
-            let angle = Double(i) * 2.0 * .pi / 6.0 - .pi / 2.0 // 上から開始するため-π/2
-            let x = centerX + radius * cos(angle)
-            let y = centerY + radius * sin(angle)
-            
-            if i == 0 {
-                path.move(to: CGPoint(x: x, y: y))
-            } else {
-                path.addLine(to: CGPoint(x: x, y: y))
-            }
-        }
-        path.closeSubpath()
-        
-        return path
-    }
-}
-
-// 八角形のShapeを定義
-struct OctagonShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        
-        let centerX = rect.midX
-        let centerY = rect.midY
-        let radius = min(rect.width, rect.height) / 2
-        
-        // 八角形の8つの頂点を定義（上から開始）
-        for i in 0..<8 {
-            let angle = Double(i) * 2.0 * .pi / 8.0 - .pi / 2.0 // 上から開始するため-π/2
-            let x = centerX + radius * cos(angle)
-            let y = centerY + radius * sin(angle)
-            
-            if i == 0 {
-                path.move(to: CGPoint(x: x, y: y))
-            } else {
-                path.addLine(to: CGPoint(x: x, y: y))
-            }
-        }
-        path.closeSubpath()
-        
-        return path
     }
 }

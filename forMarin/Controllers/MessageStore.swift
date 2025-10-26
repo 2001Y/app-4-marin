@@ -80,89 +80,63 @@ class MessageStore: ObservableObject {
         
         if #available(iOS 17.0, *) {
             // NOTE: MessageSyncPipeline 通知ベース。旧 MessageSyncService (Combine) は再導入しないこと。
-            let center = NotificationCenter.default
+            observeMessagePipelineEvent(.messagePipelineDidReceiveMessage, roomID: currentRoomID) { store, notification, roomID in
+                guard let message = notification.userInfo?["message"] as? Message,
+                      message.roomID == roomID else { return }
+                store.handleReceivedMessage(message)
+            }
 
-            notificationTokens.append(center.addObserver(forName: .messagePipelineDidReceiveMessage,
-                                                          object: nil,
-                                                          queue: nil) { [weak self] notification in
-                guard let self,
-                      let message = notification.userInfo?["message"] as? Message,
-                      message.roomID == currentRoomID else { return }
-                Task { @MainActor in self.handleReceivedMessage(message) }
-            })
+            observeMessagePipelineEvent(.messagePipelineDidDeleteMessage, roomID: currentRoomID) { store, notification, _ in
+                guard let messageID = notification.userInfo?["messageID"] as? String else { return }
+                store.handleDeletedMessage(messageID)
+            }
 
-            notificationTokens.append(center.addObserver(forName: .messagePipelineDidDeleteMessage,
-                                                          object: nil,
-                                                          queue: nil) { [weak self] notification in
-                guard let self,
-                      let messageID = notification.userInfo?["messageID"] as? String else { return }
-                Task { @MainActor in self.handleDeletedMessage(messageID) }
-            })
-
-            notificationTokens.append(center.addObserver(forName: .messagePipelineDidStart,
-                                                          object: nil,
-                                                          queue: nil) { [weak self] notification in
-                guard let self else { return }
+            observeMessagePipelineEvent(.messagePipelineDidStart, roomID: currentRoomID) { store, notification, roomID in
                 let roomInfo = notification.userInfo?["roomID"] as? String
-                if roomInfo == nil || roomInfo == currentRoomID {
-                    Task { @MainActor in self.isSyncing = true }
+                if roomInfo == nil || roomInfo == roomID {
+                    store.isSyncing = true
                 }
-            })
+            }
 
-            notificationTokens.append(center.addObserver(forName: .messagePipelineDidFinish,
-                                                          object: nil,
-                                                          queue: nil) { [weak self] notification in
-                guard let self else { return }
+            observeMessagePipelineEvent(.messagePipelineDidFinish, roomID: currentRoomID) { store, notification, roomID in
                 let roomInfo = notification.userInfo?["roomID"] as? String
-                if roomInfo == nil || roomInfo == currentRoomID {
-                    Task { @MainActor in self.isSyncing = false }
+                if roomInfo == nil || roomInfo == roomID {
+                    store.isSyncing = false
                 }
-            })
+            }
 
-            notificationTokens.append(center.addObserver(forName: .messagePipelineDidFail,
-                                                          object: nil,
-                                                          queue: nil) { [weak self] notification in
-                guard let self,
-                      let error = notification.userInfo?["error"] as? Error else { return }
+            observeMessagePipelineEvent(.messagePipelineDidFail, roomID: currentRoomID) { store, notification, roomID in
+                guard let error = notification.userInfo?["error"] as? Error else { return }
                 let roomInfo = notification.userInfo?["roomID"] as? String
-                if roomInfo == nil || roomInfo == currentRoomID {
-                    Task { @MainActor in
-                        self.syncError = error
-                        self.isSyncing = false
-                        log("Sync error: \(error)", category: "MessageStore")
-                    }
+                if roomInfo == nil || roomInfo == roomID {
+                    store.syncError = error
+                    store.isSyncing = false
+                    log("Sync error: \(error)", category: "MessageStore")
                 }
-            })
+            }
 
-            notificationTokens.append(center.addObserver(forName: .messagePipelineDidUpdateReactions,
-                                                          object: nil,
-                                                          queue: nil) { [weak self] notification in
-                guard let self,
-                      let room = notification.userInfo?["roomID"] as? String,
-                      room == currentRoomID,
+            observeMessagePipelineEvent(.messagePipelineDidUpdateReactions, roomID: currentRoomID) { store, notification, roomID in
+                guard let room = notification.userInfo?["roomID"] as? String,
+                      room == roomID,
                       let recordName = notification.userInfo?["recordName"] as? String else { return }
-                Task { @MainActor in self.refreshReactions(for: recordName) }
-            })
+                store.refreshReactions(for: recordName)
+            }
 
-            notificationTokens.append(center.addObserver(forName: .messagePipelineDidUpdateAttachment,
-                                                          object: nil,
-                                                          queue: nil) { [weak self] notification in
-                guard let self,
-                      let room = notification.userInfo?["roomID"] as? String,
-                      room == currentRoomID,
+            observeMessagePipelineEvent(.messagePipelineDidUpdateAttachment, roomID: currentRoomID) { store, notification, roomID in
+                guard let room = notification.userInfo?["roomID"] as? String,
+                      room == roomID,
                       let recordName = notification.userInfo?["recordName"] as? String,
                       let localPath = notification.userInfo?["localPath"] as? String else { return }
-                Task { @MainActor in
-                    if let idx = self.messages.firstIndex(where: { $0.ckRecordName == recordName }) {
-                        self.messages[idx].assetPath = localPath
-                        do { try self.modelContext.save() } catch { log("Failed to save attachment path: \(error)", category: "MessageStore") }
-                        log("Attachment updated for message=\(recordName)", level: "DEBUG", category: "MessageStore")
-                    } else {
-                        self.pendingAttachmentPaths[recordName] = localPath
-                        log("Attachment queued (message not yet in UI): record=\(recordName)", level: "DEBUG", category: "MessageStore")
-                    }
+
+                if let idx = store.messages.firstIndex(where: { $0.ckRecordName == recordName }) {
+                    store.messages[idx].assetPath = localPath
+                    do { try store.modelContext.save() } catch { log("Failed to save attachment path: \(error)", category: "MessageStore") }
+                    log("Attachment updated for message=\(recordName)", level: "DEBUG", category: "MessageStore")
+                } else {
+                    store.pendingAttachmentPaths[recordName] = localPath
+                    log("Attachment queued (message not yet in UI): record=\(recordName)", level: "DEBUG", category: "MessageStore")
                 }
-            })
+            }
         }
         
         // Subscribe to offline manager events
@@ -199,6 +173,20 @@ class MessageStore: ObservableObject {
         // UserIDマイグレーションは廃止（roomID=zoneName不変のため）
     }
     
+    private func observeMessagePipelineEvent(
+        _ name: Notification.Name,
+        roomID: String,
+        handler: @escaping @MainActor (MessageStore, Notification, String) -> Void
+    ) {
+        let token = NotificationCenter.default.addObserver(forName: name,
+                                                            object: nil,
+                                                            queue: nil) { [weak self] notification in
+            guard let self else { return }
+            Task { @MainActor in handler(self, notification, roomID) }
+        }
+        notificationTokens.append(token)
+    }
+
     /// 特定のルーム用のPush Notificationサブスクリプションを設定
     private func setupRoomPushNotifications() {
         Task {

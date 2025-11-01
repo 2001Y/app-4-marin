@@ -60,3 +60,4 @@ iOSInjectionProject/
 .env.test.local
 .env.production.local 
 /.worktrees/
+/.worktrees/

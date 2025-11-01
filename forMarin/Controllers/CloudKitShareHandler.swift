@@ -195,6 +195,15 @@ final class CloudKitShareHandler {
             }
         }
 
+        Task {
+            do {
+                try await CloudKitChatManager.shared.setupRoomSubscription(for: inferredRoomID)
+                log("📡 [IDEAL SHARING] Signal subscriptions ensured room=\(inferredRoomID)", category: "CloudKitShareHandler")
+            } catch {
+                log("⚠️ [IDEAL SHARING] Failed to ensure signal subscriptions room=\(inferredRoomID): \(error)", category: "CloudKitShareHandler")
+            }
+        }
+
         // 三人目以降の命名は「参加してきた側」だけが実行する
         await setRoomNameIfThresholdReached(container: container, zoneID: zoneIDForPost, roomID: inferredRoomID)
 

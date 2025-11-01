@@ -25,7 +25,19 @@ struct RoomDetailSheet: View {
     @State private var editRepeatType: RepeatType = .none
     // 招待導線はChatView/リストの統一モーダルに集約（Profileからは撤廃）
 
-    var partnerName: String { chatRoom.displayName ?? chatRoom.remoteUserID }
+    var partnerName: String {
+        if let name = chatRoom.displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        if let counterpart = chatRoom.primaryCounterpart {
+            if let display = counterpart.displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !display.isEmpty {
+                return display
+            }
+            let uid = counterpart.userID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !uid.isEmpty { return uid }
+        }
+        return ""
+    }
 
     init(chatRoom: ChatRoom, partnerAvatar: UIImage?) {
         self.chatRoom = chatRoom

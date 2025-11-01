@@ -32,8 +32,6 @@ class CloudKitChatManager: ObservableObject {
     private var zoneChangeTokens: [String: CKServerChangeToken] = [:]
     private let privateZoneCacheKey = "CloudKitChatManager.PrivateZoneCache"
     private let sharedZoneCacheKey = "CloudKitChatManager.SharedZoneCache"
-    private let mailboxEncoder = JSONEncoder()
-    private let mailboxDecoder = JSONDecoder()
 
     enum ZonePurpose {
         case message
@@ -77,46 +75,41 @@ class CloudKitChatManager: ObservableObject {
         }
     }
 
-    /// SignalMailbox に保存するシグナルペイロード。
-    /// - offerSDP: 自分が最新で公開しているOffer
-    /// - answerSDP: 自分が最新で公開しているAnswer
-    /// - iceCandidates: 自分が追加済みのICE候補バンドル（Base64エンコード済み）
-    struct SignalMailboxPayload: Codable {
-        var offerSDP: String?
-        var answerSDP: String?
-        var iceCandidates: [String]
-
-        static let empty = SignalMailboxPayload(offerSDP: nil, answerSDP: nil, iceCandidates: [])
-
-        var isEmpty: Bool {
-            return offerSDP == nil && answerSDP == nil && iceCandidates.isEmpty
-        }
+    struct SignalSessionSnapshot {
+        let recordID: CKRecord.ID
+        let sessionKey: String
+        let roomID: String
+        let callerUserID: String
+        let calleeUserID: String
+        var activeCallEpoch: Int
+        var updatedAt: Date?
     }
 
-    /// CloudKit 上の SignalMailbox レコードをスナップショット化したもの。
-    /// 1ユーザーにつき1レコードを前提とし、自分自身だけが書き込みを行う。
-    struct SignalMailboxRecord {
-        let recordID: CKRecord.ID
-        let ownerUserID: String
-        var targetUserID: String?
-        var intentEpoch: Int
-        var callEpoch: Int
-        var consumedEpoch: Int
-        var lastSeenAt: Date?
-        var updatedAt: Date?
-        var payload: SignalMailboxPayload
+    enum SignalEnvelopeType: String {
+        case offer
+        case answer
+    }
 
-        static func fresh(recordID: CKRecord.ID, ownerUserID: String, targetUserID: String?) -> SignalMailboxRecord {
-            return SignalMailboxRecord(recordID: recordID,
-                                       ownerUserID: ownerUserID,
-                                       targetUserID: targetUserID,
-                                       intentEpoch: 0,
-                                       callEpoch: 0,
-                                       consumedEpoch: 0,
-                                       lastSeenAt: Date(),
-                                       updatedAt: Date(),
-                                       payload: .empty)
-        }
+    struct SignalEnvelopeSnapshot {
+        let recordID: CKRecord.ID
+        let sessionKey: String
+        let roomID: String
+        let callEpoch: Int
+        let ownerUserID: String
+        let type: SignalEnvelopeType
+        let sdp: String
+        let createdAt: Date?
+    }
+
+    struct SignalIceChunkSnapshot {
+        let recordID: CKRecord.ID
+        let sessionKey: String
+        let roomID: String
+        let callEpoch: Int
+        let ownerUserID: String
+        let candidate: String
+        let candidateType: String?
+        let createdAt: Date?
     }
 
     struct ParticipantProfileSnapshot {
@@ -175,10 +168,6 @@ class CloudKitChatManager: ObservableObject {
     private init() {
         self.privateDB = container.privateCloudDatabase
         self.sharedDB = container.sharedCloudDatabase
-        if #available(iOS 15.0, *) {
-            mailboxEncoder.outputFormatting = [.sortedKeys]
-        }
-
         setupSyncNotificationObservers()
         
         // 永続化されたスコープ/ゾーンマップをロード
@@ -553,6 +542,18 @@ class CloudKitChatManager: ObservableObject {
         }
     }
 
+    private func extractSavedRecord(from results: [CKRecord.ID: Result<CKRecord, Error>], recordID: CKRecord.ID) throws -> CKRecord {
+        guard let outcome = results[recordID] else {
+            throw CloudKitChatError.recordSaveFailed
+        }
+        switch outcome {
+        case .success(let record):
+            return record
+        case .failure(let error):
+            throw error
+        }
+    }
+
     func fetchRecordZoneChanges(scope: CKDatabase.Scope,
                                 zoneIDs: [CKRecordZone.ID],
                                 desiredKeys: [String]? = nil) async throws -> ZoneChangeBatch {
@@ -668,7 +669,8 @@ class CloudKitChatManager: ObservableObject {
             let descriptor = FetchDescriptor<ChatRoom>()
             let rooms = try modelContext.fetch(descriptor)
             for room in rooms {
-                let remoteID = room.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let participant = room.primaryCounterpart else { continue }
+                let remoteID = participant.userID.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard await isOwnerOfRoom(room.roomID) else { continue }
                 if remoteID.caseInsensitiveCompare("pending") == .orderedSame {
                     let zoneID = CKRecordZone.ID(zoneName: room.roomID)
@@ -697,8 +699,8 @@ class CloudKitChatManager: ObservableObject {
             for room in rooms {
                 guard !excludedRooms.contains(room.roomID) else { continue }
                 guard await isOwnerOfRoom(room.roomID) else { continue }
-                let trimmedRemote = room.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard trimmedRemote.isEmpty else { continue }
+                let hasRemote = room.participants.contains(where: { !$0.isLocal && !$0.userID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+                guard !hasRemote else { continue }
                 guard room.createdAt < cutoff else { continue }
                 let zoneID = CKRecordZone.ID(zoneName: room.roomID)
                 do {
@@ -928,11 +930,16 @@ class CloudKitChatManager: ObservableObject {
     private func performModifyRecordsOperation(
         database: CKDatabase,
         recordsToSave: [CKRecord],
-        groupName: String
+        groupName: String,
+        isAtomic: Bool = true
     ) async throws -> [CKRecord.ID: Result<CKRecord, Error>] {
         try await withCheckedThrowingContinuation { continuation in
             let operation = CKModifyRecordsOperation(recordsToSave: recordsToSave, recordIDsToDelete: nil)
             operation.qualityOfService = .userInitiated
+            operation.isAtomic = isAtomic
+            if !isAtomic {
+                operation.savePolicy = .changedKeys
+            }
             let group = CKOperationGroup()
             group.name = groupName
             operation.group = group
@@ -1000,13 +1007,15 @@ class CloudKitChatManager: ObservableObject {
             groupName: "share.zone.prepare.\(roomID)"
         )
 
-        if let outcome = results[zoneID] {
-            switch outcome {
-            case .success:
-                return
-            case .failure(let error):
-                throw error
-            }
+        guard let outcome = results[zoneID] else {
+            throw CloudKitChatError.signalingZoneUnavailable
+        }
+
+        switch outcome {
+        case .success:
+            return
+        case .failure(let error):
+            throw error
         }
     }
 
@@ -1285,6 +1294,18 @@ class CloudKitChatManager: ObservableObject {
         persistRoomScopeCache()
     }
 
+    @MainActor
+    private func ensureLocalParticipant(for room: ChatRoom, scope: RoomScope) {
+        let current = (currentUserID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let participant = ChatRoom.Participant(userID: current,
+                                               isLocal: true,
+                                               role: scope == .private ? .owner : .participant,
+                                               displayName: nil,
+                                               avatarData: nil,
+                                               lastUpdatedAt: Date())
+        room.upsertParticipant(participant)
+    }
+
     // MARK: - Bootstrap Rooms (Owned / Shared)
 
     /// 共有DB側に存在するチャットゾーンからローカルのChatRoomをブートストラップ
@@ -1302,14 +1323,20 @@ class CloudKitChatManager: ObservableObject {
                 cache(roomID: roomID, scope: .shared, zoneID: zone.zoneID)
 
                 // SwiftDataに存在しなければ作成
-                let descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
-                let existing = try? modelContext.fetch(descriptor).first
-                let room = existing ?? ChatRoom(roomID: roomID, remoteUserID: "")
-                if existing == nil { modelContext.insert(room) }
+                var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
+                descriptor.fetchLimit = 1
+                let room: ChatRoom
+                if let existing = (try? modelContext.fetch(descriptor))?.first {
+                    room = existing
+                } else {
+                    room = ChatRoom(roomID: roomID)
+                    modelContext.insert(room)
+                }
+                ensureLocalParticipant(for: room, scope: .shared)
 
                 // 可能なら相手プロフィールを反映
                 if let profile = try? await fetchRemoteParticipantFromRoomMember(roomID: roomID) {
-                    apply(profile: profile, to: room, modelContext: modelContext)
+                    apply(profile: profile, to: room)
                 }
 
                 do { try modelContext.save(); createdOrUpdated += 1 } catch { log("⚠️ Failed to save ChatRoom bootstrap (shared): \(error)", category: "share") }
@@ -1335,11 +1362,14 @@ class CloudKitChatManager: ObservableObject {
                 cache(roomID: roomID, scope: .private, zoneID: zone.zoneID)
 
                 // SwiftDataに存在しなければ作成（所有者側は remoteUserID は空のまま）
-                let descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
-                let existing = try? modelContext.fetch(descriptor).first
-                if existing == nil {
-                    let room = ChatRoom(roomID: roomID, remoteUserID: "")
+                var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
+                descriptor.fetchLimit = 1
+                if let existing = (try? modelContext.fetch(descriptor))?.first {
+                    ensureLocalParticipant(for: existing, scope: .private)
+                } else {
+                    let room = ChatRoom(roomID: roomID)
                     modelContext.insert(room)
+                    ensureLocalParticipant(for: room, scope: .private)
                     do { try modelContext.save(); created += 1 } catch { log("⚠️ Failed to save ChatRoom bootstrap (owned): \(error)", category: "share") }
                 }
             }
@@ -1629,6 +1659,31 @@ class CloudKitChatManager: ObservableObject {
         try await modifySubscriptions(database: database, toSave: [subscription], toDelete: [])
     }
 
+    private func ensureSignalQuerySubscriptions(roomID: String, zoneID: CKRecordZone.ID, database: CKDatabase) async throws {
+        let scopeLabel = database.databaseScope == .private ? "owner" : "participant"
+        let baseIdentifier = "signal-\(zoneID.zoneName)-\(database.databaseScope.rawValue)"
+
+        func makeSubscription(recordType: String, suffix: String) -> CKQuerySubscription {
+            let subscriptionID = CKSubscription.ID("\(baseIdentifier)-\(suffix)")
+            let subscription = CKQuerySubscription(recordType: recordType,
+                                                   predicate: NSPredicate(value: true),
+                                                   subscriptionID: subscriptionID,
+                                                   options: [.firesOnRecordCreation, .firesOnRecordUpdate, .firesOnRecordDeletion])
+            subscription.zoneID = zoneID
+            subscription.notificationInfo = buildNotificationInfo()
+            return subscription
+        }
+
+        let subscriptions = [
+            makeSubscription(recordType: CKSchema.SharedType.signalEnvelope, suffix: "envelope"),
+            makeSubscription(recordType: CKSchema.SharedType.signalIceChunk, suffix: "ice"),
+            makeSubscription(recordType: CKSchema.SharedType.signalSession, suffix: "session")
+        ]
+
+        log("🛠️ [SUBS] Ensuring signal query subscriptions room=\(roomID) scope=\(scopeLabel)", category: "share")
+        try await modifySubscriptions(database: database, toSave: subscriptions, toDelete: [])
+    }
+
 
     private func subscriptionNeedsUpdate(_ existing: CKSubscription, comparedTo desired: CKSubscription) -> Bool {
         guard type(of: existing) == type(of: desired) else { return true }
@@ -1745,13 +1800,29 @@ class CloudKitChatManager: ObservableObject {
 
     // MARK: - Room / Zone Resolution
 
+    private func adjustDatabaseIfNeeded(roomID: String,
+                                        database: CKDatabase,
+                                        zoneID: CKRecordZone.ID) -> (CKDatabase, CKRecordZone.ID) {
+        if database.databaseScope == .shared {
+            let ownerName = zoneID.ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let defaultOwners: Set<String> = [CKCurrentUserDefaultName, CKCurrentUserDefaultName, "__defaultOwner__"]
+            if defaultOwners.contains(ownerName) || ownerName.isEmpty {
+                log("[ZONE] resolveDatabaseAndZone override: shared scope points to owner=\(ownerName.isEmpty ? "nil" : ownerName) -> using private DB room=\(roomID) zone=\(zoneID.zoneName)", category: "share")
+                sharedZoneCache.removeValue(forKey: roomID)
+                cache(roomID: roomID, scope: .private, zoneID: zoneID)
+                return (privateDB, zoneID)
+            }
+        }
+        return (database, zoneID)
+    }
+
     func resolveDatabaseAndZone(for roomID: String) async throws -> (CKDatabase, CKRecordZone.ID) {
         if let scopeString = roomScopeCache[roomID],
            let scope = RoomScope(rawValue: scopeString),
            let cachedZone = zoneFromCache(roomID: roomID, scope: scope) {
             let db = scope.databaseScope == .shared ? sharedDB : privateDB
             log("[ZONE] resolveDatabaseAndZone(cache) room=\(roomID) scope=\(scope) zone=\(cachedZone.zoneName)", category: "share")
-            return (db, cachedZone)
+            return adjustDatabaseIfNeeded(roomID: roomID, database: db, zoneID: cachedZone)
         }
 
         if let zoneID = privateZoneCache[roomID] {
@@ -1763,7 +1834,7 @@ class CloudKitChatManager: ObservableObject {
         if let zoneID = sharedZoneCache[roomID] {
             cache(roomID: roomID, scope: .shared, zoneID: zoneID)
             log("[ZONE] resolveDatabaseAndZone(sharedCache) room=\(roomID) zone=\(zoneID.zoneName)", category: "share")
-            return (sharedDB, zoneID)
+            return adjustDatabaseIfNeeded(roomID: roomID, database: sharedDB, zoneID: zoneID)
         }
 
         if let zoneID = try await findZone(named: roomID, in: privateDB) {
@@ -1775,7 +1846,7 @@ class CloudKitChatManager: ObservableObject {
         if let zoneID = try await findZone(named: roomID, in: sharedDB) {
             cache(roomID: roomID, scope: .shared, zoneID: zoneID)
             log("[ZONE] resolveDatabaseAndZone(sharedLookup) room=\(roomID) zone=\(zoneID.zoneName)", category: "share")
-            return (sharedDB, zoneID)
+            return adjustDatabaseIfNeeded(roomID: roomID, database: sharedDB, zoneID: zoneID)
         }
 
         log("[ZONE] resolveDatabaseAndZone failed room=\(roomID) — zone not found", category: "share")
@@ -1805,7 +1876,14 @@ class CloudKitChatManager: ObservableObject {
     }
 
     func resolveZone(for roomID: String, purpose: ZonePurpose) async throws -> (CKDatabase, CKRecordZone.ID) {
-        let context = try await resolveZoneContext(for: roomID)
+        let context: (database: CKDatabase, zoneID: CKRecordZone.ID, scope: RoomScope)
+        do {
+            context = try await resolveZoneContext(for: roomID)
+        } catch let error as CloudKitChatError where purpose == .signal && error == .roomNotFound {
+            throw CloudKitChatError.signalingZoneUnavailable
+        } catch {
+            throw error
+        }
 
         switch purpose {
         case .message:
@@ -1977,186 +2055,245 @@ class CloudKitChatManager: ObservableObject {
             let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
             try await ensureSubscriptions()
             try await ensureZoneSubscription(zoneID: zoneID, database: database)
+            try await ensureSignalQuerySubscriptions(roomID: roomID, zoneID: zoneID, database: database)
         } catch {
             log("⚠️ Failed to setup room subscription for room=\(roomID): \(error)", category: "share")
             throw error
         }
     }
 
-    // MARK: - Signal Mailbox
-
-    /// 自ユーザー用の SignalMailbox を確保し、lastSeenAt を更新する。
-    /// - Parameters:
-    ///   - roomID: チャットルームID（ゾーン名）
-    ///   - userID: 自ユーザーID
-    ///   - targetUserID: 呼びかけ先（1:1では相手ID）
-    func ensureSignalMailbox(roomID: String, userID: String, targetUserID: String? = nil) async throws -> SignalMailboxRecord {
-        return try await mutateSignalMailbox(roomID: roomID, userID: userID) { snapshot in
-            if let targetUserID, !targetUserID.isEmpty {
-                snapshot.targetUserID = targetUserID
-            }
-            snapshot.lastSeenAt = Date()
+    func isSignalZoneReady(roomID: String) async -> Bool {
+        do {
+            _ = try await resolveZone(for: roomID, purpose: .signal)
+            return true
+        } catch {
+            return false
         }
     }
 
-    /// 任意のユーザーの SignalMailbox を取得する。
-    func fetchSignalMailbox(roomID: String, userID: String) async throws -> SignalMailboxRecord? {
+    // MARK: - Signal Sessions (Offer / Answer / ICE)
+
+    private func signalSessionKey(roomID: String, localUserID: String, remoteUserID: String) -> String {
+        let trimmedRoom = roomID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let a = localUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let b = remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (lo, hi) = a <= b ? (a, b) : (b, a)
+        return "\(trimmedRoom)#\(lo)#\(hi)"
+    }
+
+    private func makeSignalSessionRecord(from snapshot: SignalSessionSnapshot, existing: CKRecord?) -> CKRecord {
+        let record = existing ?? CKRecord(recordType: CKSchema.SharedType.signalSession, recordID: snapshot.recordID)
+        record[CKSchema.FieldKey.sessionKey] = snapshot.sessionKey as CKRecordValue
+        record[CKSchema.FieldKey.roomID] = snapshot.roomID as CKRecordValue
+        record[CKSchema.FieldKey.userId] = snapshot.callerUserID as CKRecordValue
+        record[CKSchema.FieldKey.otherUserId] = snapshot.calleeUserID as CKRecordValue
+        record[CKSchema.FieldKey.callEpoch] = snapshot.activeCallEpoch as CKRecordValue
+        record[CKSchema.FieldKey.updatedAt] = (snapshot.updatedAt ?? Date()) as CKRecordValue
+        return record
+    }
+
+    private func signalSessionSnapshot(from record: CKRecord) -> SignalSessionSnapshot {
+        let sessionKey = (record[CKSchema.FieldKey.sessionKey] as? String) ?? ""
+        let roomID = (record[CKSchema.FieldKey.roomID] as? String) ?? record.recordID.zoneID.zoneName
+        let caller = (record[CKSchema.FieldKey.userId] as? String) ?? ""
+        let callee = (record[CKSchema.FieldKey.otherUserId] as? String) ?? ""
+        let callEpoch = record[CKSchema.FieldKey.callEpoch] as? Int ?? 0
+        let updatedAt = record[CKSchema.FieldKey.updatedAt] as? Date
+        return SignalSessionSnapshot(recordID: record.recordID,
+                                     sessionKey: sessionKey,
+                                     roomID: roomID,
+                                     callerUserID: caller,
+                                     calleeUserID: callee,
+                                     activeCallEpoch: callEpoch,
+                                     updatedAt: updatedAt)
+    }
+
+    func ensureSignalSession(roomID: String, localUserID: String, remoteUserID: String) async throws -> SignalSessionSnapshot {
         let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
-        let recordID = CKSchema.signalMailboxRecordID(userId: userID, zoneID: zoneID)
+        let key = signalSessionKey(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID)
+        let recordID = CKSchema.signalSessionRecordID(sessionKey: key, zoneID: zoneID)
         do {
             let record = try await database.record(for: recordID)
-            return signalMailboxSnapshot(from: record)
+            return signalSessionSnapshot(from: record)
         } catch let error as CKError where error.code == .unknownItem {
-            return nil
+            let snapshot = SignalSessionSnapshot(recordID: recordID,
+                                                 sessionKey: key,
+                                                 roomID: roomID,
+                                                 callerUserID: localUserID,
+                                                 calleeUserID: remoteUserID,
+                                                 activeCallEpoch: 0,
+                                                 updatedAt: Date())
+            let results = try await performModifyRecordsOperation(
+                database: database,
+                recordsToSave: [makeSignalSessionRecord(from: snapshot, existing: nil)],
+                groupName: "signal.session.ensure.\(roomID)",
+                isAtomic: false
+            )
+            let saved = try extractSavedRecord(from: results, recordID: recordID)
+            return signalSessionSnapshot(from: saved)
         } catch {
             throw error
         }
     }
 
-    /// ルーム内の全 SignalMailbox を列挙する。
-    func fetchSignalMailboxes(roomID: String) async throws -> [SignalMailboxRecord] {
+    func updateSignalSession(roomID: String, localUserID: String, remoteUserID: String, nextCallEpoch: Int) async throws -> SignalSessionSnapshot {
         let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
-        let predicate = NSPredicate(value: true)
-        let query = CKQuery(recordType: CKSchema.SharedType.signalMailbox, predicate: predicate)
-        let (results, _) = try await database.records(matching: query, inZoneWith: zoneID)
-        return results.compactMap { entry -> SignalMailboxRecord? in
-            guard let record = try? entry.1.get() else { return nil }
-            return signalMailboxSnapshot(from: record)
-        }
-    }
-
-    /// Mailbox レコードを楽観的ロックで更新するユーティリティ。
-    /// 典型的な利用パターン:
-    /// 1. フォアグラウンドで `ensureSignalMailbox` を呼んで `lastSeenAt` を更新
-    /// 2. Offer/Answer/ICE を公開する際は `mutateSignalMailbox` で `callEpoch` と `payload` を更新
-    /// 3. 相手Mailboxを消費後は `mutateSignalMailbox` で `consumedEpoch` や `payload` をクリア
-    /// `mutate` クロージャはスナップショットを inout で受け取り、変更後の値を返す。
-    func mutateSignalMailbox(roomID: String,
-                              userID: String,
-                              mutate: (inout SignalMailboxRecord) -> Void) async throws -> SignalMailboxRecord {
-        let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
-        let recordID = CKSchema.signalMailboxRecordID(userId: userID, zoneID: zoneID)
-        var attempt = 0
-        var lastError: Error?
-
-        while attempt < 3 {
-            attempt += 1
-            do {
-                let existingRecord: CKRecord?
-                do {
-                    existingRecord = try await database.record(for: recordID)
-                } catch let error as CKError where error.code == .unknownItem {
-                    existingRecord = nil
-                }
-
-                var snapshot = existingRecord.map { signalMailboxSnapshot(from: $0) }
-                    ?? SignalMailboxRecord.fresh(recordID: recordID, ownerUserID: userID, targetUserID: nil)
-                mutate(&snapshot)
-                snapshot.updatedAt = Date()
-                if snapshot.lastSeenAt == nil {
-                    snapshot.lastSeenAt = Date()
-                }
-
-                let ckRecord = try makeSignalMailboxCKRecord(from: snapshot, existing: existingRecord)
-                let saved = try await database.save(ckRecord)
-                return signalMailboxSnapshot(from: saved)
-            } catch let error as CKError {
-                lastError = error
-                if (error.code == .serverRecordChanged || error.code == .zoneBusy || error.code == .serviceUnavailable) && attempt < 3 {
-                    let delay = UInt64(0.2 * Double(attempt) * 1_000_000_000)
-                    try? await Task.sleep(nanoseconds: delay)
-                    continue
-                }
-                if error.code == .unknownItem && attempt < 3 {
-                    continue
-                }
-                throw error
-            } catch {
-                lastError = error
-                throw error
-            }
-        }
-
-        if let lastError {
-            throw lastError
-        }
-        throw CloudKitChatError.signalingZoneUnavailable
-    }
-
-    /// しばらく更新されていない Mailbox を削除する（古い callEpoch の掃除を含む）。
-    func cleanupStaleSignalMailboxes(roomID: String, maxAge: TimeInterval = 600) async {
+        let key = signalSessionKey(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID)
+        let recordID = CKSchema.signalSessionRecordID(sessionKey: key, zoneID: zoneID)
+        let existing: CKRecord
         do {
-            let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
-            let cutoff = Date().addingTimeInterval(-maxAge)
-            let predicate = NSPredicate(format: "%K < %@", CKSchema.FieldKey.updatedAt, cutoff as NSDate)
-            let query = CKQuery(recordType: CKSchema.SharedType.signalMailbox, predicate: predicate)
-            let (results, _) = try await database.records(matching: query, inZoneWith: zoneID)
-            let staleIDs: [CKRecord.ID] = results.compactMap { entry in
-                guard let record = try? entry.1.get() else { return nil }
-                return record.recordID
-            }
-            guard !staleIDs.isEmpty else { return }
-            let op = CKModifyRecordsOperation(recordsToSave: nil, recordIDsToDelete: staleIDs)
-            op.isAtomic = false
-            database.add(op)
-            log("[SIGNAL] Cleaned \(staleIDs.count) stale SignalMailbox records room=\(roomID)", category: "share")
-        } catch {
-            log("⚠️ [SIGNAL] Failed to cleanup SignalMailbox records room=\(roomID): \(error)", category: "share")
+            existing = try await database.record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
+            return try await ensureSignalSession(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID)
         }
+        var snapshot = signalSessionSnapshot(from: existing)
+        snapshot.activeCallEpoch = max(snapshot.activeCallEpoch, nextCallEpoch)
+        snapshot.updatedAt = Date()
+        let results = try await performModifyRecordsOperation(
+            database: database,
+            recordsToSave: [makeSignalSessionRecord(from: snapshot, existing: existing)],
+            groupName: "signal.session.update.\(roomID)",
+            isAtomic: false
+        )
+        let saved = try extractSavedRecord(from: results, recordID: recordID)
+        return signalSessionSnapshot(from: saved)
     }
 
-    // 旧API互換。Mailbox移行後は呼び出し元を cleanupStaleSignalMailboxes に切り替えてこのメソッドを削除する。
-    func cleanupExpiredSignals(roomID: String, maxAge: TimeInterval = 600) async {
-        await cleanupStaleSignalMailboxes(roomID: roomID, maxAge: maxAge)
-    }
-
-    func signalMailboxSnapshot(from record: CKRecord) -> SignalMailboxRecord {
-        let owner = (record[CKSchema.FieldKey.userId] as? String) ?? ""
-        let target = record[CKSchema.FieldKey.targetUserId] as? String
-        let intent = record[CKSchema.FieldKey.intentEpoch] as? Int ?? 0
-        let callEpoch = record[CKSchema.FieldKey.callEpoch] as? Int ?? 0
-        let consumed = record[CKSchema.FieldKey.consumedEpoch] as? Int ?? 0
-        let lastSeen = record[CKSchema.FieldKey.lastSeenAt] as? Date
-        let updated = record[CKSchema.FieldKey.updatedAt] as? Date
-        let payloadString = (record[CKSchema.FieldKey.mailboxPayload] as? String) ?? ""
-        let payloadData = payloadString.data(using: .utf8) ?? Data()
-        let payload = (try? mailboxDecoder.decode(SignalMailboxPayload.self, from: payloadData)) ?? .empty
-        return SignalMailboxRecord(recordID: record.recordID,
-                                   ownerUserID: owner,
-                                   targetUserID: target,
-                                   intentEpoch: intent,
-                                   callEpoch: callEpoch,
-                                   consumedEpoch: consumed,
-                                   lastSeenAt: lastSeen,
-                                   updatedAt: updated,
-                                   payload: payload)
-    }
-
-    private func makeSignalMailboxCKRecord(from snapshot: SignalMailboxRecord, existing: CKRecord?) throws -> CKRecord {
-        let record = existing ?? CKRecord(recordType: CKSchema.SharedType.signalMailbox, recordID: snapshot.recordID)
-        record[CKSchema.FieldKey.userId] = snapshot.ownerUserID as CKRecordValue
-        if let target = snapshot.targetUserID, !target.isEmpty {
-            record[CKSchema.FieldKey.targetUserId] = target as CKRecordValue
-        } else {
-            record[CKSchema.FieldKey.targetUserId] = nil
-        }
-        record[CKSchema.FieldKey.intentEpoch] = snapshot.intentEpoch as CKRecordValue
-        record[CKSchema.FieldKey.callEpoch] = snapshot.callEpoch as CKRecordValue
-        record[CKSchema.FieldKey.consumedEpoch] = snapshot.consumedEpoch as CKRecordValue
-        if let lastSeen = snapshot.lastSeenAt {
-            record[CKSchema.FieldKey.lastSeenAt] = lastSeen as CKRecordValue
-        } else {
-            record[CKSchema.FieldKey.lastSeenAt] = nil
-        }
-        let updated = snapshot.updatedAt ?? Date()
-        record[CKSchema.FieldKey.updatedAt] = updated as CKRecordValue
-        let payloadData = try mailboxEncoder.encode(snapshot.payload)
-        if let payloadString = String(data: payloadData, encoding: .utf8) {
-            record[CKSchema.FieldKey.mailboxPayload] = payloadString as CKRecordValue
-        } else {
-            record[CKSchema.FieldKey.mailboxPayload] = nil
-        }
+    private func makeSignalEnvelopeRecord(sessionKey: String,
+                                          roomID: String,
+                                          ownerUserID: String,
+                                          callEpoch: Int,
+                                          type: SignalEnvelopeType,
+                                          sdp: String,
+                                          existing: CKRecord? = nil,
+                                          zoneID: CKRecordZone.ID) -> CKRecord {
+        let recordID = CKSchema.signalEnvelopeRecordID(sessionKey: sessionKey, callEpoch: callEpoch, envelopeType: type.rawValue, zoneID: zoneID)
+        let record = existing ?? CKRecord(recordType: CKSchema.SharedType.signalEnvelope, recordID: recordID)
+        record[CKSchema.FieldKey.sessionKey] = sessionKey as CKRecordValue
+        record[CKSchema.FieldKey.roomID] = roomID as CKRecordValue
+        record[CKSchema.FieldKey.callEpoch] = callEpoch as CKRecordValue
+        record[CKSchema.FieldKey.ownerUserId] = ownerUserID as CKRecordValue
+        record[CKSchema.FieldKey.envelopeType] = type.rawValue as CKRecordValue
+        record[CKSchema.FieldKey.payload] = sdp as CKRecordValue
+        record[CKSchema.FieldKey.updatedAt] = Date() as CKRecordValue
         return record
+    }
+
+    private func decodeSignalEnvelope(_ record: CKRecord) -> SignalEnvelopeSnapshot? {
+        guard let sessionKey = record[CKSchema.FieldKey.sessionKey] as? String else { return nil }
+        let roomID = (record[CKSchema.FieldKey.roomID] as? String) ?? record.recordID.zoneID.zoneName
+        let callEpoch = record[CKSchema.FieldKey.callEpoch] as? Int ?? 0
+        guard let owner = record[CKSchema.FieldKey.ownerUserId] as? String else { return nil }
+        guard let rawType = record[CKSchema.FieldKey.envelopeType] as? String,
+              let type = SignalEnvelopeType(rawValue: rawType) else { return nil }
+        guard let sdp = record[CKSchema.FieldKey.payload] as? String, !sdp.isEmpty else { return nil }
+        let createdAt = record[CKSchema.FieldKey.updatedAt] as? Date ?? record.creationDate
+        return SignalEnvelopeSnapshot(recordID: record.recordID,
+                                      sessionKey: sessionKey,
+                                      roomID: roomID,
+                                      callEpoch: callEpoch,
+                                      ownerUserID: owner,
+                                      type: type,
+                                      sdp: sdp,
+                                      createdAt: createdAt)
+    }
+
+    private func decodeSignalIceChunk(_ record: CKRecord) -> SignalIceChunkSnapshot? {
+        guard let sessionKey = record[CKSchema.FieldKey.sessionKey] as? String else { return nil }
+        let roomID = (record[CKSchema.FieldKey.roomID] as? String) ?? record.recordID.zoneID.zoneName
+        let callEpoch = record[CKSchema.FieldKey.callEpoch] as? Int ?? 0
+        guard let owner = record[CKSchema.FieldKey.ownerUserId] as? String else { return nil }
+        guard let candidate = record[CKSchema.FieldKey.candidate] as? String else { return nil }
+        let candidateType = record[CKSchema.FieldKey.candidateType] as? String
+        let createdAt = record[CKSchema.FieldKey.chunkCreatedAt] as? Date ?? record.creationDate
+        return SignalIceChunkSnapshot(recordID: record.recordID,
+                                      sessionKey: sessionKey,
+                                      roomID: roomID,
+                                      callEpoch: callEpoch,
+                                      ownerUserID: owner,
+                                      candidate: candidate,
+                                      candidateType: candidateType,
+                                      createdAt: createdAt)
+    }
+
+    func publishOffer(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, sdp: String) async throws -> SignalEnvelopeSnapshot {
+        let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
+        let session = try await updateSignalSession(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID, nextCallEpoch: callEpoch)
+        let record = makeSignalEnvelopeRecord(sessionKey: session.sessionKey,
+                                              roomID: roomID,
+                                              ownerUserID: localUserID,
+                                              callEpoch: callEpoch,
+                                              type: .offer,
+                                              sdp: sdp,
+                                              zoneID: zoneID)
+        let results = try await performModifyRecordsOperation(
+            database: database,
+            recordsToSave: [record],
+            groupName: "signal.offer.\(roomID)",
+            isAtomic: false
+        )
+        let saved = try extractSavedRecord(from: results, recordID: record.recordID)
+        return decodeSignalEnvelope(saved)!
+    }
+
+    func publishAnswer(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, sdp: String) async throws -> SignalEnvelopeSnapshot {
+        let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
+        _ = try await updateSignalSession(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID, nextCallEpoch: callEpoch)
+        let record = makeSignalEnvelopeRecord(sessionKey: signalSessionKey(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID),
+                                              roomID: roomID,
+                                              ownerUserID: localUserID,
+                                              callEpoch: callEpoch,
+                                              type: .answer,
+                                              sdp: sdp,
+                                              zoneID: zoneID)
+        let results = try await performModifyRecordsOperation(
+            database: database,
+            recordsToSave: [record],
+            groupName: "signal.answer.\(roomID)",
+            isAtomic: false
+        )
+        let saved = try extractSavedRecord(from: results, recordID: record.recordID)
+        return decodeSignalEnvelope(saved)!
+    }
+
+    func publishIceCandidate(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, encodedCandidate: String, candidateType: String?) async throws -> SignalIceChunkSnapshot {
+        let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
+        _ = try await updateSignalSession(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID, nextCallEpoch: callEpoch)
+        let sessionKey = signalSessionKey(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID)
+        let recordID = CKSchema.signalIceChunkRecordID(sessionKey: sessionKey, callEpoch: callEpoch, ownerUserID: localUserID, zoneID: zoneID)
+        let record = CKRecord(recordType: CKSchema.SharedType.signalIceChunk, recordID: recordID)
+        record[CKSchema.FieldKey.sessionKey] = sessionKey as CKRecordValue
+        record[CKSchema.FieldKey.roomID] = roomID as CKRecordValue
+        record[CKSchema.FieldKey.callEpoch] = callEpoch as CKRecordValue
+        record[CKSchema.FieldKey.ownerUserId] = localUserID as CKRecordValue
+        record[CKSchema.FieldKey.candidate] = encodedCandidate as CKRecordValue
+        if let candidateType {
+            record[CKSchema.FieldKey.candidateType] = candidateType as CKRecordValue
+        }
+        record[CKSchema.FieldKey.chunkCreatedAt] = Date() as CKRecordValue
+        let results = try await performModifyRecordsOperation(
+            database: database,
+            recordsToSave: [record],
+            groupName: "signal.ice.\(roomID)",
+            isAtomic: false
+        )
+        let saved = try extractSavedRecord(from: results, recordID: recordID)
+        return decodeSignalIceChunk(saved)!
+    }
+
+    func decodeSignalRecord(_ record: CKRecord) -> SignalEnvelopeSnapshot? {
+        guard record.recordType == CKSchema.SharedType.signalEnvelope else { return nil }
+        return decodeSignalEnvelope(record)
+    }
+
+    func decodeSignalIceRecord(_ record: CKRecord) -> SignalIceChunkSnapshot? {
+        guard record.recordType == CKSchema.SharedType.signalIceChunk else { return nil }
+        return decodeSignalIceChunk(record)
+    }
+
+    func primaryCounterpartUserID(roomID: String) -> String? {
+        let participants = ModelContainerBroker.shared.participantsSnapshot(roomID: roomID)
+        return participants.first(where: { !$0.isLocal })?.userID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Participant Profiles
@@ -2172,18 +2309,18 @@ class CloudKitChatManager: ObservableObject {
                 return
             }
 
-            let existingID = room.remoteUserID.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            if !existingID.isEmpty {
+            if let counterpart = room.primaryCounterpart,
+               !counterpart.userID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return
             }
 
             if let localProfile = try localParticipantInfo(roomID: roomID, modelContext: modelContext) {
-                apply(profile: localProfile, to: room, modelContext: modelContext)
+                apply(profile: localProfile, to: room)
                 return
             }
 
             if let remoteProfile = try await fetchRemoteParticipantFromRoomMember(roomID: roomID) {
-                apply(profile: remoteProfile, to: room, modelContext: modelContext)
+                apply(profile: remoteProfile, to: room)
             } else {
                 log("⚠️ Could not infer remote participant for roomID=\(roomID)", category: "share")
             }
@@ -2382,25 +2519,14 @@ class CloudKitChatManager: ObservableObject {
     }
 
     private func fetchRemoteParticipantFromRoomMember(roomID: String) async throws -> ParticipantProfileSnapshot? {
-        let (database, zoneID) = try await resolveDatabaseAndZone(for: roomID)
-        guard let scope = RoomScope(databaseScope: database.databaseScope), scope == .shared else {
-            // オーナー自身のゾーンであればリモート参加者は存在しない（自身以外）
-            return nil
-        }
-
-        let currentUser = try await currentUserRecordName()
-        let predicate = NSPredicate(value: true)
-        let query = CKQuery(recordType: CKSchema.SharedType.roomMember, predicate: predicate)
-        query.sortDescriptors = [NSSortDescriptor(key: CKSchema.FieldKey.creationDate, ascending: true)]
-
-        let (results, _) = try await database.records(matching: query, inZoneWith: zoneID)
-        for result in results {
-            guard let record = try? result.1.get() else { continue }
-            guard let userID = record[CKSchema.FieldKey.userId] as? String else { continue }
-            if userID == currentUser { continue }
-            return snapshot(from: record)
-        }
-        return nil
+        guard let context = try? ModelContainerBroker.shared.mainContext() else { return nil }
+        var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
+        descriptor.fetchLimit = 1
+        guard let room = (try? context.fetch(descriptor))?.first else { return nil }
+        guard let participant = room.participants.first(where: { !$0.isLocal }) else { return nil }
+        return ParticipantProfileSnapshot(userID: participant.userID,
+                                          name: participant.displayName,
+                                          avatarData: participant.avatarData)
     }
 
     private func snapshot(from record: CKRecord) -> ParticipantProfileSnapshot {
@@ -2414,20 +2540,84 @@ class CloudKitChatManager: ObservableObject {
         return ParticipantProfileSnapshot(userID: userID, name: name, avatarData: avatarData)
     }
 
-    private func apply(profile: ParticipantProfileSnapshot, to room: ChatRoom, modelContext: ModelContext) {
-        room.remoteUserID = profile.userID
-        if let name = profile.name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    @MainActor
+    func ingestRoomMemberRecord(_ record: CKRecord) async {
+        let zoneID = record.recordID.zoneID
+        let roomID = zoneID.zoneName
+        guard !roomID.isEmpty else { return }
+
+        let scope: RoomScope = zoneID.ownerName.isEmpty ? .private : .shared
+        cache(roomID: roomID, scope: scope, zoneID: zoneID)
+
+        guard let context = try? ModelContainerBroker.shared.mainContext() else {
+            log("⚠️ [SIGNAL] Unable to ingest RoomMember (no model context) room=\(roomID)", category: "share")
+            return
+        }
+
+        var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
+        descriptor.fetchLimit = 1
+
+        let room: ChatRoom
+        if let existing = (try? context.fetch(descriptor))?.first {
+            room = existing
+        } else {
+            room = ChatRoom(roomID: roomID)
+            context.insert(room)
+            ensureLocalParticipant(for: room, scope: scope)
+        }
+
+        let profile = snapshot(from: record)
+        let normalizedID = profile.userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedID.isEmpty else { return }
+
+        let current = (currentUserID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let isLocal = normalizedID == current
+        let participant = ChatRoom.Participant(userID: normalizedID,
+                                               isLocal: isLocal,
+                                               role: isLocal ? .owner : .participant,
+                                               displayName: profile.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                               avatarData: profile.avatarData,
+                                               lastUpdatedAt: Date())
+
+        room.upsertParticipant(participant)
+
+        if !isLocal,
+           let name = participant.displayName,
+           !name.isEmpty,
+           (room.displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
             room.displayName = name
         }
-        if let avatar = profile.avatarData, !avatar.isEmpty {
-            room.avatarData = avatar
-        }
+
         do {
-            try modelContext.save()
-            log("✅ Updated ChatRoom with remote participant userID=\(profile.userID)", category: "share")
+            try context.save()
+            log("[SIGNAL] Ingested RoomMember record=\(record.recordID.recordName) room=\(roomID)", category: "share")
         } catch {
-            log("⚠️ Failed to persist ChatRoom update: \(error)", category: "share")
+            log("⚠️ [SIGNAL] Failed to persist RoomMember room=\(roomID): \(error)", category: "share")
         }
+    }
+
+    private func apply(profile: ParticipantProfileSnapshot, to room: ChatRoom) {
+        let trimmedID = profile.userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty else { return }
+
+        let normalizedName = profile.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isLocal = trimmedID == (currentUserID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let participant = ChatRoom.Participant(userID: trimmedID,
+                                               isLocal: isLocal,
+                                               role: isLocal ? .owner : .participant,
+                                               displayName: normalizedName,
+                                               avatarData: profile.avatarData,
+                                               lastUpdatedAt: Date())
+        room.upsertParticipant(participant)
+
+        if !isLocal,
+           let name = normalizedName,
+           !name.isEmpty,
+           (room.displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
+            room.displayName = name
+        }
+        log("✅ Updated participants for room=\(room.roomID) userID=\(trimmedID)", category: "share")
     }
 
     private func currentUserRecordName() async throws -> String {

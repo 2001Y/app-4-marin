@@ -12,6 +12,7 @@ xcuserdata/
 # Build products
 build/
 DerivedData/
+.modulecache/
 *.app
 *.ipa
 *.dSYM.zip
@@ -58,3 +59,4 @@ iOSInjectionProject/
 .env.development.local
 .env.test.local
 .env.production.local 
+/.worktrees/

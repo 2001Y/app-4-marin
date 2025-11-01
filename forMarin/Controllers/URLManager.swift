@@ -63,14 +63,11 @@ class URLManager: ObservableObject {
             }
             
             // 既存のチャットルームをチェック
-            let descriptor = FetchDescriptor<ChatRoom>(
-                predicate: #Predicate<ChatRoom> { room in
-                    room.remoteUserID == userID
-                }
-            )
-            
+            let descriptor = FetchDescriptor<ChatRoom>()
             let existingRooms = try modelContext.fetch(descriptor)
-            if let existingRoom = existingRooms.first {
+            if let existingRoom = existingRooms.first(where: { room in
+                room.participants.contains(where: { !$0.isLocal && $0.userID == userID })
+            }) {
                 log("Chat already exists with userID: \(userID)", category: "URLManager")
                 return existingRoom
             }
@@ -87,10 +84,22 @@ class URLManager: ObservableObject {
             }
 
             // ローカルのチャットルームを作成（roomID=zoneName）
-            let newRoom = ChatRoom(roomID: roomID, remoteUserID: userID, displayName: nil)
-            log("📝 Created ChatRoom with ID: \(newRoom.id), roomID(zoneName): \(newRoom.roomID)", category: "URLManager")
-            
+            let newRoom = ChatRoom(roomID: roomID)
             modelContext.insert(newRoom)
+            let ownerParticipant = ChatRoom.Participant(userID: myUserID,
+                                                        isLocal: true,
+                                                        role: .owner,
+                                                        displayName: nil,
+                                                        avatarData: nil,
+                                                        lastUpdatedAt: Date())
+            let remoteParticipant = ChatRoom.Participant(userID: userID,
+                                                         isLocal: false,
+                                                         role: .participant,
+                                                         displayName: nil,
+                                                         avatarData: nil,
+                                                         lastUpdatedAt: Date())
+            newRoom.participants.append(contentsOf: [ownerParticipant, remoteParticipant])
+            log("📝 Created ChatRoom with ID: \(newRoom.id), roomID(zoneName): \(newRoom.roomID)", category: "URLManager")
             
             try modelContext.save()
             log("💾 Successfully saved ChatRoom to SwiftData", category: "URLManager")

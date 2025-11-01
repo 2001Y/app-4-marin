@@ -1,0 +1,455 @@
+4-Marin アプリログ
+生成日時: 2025年10月13日 月曜日 15時03分18秒 日本標準時
+アプリバージョン: 1.0.5
+================================================================================
+
+=== Captured Logs ===
+[2025-10-13 14:58:52.799] [INFO] [MessageSyncPipeline] Using CloudKit DB subscriptions + delta sync (iOS17+)
+[2025-10-13 14:58:52.800] [INFO] [AppDelegate] MessageSyncPipeline initialized
+[2025-10-13 14:58:53.329] [INFO] [AppDelegate] Configuring UIScene with our SceneDelegate
+[2025-10-13 14:58:53.656] [INFO] [SceneDelegate] [WILL CONNECT] No URL contexts
+[2025-10-13 14:58:56.845] [INFO] [zone] 🚀 [INITIALIZATION] Starting CloudKitChatManager initialization...
+[2025-10-13 14:58:56.845] [INFO] [zone] 🧭 [ENV] CK Container: iCloud.forMarin-test | Build: Debug (assumed CloudKit Development env) | CKSharingSupported=true
+[2025-10-13 14:58:56.900] [INFO] [push.register] Successfully registered for remote notifications
+[2025-10-13 14:58:56.907] [INFO] [share] 🔍 [AUTO RESET] Starting comprehensive legacy data detection...
+[2025-10-13 14:58:56.907] [INFO] [share] 🔍 [AUTO RESET] Checking for legacy architecture patterns (zone-based detection)
+[2025-10-13 14:58:56.909] [INFO] [push.register] [PUSH.REG] env=nonprod tokenHash=c88483e58be017563a1ad236a74c6fe3ce03aae5101b0ced72eed542f15e79d4 ts=2025-10-13T05:58:56Z auth=authorized alert=2 badge=2 sound=2 bgRefresh=available
+[2025-10-13 14:58:56.920] [INFO] [account] ✅ [IDENTITY] Resolved current user recordName: _203df8ff164babea80e2df3c156f4f62
+[2025-10-13 14:58:58.069] [INFO] [ChatListView] ℹ️ Multiple ChatRooms found for same counterpart IDs: [_9e7af715e3ec99432bc570b0463689cd: 2 rooms]
+[2025-10-13 14:58:58.216] [INFO] [share] CloudKit legacy zones not found (expected for ideal implementation)
+[2025-10-13 14:58:58.223] [INFO] [share] [AUTO RESET] Local messages without CloudKit record=0
+[2025-10-13 14:58:58.223] [INFO] [share] 🔍 [AUTO RESET] Legacy data detection completed: NO LEGACY DATA
+[2025-10-13 14:58:58.223] [INFO] [zone] ✅ [AUTO RESET] No legacy data detected - ideal implementation already active
+[2025-10-13 14:58:58.224] [INFO] [account] ✅ [INITIALIZATION] Current UserID: _203df8ff164babea80e2df3c156f4f62
+[2025-10-13 14:58:58.224] [INFO] [share] 🔧 [IDEAL SCHEMA] Checking if ideal schema setup is needed...
+[2025-10-13 14:58:58.559] [INFO] [share] ✅ [IDEAL SCHEMA] No legacy SharedRooms zone found - ideal architecture active
+[2025-10-13 14:58:58.559] [INFO] [share] 🌟 [IDEAL SCHEMA] Schema ready - individual chat zones will be created per chat
+[2025-10-13 14:58:58.559] [INFO] [share] ✅ [IDEAL SCHEMA] Ideal schema setup completed
+[2025-10-13 14:58:59.312] [INFO] [share] ✅ [HEALTH CHECK] Database configuration is consistent
+[2025-10-13 14:58:59.312] [INFO] [zone] ✅ [INITIALIZATION] CloudKitChatManager initialization completed successfully
+[2025-10-13 14:58:59.313] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=private
+[2025-10-13 14:58:59.350] [INFO] [forMarinApp] CloudKit initialization completed
+[2025-10-13 14:58:59.509] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=shared
+[2025-10-13 14:58:59.691] [INFO] [subs] ✅ [BOOTSTRAP] Database subscriptions ensured
+[2025-10-13 14:58:59.715] [INFO] [AppDelegate] CKSyncEngine started (private/shared)
+[2025-10-13 14:58:59.723] [INFO] [push.register] Successfully registered for remote notifications
+[2025-10-13 14:58:59.725] [INFO] [push.register] [PUSH.REG] env=nonprod tokenHash=c88483e58be017563a1ad236a74c6fe3ce03aae5101b0ced72eed542f15e79d4 ts=2025-10-13T05:58:59Z auth=authorized alert=2 badge=2 sound=2 bgRefresh=available
+[2025-10-13 14:58:59.727] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Private bytes=3539
+[2025-10-13 14:58:59.727] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Private bytes=3539
+[2025-10-13 14:58:59.729] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=2973
+[2025-10-13 14:58:59.729] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=2973
+[2025-10-13 14:58:59.729] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 14:58:59.729] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:04.557] [INFO] [ChatListView] ChatList: deleted room locally and requested CloudKit revoke room=room_0ECE649F
+[2025-10-13 14:59:04.567] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_0ECE649F scope=private zone=room_0ECE649F
+[2025-10-13 14:59:05.198] [INFO] [share] ✅ [ROOM] Revoked/left zone and cleared caches roomID=room_0ECE649F
+[2025-10-13 14:59:05.605] [INFO] [ChatListView] ChatList: deleted room locally and requested CloudKit revoke room=room_8C5A98B4
+[2025-10-13 14:59:05.606] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_8C5A98B4 scope=private zone=room_8C5A98B4
+[2025-10-13 14:59:06.383] [INFO] [share] ✅ [ROOM] Revoked/left zone and cleared caches roomID=room_8C5A98B4
+[2025-10-13 14:59:12.353] [INFO] [P2P] [P2P] closeIfCurrent invoked (reason=scenePhase-inactive) room= state=idle
+[2025-10-13 14:59:12.359] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=1A44D8F648211C89)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:12.360] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=1A44D8F648211C89)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:12.360] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=private reason=scene:active pendingZones=0
+[2025-10-13 14:59:12.360] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=5F3907BB04B9B783)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:12.360] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=5F3907BB04B9B783)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:12.361] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=shared reason=scene:active pendingZones=0
+[2025-10-13 14:59:12.513] [INFO] [P2P] [P2P] closeIfCurrent invoked (reason=scenePhase-inactive) room= state=idle
+[2025-10-13 14:59:12.515] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=9703988A4EC612FD)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:12.516] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=9703988A4EC612FD)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:12.516] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=private reason=scene:active pendingZones=0
+[2025-10-13 14:59:12.516] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=30C6AACB48EE3ECB)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:12.517] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=30C6AACB48EE3ECB)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 14:59:12.517] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=shared reason=scene:active pendingZones=0
+[2025-10-13 15:01:49.283] [INFO] [UI] UI: showGlobalLoading (title=読み込み中…)
+[2025-10-13 15:01:50.044] [INFO] [CloudKitShareHandler] 📥 [IDEAL SHARING] CloudKit share invitation received
+[2025-10-13 15:01:50.044] [INFO] [CloudKitShareHandler] 📥 [IDEAL SHARING] Processing share invitation asynchronously
+[2025-10-13 15:01:50.044] [INFO] [CloudKitShareHandler] 🔄 [IDEAL SHARING] Starting detailed share acceptance processing
+[2025-10-13 15:01:50.044] [INFO] [CloudKitShareHandler] 🔄 [IDEAL SHARING] Share RecordID: cloudkit.zoneshare
+[2025-10-13 15:01:50.044] [INFO] [CloudKitShareHandler] 🔄 [IDEAL SHARING] Share ZoneID: room_5B845A35 (owner: _9e7af715e3ec99432bc570b0463689cd)
+[2025-10-13 15:01:50.044] [INFO] [CloudKitShareHandler] ✅ [DUPLICATE GUARD] Share added to processing set: cloudkit.zoneshare
+[2025-10-13 15:01:50.044] [INFO] [CloudKitShareHandler] 📊 [DUPLICATE GUARD] Total shares being processed: 1
+[2025-10-13 15:01:50.044] [INFO] [CloudKitShareHandler] 📋 [METADATA ANALYSIS] === SHARE METADATA DETAILED ANALYSIS ===
+[2025-10-13 15:01:50.046] [INFO] [CloudKitShareHandler] 📋 [METADATA ANALYSIS] Share URL: https://www.icloud.com/share/0c0ZepbGN265RjSWKo_pZ0pgg#4-Marin_Chat
+[2025-10-13 15:01:50.046] [INFO] [CloudKitShareHandler] 📋 [METADATA ANALYSIS] Container ID: iCloud.forMarin-test
+[2025-10-13 15:01:50.047] [INFO] [CloudKitShareHandler] 📋 [METADATA ANALYSIS] Owner identity: 田村義希2
+[2025-10-13 15:01:50.047] [INFO] [CloudKitShareHandler] 📋 [METADATA ANALYSIS] Share creation date: 2025-10-13 06:01:33 +0000
+[2025-10-13 15:01:50.047] [INFO] [CloudKitShareHandler] 📋 [METADATA ANALYSIS] Share modification date: 2025-10-13 06:01:39 +0000
+[2025-10-13 15:01:50.047] [INFO] [CloudKitShareHandler] ⚠️ [METADATA ANALYSIS] No root record found in metadata (iOS 16+)
+[2025-10-13 15:01:50.047] [INFO] [CloudKitShareHandler] 📋 [METADATA ANALYSIS] === END METADATA ANALYSIS ===
+[2025-10-13 15:01:50.047] [INFO] [CloudKitShareHandler] 🩺 [PRE-DIAGNOSIS] === Starting Pre-Acceptance CloudKit Diagnosis ===
+[2025-10-13 15:01:50.059] [INFO] [CloudKitShareHandler] 🩺 [PRE-DIAGNOSIS] Account Status: Available
+[2025-10-13 15:01:50.059] [INFO] [CloudKitShareHandler] 🩺 [PRE-DIAGNOSIS] Checking Private DB state...
+[2025-10-13 15:01:50.215] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: nil
+[2025-10-13 15:01:50.218] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: nil
+[2025-10-13 15:01:50.338] [INFO] [CloudKitShareHandler] 🩺 [PRE-DIAGNOSIS] Private DB zones count: 1
+[2025-10-13 15:01:50.338] [INFO] [CloudKitShareHandler] 🩺 [PRE-DIAGNOSIS] Checking Shared DB state...
+[2025-10-13 15:01:50.554] [INFO] [CloudKitShareHandler] 🩺 [PRE-DIAGNOSIS] Shared DB zones count: 0
+[2025-10-13 15:01:50.554] [INFO] [CloudKitShareHandler] 🩺 [PRE-DIAGNOSIS] Testing basic CloudKit connectivity...
+[2025-10-13 15:01:50.554] [INFO] [CloudKitShareHandler] ✅ [PRE-DIAGNOSIS] CloudKit connectivity test successful
+[2025-10-13 15:01:50.554] [INFO] [CloudKitShareHandler] 🩺 [PRE-DIAGNOSIS] === End Pre-Acceptance Diagnosis ===
+[2025-10-13 15:01:50.554] [INFO] [CloudKitShareHandler] 🚀 [OPERATION SETUP] Creating CKAcceptSharesOperation
+[2025-10-13 15:01:50.556] [INFO] [CloudKitShareHandler] 🚀 [OPERATION SETUP] QoS set to userInitiated
+[2025-10-13 15:01:50.556] [INFO] [CloudKitShareHandler] 🚀 [OPERATION SETUP] Setting up operation callbacks
+[2025-10-13 15:01:50.556] [INFO] [CloudKitShareHandler] 🌐 [CONTAINER] Using container: iCloud.forMarin-test
+[2025-10-13 15:01:50.556] [INFO] [CloudKitShareHandler] 🌐 [CONTAINER] Adding operation to container
+[2025-10-13 15:01:50.557] [INFO] [CloudKitShareHandler] ✅ [CONTAINER] Operation added to container successfully
+[2025-10-13 15:01:51.168] [INFO] [zone] 🧹 [MAINTENANCE] Cleaned up after remote zone deletion roomID=room_8C5A98B4
+[2025-10-13 15:01:51.170] [INFO] [zone] 🧹 [MAINTENANCE] Cleaned up after remote zone deletion roomID=room_0ECE649F
+[2025-10-13 15:01:51.181] [INFO] [MessageSyncPipeline] 🔁 Sync processing: unique=0 total=0 room=nil
+[2025-10-13 15:01:51.181] [INFO] [MessageSyncPipeline] Manual sync completed with 0 unique records (from 0 total) - New: 0, Duplicates: 0
+[2025-10-13 15:01:51.707] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=0.5256160497665405
+[2025-10-13 15:01:51.824] [INFO] [CloudKitShareHandler] 📬 [OPERATION CALLBACK] Per-share result received
+[2025-10-13 15:01:51.824] [INFO] [CloudKitShareHandler] 📬 [OPERATION CALLBACK] Received metadata for share: cloudkit.zoneshare
+[2025-10-13 15:01:51.825] [INFO] [CloudKitShareHandler] 🎉 [SUCCESS] CloudKit share accepted successfully!
+[2025-10-13 15:01:51.825] [INFO] [CloudKitShareHandler] 🎉 [SUCCESS] Share title: nil
+[2025-10-13 15:01:51.825] [INFO] [CloudKitShareHandler] 🎉 [SUCCESS] Participants count: 2
+[2025-10-13 15:01:51.828] [INFO] [CloudKitShareHandler] 🎉 [SUCCESS] Share URL: https://www.icloud.com/share/0c0ZepbGN265RjSWKo_pZ0pgg
+[2025-10-13 15:01:51.828] [INFO] [CloudKitShareHandler] 🎉 [SUCCESS] Share recordID: cloudkit.zoneshare
+[2025-10-13 15:01:51.828] [INFO] [CloudKitShareHandler] 🔄 [SUCCESS] Starting post-acceptance handling
+[2025-10-13 15:01:51.828] [INFO] [CloudKitShareHandler] 🎉 [IDEAL SHARING] Share acceptance successful - performing post-acceptance verification
+[2025-10-13 15:01:51.828] [INFO] [CloudKitShareHandler] 🏁 [BATCH RESULT] Batch operation completed
+[2025-10-13 15:01:51.828] [INFO] [CloudKitShareHandler] 🎉 [BATCH RESULT] All shares in batch processed successfully
+[2025-10-13 15:01:51.884] [INFO] [AppDelegate] [PUSH] Received remote notification state=active connection=wifi constrained=false messageID=bc8d3663-c64d-41bc-be02-bbd1ba7dc225
+[2025-10-13 15:01:51.887] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=55A7AA742DC1343E)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:51.891] [INFO] [push.receive] CloudKit notification type: CKNotificationType(rawValue: 4)
+[2025-10-13 15:01:51.891] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:01:51.892] [INFO] [push.receive] Targeted CloudKit push for roomID: room_5B845A35
+[2025-10-13 15:01:51.892] [INFO] [push.receive] [PUSH] Completed handling. result=newData duration_ms=7
+[2025-10-13 15:01:51.892] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=301C4ACE8F12D99F)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:51.892] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=301C4ACE8F12D99F)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:51.892] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=private reason=push:CKSyncEngineDatabaseSubscription-Shared pendingZones=0
+[2025-10-13 15:01:51.892] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=8C16797CABFD4856)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:51.943] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3116
+[2025-10-13 15:01:51.943] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3116
+[2025-10-13 15:01:51.943] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:51.951] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=81EE31D9C3A754D9)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:52.052] [INFO] [CloudKitShareHandler] 🔍 [IDEAL SHARING] Shared DB zones after acceptance: 1
+[2025-10-13 15:01:52.052] [INFO] [CloudKitShareHandler] 🔍 [IDEAL SHARING] Zone: room_5B845A35 (owner: _9e7af715e3ec99432bc570b0463689cd)
+[2025-10-13 15:01:52.052] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] CKShare recordID: cloudkit.zoneshare
+[2025-10-13 15:01:52.052] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] CKShare URL: https://www.icloud.com/share/0c0ZepbGN265RjSWKo_pZ0pgg
+[2025-10-13 15:01:52.053] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] CKShare owner: 
+[2025-10-13 15:01:52.053] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] CKShare participants count: 2
+[2025-10-13 15:01:52.058] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] My permission: CKShareParticipantPermission(rawValue: 3)
+[2025-10-13 15:01:52.067] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] Participant name=, role=CKShareParticipantRole(rawValue: 1), perm=CKShareParticipantPermission(rawValue: 3), status=CKShareParticipantAcceptanceStatus(rawValue: 2)
+[2025-10-13 15:01:52.067] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] Participant name=, role=CKShareParticipantRole(rawValue: 4), perm=CKShareParticipantPermission(rawValue: 3), status=CKShareParticipantAcceptanceStatus(rawValue: 2)
+[2025-10-13 15:01:52.399] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=1.2179830074310303
+[2025-10-13 15:01:52.554] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] Available shared zones: 1
+[2025-10-13 15:01:52.554] [INFO] [CloudKitShareHandler] 🔍 [VERIFICATION] Zone: room_5B845A35 (owner: _9e7af715e3ec99432bc570b0463689cd)
+[2025-10-13 15:01:52.554] [INFO] [CloudKitShareHandler] ⚠️ [SYSJOIN] Missing rootRecord in share metadata — using share.recordID.zoneID as fallback
+[2025-10-13 15:01:52.554] [INFO] [CloudKitShareHandler] ✅ [SYSJOIN] Participant joined room=room_5B845A35
+[2025-10-13 15:01:52.574] [INFO] [CKSyncEngine] [ENGINE] event=<FetchedDatabaseChanges modifications=[<Modification zone=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>>] deletions=[]> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:52.583] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3141
+[2025-10-13 15:01:52.583] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3141
+[2025-10-13 15:01:52.583] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:52.583] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchRecordZoneChanges zoneID=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:52.693] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3141
+[2025-10-13 15:01:52.693] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3141
+[2025-10-13 15:01:52.693] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:53.617] [INFO] [CloudKitShareHandler] ✅ [SYSJOIN] Posted join system message record=9495553E-3470-4130-BC90-01376AA17CF6 room=room_5B845A35
+[2025-10-13 15:01:53.618] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:01:53.618] [INFO] [CloudKitShareHandler] 🔄 [IDEAL SHARING] Triggered MessageSyncPipeline update for room=room_5B845A35
+[2025-10-13 15:01:54.150] [INFO] [share] [ZONE] resolveDatabaseAndZone(sharedLookup) room=room_5B845A35 zone=room_5B845A35
+[2025-10-13 15:01:54.150] [INFO] [share] [ZONE] resolveZone(signal) participant scope=shared zone=room_5B845A35
+[2025-10-13 15:01:54.150] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=private
+[2025-10-13 15:01:54.150] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=2.9688220024108887
+[2025-10-13 15:01:54.195] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: nil
+[2025-10-13 15:01:54.195] [INFO] [CKSyncEngine] [ENGINE] event=fetchedRecordZoneChanges scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.198] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:01:54.198] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:01:54.198] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.198] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchRecordZoneChanges zoneID=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.198] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=55A7AA742DC1343E)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.198] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=8C16797CABFD4856)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.198] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=shared reason=push:CKSyncEngineDatabaseSubscription-Shared pendingZones=0
+[2025-10-13 15:01:54.199] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=81EE31D9C3A754D9)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.199] [INFO] [CKSyncEngine] [ENGINE] event=<WillSendChanges context=<SendChangesContext reason=scheduled options=<SendChangesOptions scope=all group=CKSyncEngine-SendChanges-Automatic groupID=81EE31D9C3A754D9>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.199] [INFO] [CKSyncEngine] [ENGINE] event=<DidSendChanges context=<SendChangesContext reason=scheduled options=<SendChangesOptions scope=all group=CKSyncEngine-SendChanges-Automatic groupID=81EE31D9C3A754D9>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.309] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:01:54.309] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:01:54.309] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:01:54.349] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=shared
+[2025-10-13 15:01:54.556] [INFO] [CloudKitShareHandler] ⚠️ [JOINER NAMING] Failed to set Room.name: <CKError 0x12f3a4630: "Invalid Arguments" (12/2015); server message = "Field 'recordName' is not marked queryable"; op = E2FD5D214B828DE0; uuid = 1EA0900F-23C7-47FB-A1EB-3D751BBCA890; container ID = "iCloud.forMarin-test">
+[2025-10-13 15:01:54.556] [INFO] [CloudKitShareHandler] ✅ [IDEAL SHARING] Post-acceptance processing completed — hideGlobalLoading posted
+[2025-10-13 15:01:54.558] [INFO] [UI] UI: hideGlobalLoading
+[2025-10-13 15:01:54.571] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=private
+[2025-10-13 15:01:54.682] [INFO] [share] 🛠️ [SUBS] Ensuring zone subscription id=zone-room_5B845A35-3
+[2025-10-13 15:01:54.721] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=3.5394099950790405
+[2025-10-13 15:01:54.878] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=shared
+[2025-10-13 15:01:55.105] [INFO] [share] 🛠️ [SUBS] Ensuring signal query subscriptions room=room_5B845A35 scope=participant
+[2025-10-13 15:01:55.465] [INFO] [CloudKitShareHandler] 📡 [IDEAL SHARING] Signal subscriptions ensured room=room_5B845A35
+[2025-10-13 15:01:57.063] [INFO] [DEBUG] ChatRoom: Created roomID(zoneName): 'room_5B845A35'
+[2025-10-13 15:01:57.070] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:01:57.105] [INFO] [ChatListView] ChatList: prefetch profiles start missing=1
+[2025-10-13 15:01:57.106] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:01:57.107] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:01:57.663] [INFO] [share] ⚠️ [SIGNAL] RoomMember query rejected (zone=room_5B845A35): Field 'recordName' is not marked queryable
+[2025-10-13 15:01:57.683] [INFO] [share] ✅ Bootstrapped/updated shared rooms: 1
+[2025-10-13 15:02:00.120] [INFO] [share] ⚠️ [SIGNAL] RoomMember query rejected (zone=room_5B845A35): Field 'recordName' is not marked queryable
+[2025-10-13 15:02:00.120] [INFO] [share] ❌ Failed to infer remote participant for roomID=room_5B845A35: <CKError 0x12f3a7540: "Invalid Arguments" (12/2015); server message = "Field 'recordName' is not marked queryable"; op = F80E1CB166CF2AD7; uuid = 0C764DE0-5027-4BD9-9360-8FD90B1749E0; container ID = "iCloud.forMarin-test">
+[2025-10-13 15:02:00.120] [INFO] [ChatListView] ChatList: still no counterpart after inference room=room_5B845A35
+[2025-10-13 15:02:00.120] [INFO] [ChatListView] ChatList: prefetch profiles done
+[2025-10-13 15:02:02.583] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:02.584] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:02.887] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:07.010] [INFO] [RootView] UI: openChat room=room_5B845A35
+[2025-10-13 15:02:07.159] [INFO] [MessageStore] 🏗️ Initialized with roomID: room_5B845A35
+[2025-10-13 15:02:07.161] [INFO] [MessageStore] Loaded 0 messages from local storage
+[2025-10-13 15:02:07.161] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:07.163] [INFO] [MessageStore] Manual refresh requested for roomID: room_5B845A35
+[2025-10-13 15:02:07.163] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:07.163] [INFO] [DEBUG] ChatView appeared. MessageStore refreshed
+[2025-10-13 15:02:07.163] [INFO] [DEBUG] [ChatView] myID updated via publisher: _203df8f
+[2025-10-13 15:02:07.163] [INFO] [P2P] [P2P] myID update -> starting P2P (my=_203df8f remote=)
+[2025-10-13 15:02:07.163] [INFO] [P2P] [P2P] Signal state cleared (resetRoomContext=false)
+[2025-10-13 15:02:07.163] [INFO] [P2P] [P2P] state changed: idle -> connecting
+[2025-10-13 15:02:07.163] [INFO] [P2P] [P2P] Network path type=wifi constrained=false
+[2025-10-13 15:02:07.177] [INFO] [P2P] [P2P] ICE servers used: stun:stun.l.google.com:19302, turn:relay1.expressturn.com:3478?transport=udp
+[2025-10-13 15:02:07.184] [INFO] [P2P] [P2P] RTCPeerConnection created (Unified Plan)
+[2025-10-13 15:02:07.187] [INFO] [P2P] [P2P] Added video transceiver (.sendRecv)
+[2025-10-13 15:02:07.187] [INFO] [P2P] [P2P] startIfNeeded roomID=room_5B845A35 myID=_203df8f initialRemote=
+[2025-10-13 15:02:07.187] [INFO] [P2P] [P2P] WebRTC framework present
+[2025-10-13 15:02:07.187] [INFO] [P2P] [P2P] init flags: hasPublishedOffer=false hasSetRD=false pendingCandidates=0
+[2025-10-13 15:02:07.406] [INFO] [MessageStore] Network restored for room: room_5B845A35
+[2025-10-13 15:02:07.406] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:07.406] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:07.406] [INFO] [share] [ZONE] resolveZone(signal) participant scope=shared zone=room_5B845A35
+[2025-10-13 15:02:07.406] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=private
+[2025-10-13 15:02:07.406] [INFO] [MessageStore] Local DB: total=0 room=room_5B845A35 mine=0 other=0
+[2025-10-13 15:02:07.406] [INFO] [MessageStore] UI shows 0 messages
+[2025-10-13 15:02:07.407] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:07.407] [INFO] [DEBUG] Chat permissions granted successfully
+[2025-10-13 15:02:07.407] [INFO] [DEBUG] [ChatView] myID set onAppear: _203df8f
+[2025-10-13 15:02:07.407] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:07.407] [INFO] [P2P] [P2P] peerConnectionShouldNegotiate fired (isPolite=false)
+[2025-10-13 15:02:07.408] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:07.408] [INFO] [share] [ZONE] resolveZone(signal) participant scope=shared zone=room_5B845A35
+[2025-10-13 15:02:07.408] [INFO] [P2P] [P2P] Signal prep: remote user unresolved
+[2025-10-13 15:02:07.416] [INFO] [MessageStore] Network restored for room: room_5B845A35
+[2025-10-13 15:02:07.416] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:07.563] [INFO] [P2P] [P2P] Local video track attached to transceiver sender
+[2025-10-13 15:02:07.563] [INFO] [P2P] [P2P] startCapture device=front format=640x480 fps=30
+[2025-10-13 15:02:07.588] [INFO] [P2P] [P2P] Offer published (epoch=1760335327587)
+[2025-10-13 15:02:07.596] [INFO] [P2P] [P2P] ICE gathering state changed: RTCIceGatheringState(rawValue: 1)
+[2025-10-13 15:02:07.597] [INFO] [P2P] [P2P] Local ICE candidates published total=10
+[2025-10-13 15:02:07.597] [DEBUG] [P2P] [P2P] ICE candidates published total=10 {srflx=1, host=9}
+[2025-10-13 15:02:07.631] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=shared
+[2025-10-13 15:02:07.685] [INFO] [MessageStore] Manual refresh requested for roomID: room_5B845A35
+[2025-10-13 15:02:07.685] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:07.685] [INFO] [MessageStore] Local DB: total=0 room=room_5B845A35 mine=0 other=0
+[2025-10-13 15:02:07.685] [INFO] [MessageStore] UI shows 0 messages
+[2025-10-13 15:02:07.768] [INFO] [share] ⚠️ [SIGNAL] RoomMember query rejected (zone=room_5B845A35): Field 'recordName' is not marked queryable
+[2025-10-13 15:02:07.768] [INFO] [share] ❌ Failed to infer remote participant for roomID=room_5B845A35: <CKError 0x11172c750: "Invalid Arguments" (12/2015); server message = "Field 'recordName' is not marked queryable"; op = E4210D5B1D87E05C; uuid = D507A479-85C3-4A67-AB46-C780B94DF164; container ID = "iCloud.forMarin-test">
+[2025-10-13 15:02:07.768] [INFO] [P2P] [P2P] Skip start: already active for room=room_5B845A35 state=connecting
+[2025-10-13 15:02:07.768] [INFO] [ChatView] ChatView: skip participant profile fetch (remote unresolved) room=room_5B845A35
+[2025-10-13 15:02:07.841] [INFO] [share] 🛠️ [SUBS] Ensuring zone subscription id=zone-room_5B845A35-3
+[2025-10-13 15:02:08.025] [INFO] [share] 🛠️ [SUBS] Ensuring signal query subscriptions room=room_5B845A35 scope=participant
+[2025-10-13 15:02:08.204] [INFO] [MessageStore] ✅ Room subscription setup completed for: room_5B845A35
+[2025-10-13 15:02:10.262] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:10.262] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.806] [INFO] [MessageSyncPipeline] 🔁 Sync processing: unique=9 total=9 room=room_5B845A35
+[2025-10-13 15:02:10.806] [INFO] [MessageSyncPipeline] ✅ Created message object: 0F92C7F2-D4E3-4D4F-8B04-07B2D32847E1, body: [SYS:JOIN]|name=_203df8ff164babea80e2df3c156f4f62|
+[2025-10-13 15:02:10.806] [INFO] [MessageSyncPipeline] ✅ Created message object: 54513B54-CFDC-4D0A-8777-682AEF97FC20, body: ビデオ通話やカレンダー共有も
+[2025-10-13 15:02:10.806] [INFO] [MessageSyncPipeline] ✅ Created message object: CE64C3CC-182D-42EF-85BD-9EC058297E33, body: 😊
+[2025-10-13 15:02:10.806] [INFO] [MessageSyncPipeline] ✅ Created message object: 58A4371B-F263-47F6-AF80-E225FAFECEC8, body: 2人だけの思い出を作ろう💕
+[2025-10-13 15:02:10.806] [INFO] [MessageSyncPipeline] ✅ Created message object: 3F09A9CE-B04C-4B71-816C-5C6D976B8AE3, body: 画像も送れます📸
+[2025-10-13 15:02:10.806] [INFO] [MessageSyncPipeline] ✅ Created message object: B432C2AD-3B70-421F-AA2B-DD8998091021, body: 4-Marinへようこそ！🌊
+[2025-10-13 15:02:10.807] [INFO] [MessageSyncPipeline] ✅ Created message object: 7D424B08-A5D0-4850-A858-EBC7A6D42468, body: リアクションもできるよ
+[2025-10-13 15:02:10.807] [INFO] [MessageSyncPipeline] ✅ Created message object: 7CB8DA13-1671-4AFB-B99D-CABCEC9424DE, body: 大切な人と2人だけの空間です
+[2025-10-13 15:02:10.807] [INFO] [MessageSyncPipeline] ✅ Created message object: 377C6AAF-9387-4296-A6E2-A1638F7CF7E0, body: 長押しで編集もできます
+[2025-10-13 15:02:10.807] [INFO] [MessageSyncPipeline] Manual sync completed with 9 unique records (from 9 total) - New: 9, Duplicates: 0
+[2025-10-13 15:02:10.807] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.813] [INFO] [MessageStore] ✅ Message received: id=0F92C7F2-D4E3-4D4F-8B04-07B2D32847E1 sender=_203df8f record=9495553E
+[2025-10-13 15:02:10.813] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.815] [INFO] [MessageStore] ✅ Message received: id=54513B54-CFDC-4D0A-8777-682AEF97FC20 sender=_9e7af71 record=5970437B
+[2025-10-13 15:02:10.815] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.817] [INFO] [MessageStore] ✅ Message received: id=CE64C3CC-182D-42EF-85BD-9EC058297E33 sender=_9e7af71 record=0A40A620
+[2025-10-13 15:02:10.817] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.818] [INFO] [MessageStore] ✅ Message received: id=58A4371B-F263-47F6-AF80-E225FAFECEC8 sender=_9e7af71 record=792A23FD
+[2025-10-13 15:02:10.818] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.820] [INFO] [MessageStore] ✅ Message received: id=3F09A9CE-B04C-4B71-816C-5C6D976B8AE3 sender=_9e7af71 record=3D862A31
+[2025-10-13 15:02:10.820] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.821] [INFO] [MessageStore] ✅ Message received: id=B432C2AD-3B70-421F-AA2B-DD8998091021 sender=_9e7af71 record=27DB4BB8
+[2025-10-13 15:02:10.821] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.823] [INFO] [MessageStore] ✅ Message received: id=7D424B08-A5D0-4850-A858-EBC7A6D42468 sender=_9e7af71 record=DF672F5C
+[2025-10-13 15:02:10.823] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.824] [INFO] [MessageStore] ✅ Message received: id=7CB8DA13-1671-4AFB-B99D-CABCEC9424DE sender=_9e7af71 record=8121D867
+[2025-10-13 15:02:10.825] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:10.826] [INFO] [MessageStore] ✅ Message received: id=377C6AAF-9387-4296-A6E2-A1638F7CF7E0 sender=_9e7af71 record=088DF015
+[2025-10-13 15:02:10.892] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:11.078] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:11.348] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=0.5409290790557861
+[2025-10-13 15:02:16.315] [INFO] [ChatView] ComposeBar: focus=true (scroll stays enabled; keyboard dismiss by input drag)
+[2025-10-13 15:02:16.432] [INFO] [ChatView] Keyboard: willShow height=335
+[2025-10-13 15:02:17.225] [INFO] [ChatView] Keyboard: willShow height=336
+[2025-10-13 15:02:20.546] [INFO] [MessageStore] Message saved locally: 7446CB66-6DD5-4478-804B-3E02824E7781
+[2025-10-13 15:02:20.546] [INFO] [ChatView] [Compose] Cleared text after send
+[2025-10-13 15:02:20.606] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:20.658] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:20.659] [INFO] [share] [ZONE] resolveZone(message) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:20.661] [INFO] [CKSyncEngine] [ENGINE] event=<WillSendChanges context=<SendChangesContext reason=manual options=<SendChangesOptions scope=all group=CKSyncEngine-SendChanges-Manual groupID=71D59D508BC495FC>>> scope=shared pending{records=1, db=1, zones=1}
+[2025-10-13 15:02:20.782] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=5677
+[2025-10-13 15:02:20.782] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=5677
+[2025-10-13 15:02:20.782] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=1, db=0, zones=1}
+[2025-10-13 15:02:21.338] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=53F980FD64BDD936)>>> scope=shared pending{records=1, db=0, zones=1}
+[2025-10-13 15:02:21.346] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=5677
+[2025-10-13 15:02:21.347] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=5677
+[2025-10-13 15:02:21.347] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=1, db=0, zones=1}
+[2025-10-13 15:02:21.347] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=53F980FD64BDD936)>>> scope=shared pending{records=1, db=0, zones=1}
+[2025-10-13 15:02:21.347] [INFO] [CKSyncEngine] [ENGINE] event=<WillSendChanges context=<SendChangesContext reason=scheduled options=<SendChangesOptions scope=all group=CKSyncEngine-SendChanges-Automatic groupID=53F980FD64BDD936>>> scope=shared pending{records=1, db=0, zones=1}
+[2025-10-13 15:02:34.125] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:34.125] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:34.356] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:34.356] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:34.520] [INFO] [CKSyncEngine] [ENGINE] event=<SentDatabaseChanges savedZones=[] failedZoneSaves=[<FailedZoneSave zone=<CKRecordZone: 0x134852f00; zoneID=room_5B845A35:_9e7af715e3ec99432bc570b0463689cd, capabilities=(none), parent=<null>, recordZoneEtag=<null>, encryptionScope=per-record> error=<CKError 0x111540720: "Permission Failure" (10/2007); server message = "Shared zone update is not enabled for container"; op = 386E1B8D73570C44; uuid = 4AF852F1-222D-463C-BECF-7F163378C55B; container ID = "iCloud.forMarin-test">>] deletedZoneIDs=[] failedZoneDeletes=[:]> scope=shared pending{records=1, db=0, zones=1}
+[2025-10-13 15:02:34.637] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3650
+[2025-10-13 15:02:34.637] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3650
+[2025-10-13 15:02:34.637] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:34.840] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:35.141] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:36.077] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: nil
+[2025-10-13 15:02:36.077] [INFO] [CKSyncEngine] [ENGINE] event=sentRecordZoneChanges scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:36.095] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:02:36.095] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:02:36.095] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:36.095] [INFO] [CKSyncEngine] [ENGINE] event=<DidSendChanges context=<SendChangesContext reason=manual options=<SendChangesOptions scope=all group=CKSyncEngine-SendChanges-Manual groupID=71D59D508BC495FC>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:36.099] [INFO] [CKSyncEngine] [ENGINE] event=<DidSendChanges context=<SendChangesContext reason=scheduled options=<SendChangesOptions scope=all group=CKSyncEngine-SendChanges-Automatic groupID=53F980FD64BDD936>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:36.099] [INFO] [MessageStore] Queued message to CKSyncEngine: id=7446CB66-6DD5-4478-804B-3E02824E7781
+[2025-10-13 15:02:36.194] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:02:36.194] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:02:36.195] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:37.345] [INFO] [MessageSyncPipeline] 🔁 Sync processing: unique=1 total=1 room=nil
+[2025-10-13 15:02:37.346] [INFO] [MessageSyncPipeline] ✅ Created message object: A8ABDF39-1681-49D1-9275-114E0739A5C9, body: 参加しました
+[2025-10-13 15:02:37.346] [INFO] [MessageSyncPipeline] Manual sync completed with 1 unique records (from 1 total) - New: 1, Duplicates: 0
+[2025-10-13 15:02:37.346] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:37.347] [INFO] [MessageStore] [DEDUP] In-memory matched ck=7446CB66 sender=_203df8f
+[2025-10-13 15:02:39.940] [INFO] [ChatView] Keyboard: dismiss by input drag
+[2025-10-13 15:02:39.985] [INFO] [ChatView] Keyboard: willHide
+[2025-10-13 15:02:40.000] [INFO] [ChatView] ComposeBar: focus=false (scroll stays enabled; keyboard dismiss by input drag)
+[2025-10-13 15:02:45.135] [INFO] [ChatListView] ChatList: prefetch profiles start missing=1
+[2025-10-13 15:02:45.145] [INFO] [share] ✅ Updated participants for room=room_5B845A35 userID=_203df8ff164babea80e2df3c156f4f62
+[2025-10-13 15:02:45.145] [INFO] [ChatListView] ChatList: still no counterpart after inference room=room_5B845A35
+[2025-10-13 15:02:45.145] [INFO] [ChatListView] ChatList: prefetch profiles done
+[2025-10-13 15:02:45.145] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:45.167] [INFO] [P2P] [P2P] closeIfCurrent deferred (reason=navigation-pop) while connecting room=room_5B845A35
+[2025-10-13 15:02:45.489] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:45.489] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:45.792] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:47.023] [INFO] [P2P] [P2P] ICE gathering state changed: RTCIceGatheringState(rawValue: 2)
+[2025-10-13 15:02:47.024] [INFO] [P2P] [P2P] ICE gathering complete
+[2025-10-13 15:02:47.363] [INFO] [RootView] UI: openChat room=room_5B845A35
+[2025-10-13 15:02:47.418] [INFO] [MessageStore] 🏗️ Initialized with roomID: room_5B845A35
+[2025-10-13 15:02:47.420] [INFO] [MessageStore] Loaded 10 messages from local storage
+[2025-10-13 15:02:47.420] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:47.421] [INFO] [MessageStore] Manual refresh requested for roomID: room_5B845A35
+[2025-10-13 15:02:47.421] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:47.421] [INFO] [DEBUG] ChatView appeared. MessageStore refreshed
+[2025-10-13 15:02:47.421] [INFO] [DEBUG] [ChatView] myID updated via publisher: _203df8f
+[2025-10-13 15:02:47.421] [INFO] [P2P] [P2P] myID update -> starting P2P (my=_203df8f remote=)
+[2025-10-13 15:02:47.426] [INFO] [P2P] [P2P] Skip start: already active for room=room_5B845A35 state=connecting
+[2025-10-13 15:02:47.566] [INFO] [MessageStore] Network restored for room: room_5B845A35
+[2025-10-13 15:02:47.567] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:47.567] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:47.567] [INFO] [share] [ZONE] resolveZone(signal) participant scope=shared zone=room_5B845A35
+[2025-10-13 15:02:47.567] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=private
+[2025-10-13 15:02:47.568] [INFO] [MessageStore] Local DB: total=10 room=room_5B845A35 mine=2 other=8
+[2025-10-13 15:02:47.568] [INFO] [MessageStore] UI shows 10 messages
+[2025-10-13 15:02:47.569] [INFO] [share] ✅ Updated participants for room=room_5B845A35 userID=_203df8ff164babea80e2df3c156f4f62
+[2025-10-13 15:02:47.569] [INFO] [P2P] [P2P] Skip start: already active for room=room_5B845A35 state=connecting
+[2025-10-13 15:02:47.569] [INFO] [ChatView] ChatView: skip participant profile fetch (remote unresolved) room=room_5B845A35
+[2025-10-13 15:02:47.571] [INFO] [DEBUG] Chat permissions granted successfully
+[2025-10-13 15:02:47.571] [INFO] [DEBUG] [ChatView] myID set onAppear: _203df8f
+[2025-10-13 15:02:47.571] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:47.571] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:47.775] [INFO] [share] 🛠️ [SUBS] Ensuring database subscription scope=shared
+[2025-10-13 15:02:47.804] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:47.804] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:47.934] [INFO] [share] 🛠️ [SUBS] Ensuring zone subscription id=zone-room_5B845A35-3
+[2025-10-13 15:02:47.934] [INFO] [MessageStore] Manual refresh requested for roomID: room_5B845A35
+[2025-10-13 15:02:47.934] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:47.935] [INFO] [MessageStore] Local DB: total=10 room=room_5B845A35 mine=2 other=8
+[2025-10-13 15:02:47.935] [INFO] [MessageStore] UI shows 10 messages
+[2025-10-13 15:02:48.063] [INFO] [share] 🛠️ [SUBS] Ensuring signal query subscriptions room=room_5B845A35 scope=participant
+[2025-10-13 15:02:48.070] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:48.070] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:02:48.189] [INFO] [MessageStore] ✅ Room subscription setup completed for: room_5B845A35
+[2025-10-13 15:02:48.214] [INFO] [MessageSyncPipeline] 🔁 Sync processing: unique=0 total=0 room=room_5B845A35
+[2025-10-13 15:02:48.215] [INFO] [MessageSyncPipeline] Manual sync completed with 0 unique records (from 0 total) - New: 0, Duplicates: 0
+[2025-10-13 15:02:48.304] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:48.606] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:02:48.726] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=0.511247992515564
+[2025-10-13 15:02:49.224] [INFO] [AppDelegate] [PUSH] Received remote notification state=active connection=wifi constrained=false messageID=58da3a00-2d9c-49d0-be54-4626aa0a9e42
+[2025-10-13 15:02:49.225] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=469B7826FAD206D6)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.234] [INFO] [push.receive] CloudKit notification type: CKNotificationType(rawValue: 4)
+[2025-10-13 15:02:49.235] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:49.235] [INFO] [push.receive] Targeted CloudKit push for roomID: room_5B845A35
+[2025-10-13 15:02:49.235] [INFO] [P2P] [P2P] onZoneChanged(roomID=room_5B845A35) — push/delta driven flow active
+[2025-10-13 15:02:49.235] [INFO] [push.receive] [PUSH] Completed handling. result=newData duration_ms=11
+[2025-10-13 15:02:49.235] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=668C739250E489B2)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.235] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=668C739250E489B2)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.235] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=private reason=push:CKSyncEngineDatabaseSubscription-Shared pendingZones=0
+[2025-10-13 15:02:49.235] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=D6F3516588272875)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.343] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:02:49.344] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3364
+[2025-10-13 15:02:49.344] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.583] [INFO] [CKSyncEngine] [ENGINE] event=<FetchedDatabaseChanges modifications=[<Modification zone=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>>] deletions=[]> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.593] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3392
+[2025-10-13 15:02:49.593] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3392
+[2025-10-13 15:02:49.593] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.593] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchRecordZoneChanges zoneID=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.700] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3392
+[2025-10-13 15:02:49.700] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3392
+[2025-10-13 15:02:49.700] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.768] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=1.553868055343628
+[2025-10-13 15:02:49.830] [INFO] [AppDelegate] [PUSH] Received remote notification state=active connection=wifi constrained=false messageID=9b75577c-981e-4573-9043-14aa6b036488
+[2025-10-13 15:02:49.830] [INFO] [push.receive] CloudKit notification type: CKNotificationType(rawValue: 4)
+[2025-10-13 15:02:49.830] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: room_5B845A35
+[2025-10-13 15:02:49.830] [INFO] [push.receive] Targeted CloudKit push for roomID: room_5B845A35
+[2025-10-13 15:02:49.830] [INFO] [P2P] [P2P] onZoneChanged(roomID=room_5B845A35) — push/delta driven flow active
+[2025-10-13 15:02:49.830] [INFO] [push.receive] [PUSH] Completed handling. result=newData duration_ms=0
+[2025-10-13 15:02:49.830] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=8F1F43508A14D696)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:49.947] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3392
+[2025-10-13 15:02:49.947] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3392
+[2025-10-13 15:02:49.947] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.027] [DEBUG] [MessageSyncPipeline] Manual checkForUpdates called for roomID: nil
+[2025-10-13 15:02:50.027] [INFO] [CKSyncEngine] [ENGINE] event=fetchedRecordZoneChanges scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.030] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3365
+[2025-10-13 15:02:50.030] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3365
+[2025-10-13 15:02:50.030] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.030] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchRecordZoneChanges zoneID=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.031] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=D6F3516588272875)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.031] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=shared reason=push:CKSyncEngineDatabaseSubscription-Shared pendingZones=0
+[2025-10-13 15:02:50.031] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=CD2D8CF5A9DC8506)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.031] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=CD2D8CF5A9DC8506)>>> scope=private pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.031] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=private reason=push:CKSyncEngineDatabaseSubscription-Shared pendingZones=0
+[2025-10-13 15:02:50.031] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=1035A73EDB68D01C)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.222] [INFO] [CKSyncEngine] [ENGINE] event=<FetchedDatabaseChanges modifications=[<Modification zone=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>>] deletions=[]> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.233] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3413
+[2025-10-13 15:02:50.233] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3413
+[2025-10-13 15:02:50.233] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.234] [INFO] [CKSyncEngine] [ENGINE] event=<WillFetchRecordZoneChanges zoneID=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.342] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3413
+[2025-10-13 15:02:50.342] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3413
+[2025-10-13 15:02:50.343] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.346] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=2.131814956665039
+[2025-10-13 15:02:50.621] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchRecordZoneChanges zoneID=<CKRecordZoneID: 0x11ae57e70; zoneName=room_5B845A35, ownerName=_9e7af715e3ec99432bc570b0463689cd>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.632] [INFO] [CKSyncEngine] [ENGINE] Persisted state key=CKSyncEngine.State.Shared bytes=3388
+[2025-10-13 15:02:50.632] [INFO] [metrics] metric=engine_state_persisted key=CKSyncEngine.State.Shared bytes=3388
+[2025-10-13 15:02:50.632] [INFO] [CKSyncEngine] [ENGINE] event=stateUpdate scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.633] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=8F1F43508A14D696)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.633] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=scheduled options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Automatic groupID=469B7826FAD206D6)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.633] [INFO] [CKSyncEngine] [ENGINE] event=<DidFetchChanges context=<FetchChangesContext reason=manual options=<FetchChangesOptions scope=all group=CKSyncEngine-FetchChanges-Manual groupID=1035A73EDB68D01C)>>> scope=shared pending{records=0, db=0, zones=0}
+[2025-10-13 15:02:50.633] [INFO] [CKSyncEngine] [ENGINE] fetchChanges success scope=shared reason=push:CKSyncEngineDatabaseSubscription-Shared pendingZones=0
+[2025-10-13 15:02:50.881] [DEBUG] [MessageSyncPipeline] Sync cooldown active, skip. Δt=2.665645956993103
+[2025-10-13 15:03:07.374] [INFO] [ChatListView] ChatList: prefetch profiles start missing=1
+[2025-10-13 15:03:07.376] [INFO] [share] ✅ Updated participants for room=room_5B845A35 userID=_203df8ff164babea80e2df3c156f4f62
+[2025-10-13 15:03:07.376] [INFO] [ChatListView] ChatList: still no counterpart after inference room=room_5B845A35
+[2025-10-13 15:03:07.376] [INFO] [ChatListView] ChatList: prefetch profiles done
+[2025-10-13 15:03:07.376] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:03:07.496] [INFO] [P2P] [P2P] closeIfCurrent deferred (reason=navigation-pop) while connecting room=room_5B845A35
+[2025-10-13 15:03:07.810] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:03:07.810] [INFO] [share] [ZONE] resolveDatabaseAndZone(cache) room=room_5B845A35 scope=shared zone=room_5B845A35
+[2025-10-13 15:03:08.109] [INFO] [share] ✅ Retrieved Room record=room_5B845A35 scope=.shared
+[2025-10-13 15:03:18.200] [INFO] [LogCollector] === ログ収集開始前のDB状態確認 ===
+[2025-10-13 15:03:18.754] [INFO] [LogCollector] === DB状態確認完了 ===
+[2025-10-13 15:03:18.755] [INFO] [LogCollector] Raw device name: 'iPhone'
+[2025-10-13 15:03:18.755] [INFO] [LogCollector] Sanitized device name: 'iPhone'

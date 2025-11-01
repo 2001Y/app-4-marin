@@ -18,8 +18,9 @@ struct ChatView: View {
     // CloudKitユーザーIDの変化を購読して常に最新を用いる
     @StateObject private var chatManager = CloudKitChatManager.shared
 
-    // 相手ユーザー ID をヘッダーに表示
-    var remoteUserID: String { chatRoom.remoteUserID }
+    // 相手ユーザー
+    var remoteParticipant: ChatRoom.Participant? { chatRoom.primaryCounterpart }
+    var remoteUserID: String { remoteParticipant?.userID.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
 
     // 最近使った絵文字を保存（最大3件）
     // デフォルトで 3 つの絵文字をプリセット（初回起動時のみ表示用）
@@ -328,24 +329,23 @@ struct ChatView: View {
                     }
                     Task { await evaluateOwnerInvitePromptIfNeeded() }
                 }
-                // remoteUserID が空→実IDに変化したらP2Pを追随起動（空のままでも再評価しない）
-                .onChange(of: chatRoom.remoteUserID) { _, newID in
+                // 参加者が確定したらP2Pを再評価
+                .onChange(of: remoteUserID) { _, newID in
                     let me = (CloudKitChatManager.shared.currentUserID ?? myID).trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !me.isEmpty else { return }
                     let trimmedRemote = newID.trimmingCharacters(in: .whitespacesAndNewlines)
-                    log("[P2P] remoteUserID changed -> starting P2P (my=\(String(me.prefix(8))) remote=\(String(trimmedRemote.prefix(8))))", category: "P2P")
-                    let remoteArg = trimmedRemote.isEmpty ? nil : trimmedRemote
-                    P2PController.shared.startIfNeeded(roomID: roomID, myID: me, remoteID: remoteArg)
-                    if remoteArg != nil { showOwnerInviteSheet = false }
+                    guard !trimmedRemote.isEmpty else { return }
+                    log("[P2P] remote participant resolved -> starting P2P (my=\(String(me.prefix(8))) remote=\(String(trimmedRemote.prefix(8))))", category: "P2P")
+                    P2PController.shared.startIfNeeded(roomID: roomID, myID: me, remoteID: trimmedRemote)
+                    showOwnerInviteSheet = false
                 }
                 .onReceive(chatManager.$currentUserID) { uid in
                     if let uid, uid != myID {
                         myID = uid
                         log("[ChatView] myID updated via publisher: \(String(uid.prefix(8)))", category: "DEBUG")
-                        let remote = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let remoteArg = remote.isEmpty ? nil : remote
-                        log("[P2P] myID update -> starting P2P (my=\(String(uid.prefix(8))) remote=\(String(remote.prefix(8))))", category: "P2P")
-                        P2PController.shared.startIfNeeded(roomID: roomID, myID: uid, remoteID: remoteArg)
+                        let remoteArg = remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        log("[P2P] myID update -> starting P2P (my=\(String(uid.prefix(8))) remote=\(String(remoteArg.prefix(8))))", category: "P2P")
+                        P2PController.shared.startIfNeeded(roomID: roomID, myID: uid, remoteID: remoteArg.isEmpty ? nil : remoteArg)
                     }
                 }
                 .onChange(of: messages.count) { _, newCount in
@@ -672,7 +672,7 @@ struct ChatView: View {
         // オーナーのみ
         guard CloudKitChatManager.shared.isOwnerCached(roomID) == true else { return }
         // 低レイヤー判定に変更: リモート参加者IDが未確定のときのみ
-        let remoteEmpty = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let remoteEmpty = remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if remoteEmpty {
             hasEvaluatedOwnerInvite = true
             showOwnerInviteSheet = true

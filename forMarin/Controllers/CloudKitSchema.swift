@@ -12,7 +12,9 @@ enum CKSchema {
         static let message = "Message"
         static let messageAttachment = "MessageAttachment"
         static let reaction = "Reaction"
-        static let signalMailbox = "SignalMailbox"
+        static let signalSession = "SignalSession"
+        static let signalEnvelope = "SignalEnvelope"
+        static let signalIceChunk = "SignalIceChunk"
     }
 
     // Record types (private DB)
@@ -48,14 +50,17 @@ enum CKSchema {
         static let memberRef = "memberRef"
         static let emoji = "emoji"
 
-        // SignalMailbox（メンバー単位シグナル）
+        // Signal records (session / envelope / ice)
         static let updatedAt = "updatedAt"
-        static let mailboxPayload = "mailboxPayload"
-        static let intentEpoch = "intentEpoch"
         static let callEpoch = "callEpoch"
-        static let consumedEpoch = "consumedEpoch"
-        static let targetUserId = "targetUserId"
-        static let lastSeenAt = "lastSeenAt"
+        static let otherUserId = "otherUserId"
+        static let sessionKey = "sessionKey"
+        static let payload = "payload"
+        static let envelopeType = "envelopeType"
+        static let ownerUserId = "ownerUserId"
+        static let candidate = "candidate"
+        static let candidateType = "candidateType"
+        static let chunkCreatedAt = "chunkCreatedAt"
 
         // Private profile
         static let faceTimeID = "faceTimeID"
@@ -82,5 +87,17 @@ enum CKSchema {
 
     static func signalMailboxRecordID(userId: String, zoneID: CKRecordZone.ID) -> CKRecord.ID {
         return CKRecord.ID(recordName: "MB_\(userId)", zoneID: zoneID)
+    }
+
+    static func signalSessionRecordID(sessionKey: String, zoneID: CKRecordZone.ID) -> CKRecord.ID {
+        return CKRecord.ID(recordName: "SS_\(sessionKey)", zoneID: zoneID)
+    }
+
+    static func signalEnvelopeRecordID(sessionKey: String, callEpoch: Int, envelopeType: String, zoneID: CKRecordZone.ID) -> CKRecord.ID {
+        return CKRecord.ID(recordName: "SE_\(sessionKey)_\(callEpoch)_\(envelopeType)", zoneID: zoneID)
+    }
+
+    static func signalIceChunkRecordID(sessionKey: String, callEpoch: Int, ownerUserID: String, uuid: UUID = UUID(), zoneID: CKRecordZone.ID) -> CKRecord.ID {
+        return CKRecord.ID(recordName: "IC_\(sessionKey)_\(callEpoch)_\(ownerUserID)_\(uuid.uuidString)", zoneID: zoneID)
     }
 }

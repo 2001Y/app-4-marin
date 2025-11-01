@@ -158,8 +158,16 @@ struct ChatListView: View {
             let roomID = CKSchema.makeZoneName()
             let descriptor = try await CloudKitChatManager.shared.createSharedChatRoom(roomID: roomID, invitedUserID: nil)
             _ = descriptor // 生成・URLはChatView側で表示
-            let newRoom = ChatRoom(roomID: roomID, remoteUserID: "", displayName: nil)
+            let newRoom = ChatRoom(roomID: roomID)
             modelContext.insert(newRoom)
+            let ownerID = try await CloudKitChatManager.shared.ensureCurrentUserID()
+            let ownerParticipant = ChatRoom.Participant(userID: ownerID,
+                                                        isLocal: true,
+                                                        role: .owner,
+                                                        displayName: nil,
+                                                        avatarData: nil,
+                                                        lastUpdatedAt: Date())
+            newRoom.participants.append(ownerParticipant)
             try? modelContext.save()
             onChatSelected(newRoom)
         } catch {
@@ -252,14 +260,16 @@ struct ChatListView: View {
         log("ChatList: prefetch profiles start missing=\(targets.count)", category: "ChatListView")
 
         for room in targets {
-            let uid = room.remoteUserID
-            // 空UID: 一度だけ補完を試みる（成功すれば以降のフェッチが有効化）
-            if uid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if room.primaryCounterpart == nil {
                 await CloudKitChatManager.shared.inferRemoteParticipantAndUpdateRoom(roomID: room.roomID, modelContext: modelContext)
             }
-            let effectiveUID = room.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let counterpart = room.primaryCounterpart else {
+                log("ChatList: still no counterpart after inference room=\(room.roomID)", category: "ChatListView")
+                continue
+            }
+            let effectiveUID = counterpart.userID.trimmingCharacters(in: .whitespacesAndNewlines)
             if effectiveUID.isEmpty {
-                log("ChatList: still empty uid after inference room=\(room.roomID)", category: "ChatListView")
+                log("ChatList: counterpart uid empty room=\(room.roomID)", category: "ChatListView")
                 continue
             }
             do {
@@ -274,18 +284,28 @@ struct ChatListView: View {
                         if avatarToUse == nil { avatarToUse = priv.avatarData }
                     }
                 }
-                await MainActor.run {
-                    if let name = nameToUse, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        room.displayName = name
+               await MainActor.run {
+                   let trimmedName = nameToUse?.trimmingCharacters(in: .whitespacesAndNewlines)
+                   if let name = trimmedName, !name.isEmpty {
+                       room.displayName = name
+                        if let idx = room.participants.firstIndex(where: { $0.userID == counterpart.userID }) {
+                            var updated = room.participants[idx]
+                            updated.displayName = name
+                            room.participants[idx] = updated
+                        }
                     }
                     if let data = avatarToUse, !data.isEmpty {
-                        room.avatarData = data
+                        if let idx = room.participants.firstIndex(where: { $0.userID == counterpart.userID }) {
+                            var updated = room.participants[idx]
+                            updated.avatarData = data
+                            room.participants[idx] = updated
+                        }
                     }
                 }
                 let nm = nameToUse?.trimmingCharacters(in: .whitespacesAndNewlines)
-                log("ChatList: profile ok uid=\(uid) name=\(nm?.isEmpty == false ? nm! : "nil")", category: "ChatListView")
+                log("ChatList: profile ok uid=\(effectiveUID) name=\(nm?.isEmpty == false ? nm! : "nil")", category: "ChatListView")
             } catch {
-                log("ChatList: profile failed uid=\(uid) err=\(error)", category: "ChatListView")
+                log("ChatList: profile failed uid=\(effectiveUID) err=\(error)", category: "ChatListView")
             }
         }
 
@@ -370,7 +390,7 @@ struct ChatListView: View {
     // 画像アバター優先版（表示名/IDからのイニシャルにフォールバック）
     @ViewBuilder
     private func avatarView(for room: ChatRoom) -> some View {
-        if let data = room.avatarData, let image = UIImage(data: data) {
+        if let data = room.primaryCounterpart?.avatarData, let image = UIImage(data: data) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
@@ -378,8 +398,9 @@ struct ChatListView: View {
                 .clipShape(Circle())
                 .overlay(Circle().stroke(Color.gray.opacity(0.2), lineWidth: 1))
         } else {
-            let displayText: Substring = room.displayName?.prefix(1) ?? room.remoteUserID.prefix(1)
-            avatarView(for: room.remoteUserID, displayText: displayText)
+            let uid = room.primaryCounterpart?.userID ?? "?"
+            let displayText: Substring = room.displayName?.prefix(1) ?? uid.prefix(1)
+            avatarView(for: uid, displayText: displayText)
         }
     }
     
@@ -396,12 +417,12 @@ extension ChatListView {
             log("⚠️ Duplicate ChatRoom entries detected for roomID(s): [\(ids)]", category: "ChatListView")
         }
 
-        // 同じ相手(remoteUserID)に対する複数ルーム（仕様上は起こり得るが診断用に出力）
-        let byRemote = Dictionary(grouping: rooms, by: { $0.remoteUserID })
+        // 同じ相手に対する複数ルーム（仕様上は起こり得るが診断用に出力）
+        let byRemote = Dictionary(grouping: rooms, by: { $0.primaryCounterpart?.userID ?? "" })
         let dupRemote = byRemote.filter { !$0.key.isEmpty && $0.value.count > 1 }
         if !dupRemote.isEmpty {
             let list = dupRemote.map { "\($0.key): \($0.value.count) rooms" }.joined(separator: ", ")
-            log("ℹ️ Multiple ChatRooms found for same remoteUserID(s): [\(list)]", category: "ChatListView")
+            log("ℹ️ Multiple ChatRooms found for same counterpart IDs: [\(list)]", category: "ChatListView")
         }
     }
 }
@@ -425,11 +446,11 @@ struct ChatRowView: View {
             
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text({
+                   Text({
                         let local = (chatRoom.displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         if !local.isEmpty { return local }
                         if !resolvedTitle.isEmpty { return resolvedTitle }
-                        let rid = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let rid = chatRoom.primaryCounterpart?.userID.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                         return rid.isEmpty ? "新規チャット" : rid
                     }())
                         .font(.title3.weight(.semibold))

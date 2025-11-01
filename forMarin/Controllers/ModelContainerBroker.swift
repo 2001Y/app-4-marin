@@ -24,6 +24,15 @@ final class ModelContainerBroker {
         return container.mainContext
     }
 
+    func participantsSnapshot(roomID: String) -> [ChatRoom.Participant] {
+        guard let container else { return [] }
+        let context = container.mainContext
+        var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
+        descriptor.fetchLimit = 1
+        guard let room = (try? context.fetch(descriptor))?.first else { return [] }
+        return room.participants
+    }
+
     func countMessagesMissingCloudRecord() throws -> Int {
         guard let container else {
             throw BrokerError.containerUnavailable

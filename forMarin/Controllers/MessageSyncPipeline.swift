@@ -71,15 +71,16 @@ final class MessageSyncPipeline: NSObject {
         CKSchema.FieldKey.emoji,
         // MessageAttachment
         CKSchema.FieldKey.asset,
-        // SignalMailbox
-        CKSchema.FieldKey.userId,
-        CKSchema.FieldKey.targetUserId,
-        CKSchema.FieldKey.intentEpoch,
+        // Signal envelopes / ICE chunks
+        CKSchema.FieldKey.sessionKey,
+        CKSchema.FieldKey.ownerUserId,
+        CKSchema.FieldKey.envelopeType,
+        CKSchema.FieldKey.payload,
         CKSchema.FieldKey.callEpoch,
-        CKSchema.FieldKey.consumedEpoch,
-        CKSchema.FieldKey.lastSeenAt,
-        CKSchema.FieldKey.updatedAt,
-        CKSchema.FieldKey.mailboxPayload
+        CKSchema.FieldKey.candidate,
+        CKSchema.FieldKey.candidateType,
+        CKSchema.FieldKey.chunkCreatedAt,
+        CKSchema.FieldKey.updatedAt
     ]
     static let shared = MessageSyncPipeline()
     
@@ -289,7 +290,8 @@ final class MessageSyncPipeline: NSObject {
             // 送信先DBとゾーンを解決（オーナー=private / 参加者=shared）
             let (targetDB, zoneID) = try await CloudKitChatManager.shared.resolveDatabaseAndZone(for: message.roomID)
             let scopeLabel = (targetDB.databaseScope == .shared) ? "shared" : "private"
-            log("[MSG] Sending message room=\(message.roomID) scope=\(scopeLabel) zone=\(zoneID.zoneName) id=\(message.id)", category: "MessageSyncPipeline")
+            let ownerLabel = zoneID.ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
+            log("[MSG] Sending message room=\(message.roomID) scope=\(scopeLabel) zone=\(zoneID.zoneName) owner=\(ownerLabel.isEmpty ? "nil" : ownerLabel) dbScope=\(targetDB.databaseScope.rawValue) id=\(message.id)", category: "MessageSyncPipeline")
             let record = createCKRecord(from: message, zoneID: zoneID)
             
             // 🌟 [IDEAL UPLOAD] 添付ファイルがある場合は長時間実行アップロードを使用
@@ -586,7 +588,9 @@ final class MessageSyncPipeline: NSObject {
         let reactionTypes: Set<String> = [CKSchema.SharedType.reaction, "MessageReaction"]
         var affectedReactions: Set<ReactionKey> = []
         var pendingAttachments: [(roomID: String, messageRecordName: String, fileURL: URL)] = []
-        var mailboxApplied = 0
+        var envelopeApplied = 0
+        var iceApplied = 0
+        var roomMemberApplied = 0
 
         for record in records {
             if reactionTypes.contains(record.recordType) {
@@ -596,6 +600,14 @@ final class MessageSyncPipeline: NSObject {
                     if let filter = roomFilter, filter != zoneRoomID { continue }
                     affectedReactions.insert(ReactionKey(roomID: zoneRoomID, messageRecordName: messageName))
                 }
+                continue
+            }
+
+            if record.recordType == CKSchema.SharedType.roomMember {
+                let roomID = record.recordID.zoneID.zoneName
+                if let filter = roomFilter, filter != roomID { continue }
+                await CloudKitChatManager.shared.ingestRoomMemberRecord(record)
+                roomMemberApplied += 1
                 continue
             }
 
@@ -618,12 +630,16 @@ final class MessageSyncPipeline: NSObject {
                 continue
             }
 
-            if record.recordType == CKSchema.SharedType.signalMailbox {
+            if record.recordType == CKSchema.SharedType.signalEnvelope || record.recordType == CKSchema.SharedType.signalIceChunk {
                 let zoneRoomID = record.recordID.zoneID.zoneName
                 if let filter = roomFilter, filter != zoneRoomID { continue }
-                let applied = await P2PController.shared.applyMailboxRecord(record)
+                let applied = await P2PController.shared.applySignalRecord(record)
                 if applied {
-                    mailboxApplied += 1
+                    if record.recordType == CKSchema.SharedType.signalEnvelope {
+                        envelopeApplied += 1
+                    } else {
+                        iceApplied += 1
+                    }
                 }
                 continue
             }
@@ -637,8 +653,12 @@ final class MessageSyncPipeline: NSObject {
             notifyAttachmentUpdated(roomID: item.roomID, messageRecordName: item.messageRecordName, localPath: item.fileURL.path)
         }
 
-        if mailboxApplied > 0 {
-            log("[P2P] Applied SignalMailbox records: \(mailboxApplied)", category: "MessageSyncPipeline")
+        if envelopeApplied > 0 || iceApplied > 0 {
+            log("[P2P] Applied signal records envelopes=\(envelopeApplied) ice=\(iceApplied)", category: "MessageSyncPipeline")
+        }
+
+        if roomMemberApplied > 0 {
+            log("[P2P] Applied RoomMember records count=\(roomMemberApplied)", category: "MessageSyncPipeline")
         }
     }
 

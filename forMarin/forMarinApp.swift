@@ -80,7 +80,7 @@ struct forMarinApp: App {
         try? FileManager.default.createDirectory(at: appSupport,
                                                  withIntermediateDirectories: true)
 
-        let url = appSupport.appendingPathComponent("forMarin.sqlite")
+        let url = appSupport.appendingPathComponent("forMarin_v2.sqlite")
 
         // If reset requested, delete existing DB
         if resetOccurred {

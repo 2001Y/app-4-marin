@@ -4,49 +4,103 @@ import UIKit
 
 @Model
 final class ChatRoom: Hashable {
-    var id: UUID = UUID()
-    
-    // 相手のAppleアカウント（メールアドレスまたは電話番号）
-    var remoteUserID: String = ""
-    
-    // チャット相手の表示名（オプション）
-    var displayName: String?
-    // 相手のアバター画像（オプション）
-    var avatarData: Data?
-    
-    // ルームID（= ゾーン名。唯一の真実）
-    var roomID: String = ""
-    
-    // 最後のメッセージの内容（一覧表示用）
-    var lastMessageText: String?
-    
-    // 最後のメッセージの時刻
-    var lastMessageDate: Date?
-    
-    // 未読メッセージ数
-    var unreadCount: Int = 0
-    
-    // 作成日時
-    var createdAt: Date = Date()
-    
-    // 画像自動ダウンロード設定（相手ごと）
-    var autoDownloadImages: Bool = false
-    
-    init(roomID: String, remoteUserID: String, displayName: String? = nil) {
-        self.id = UUID()
-        self.remoteUserID = remoteUserID
-        self.displayName = displayName
-        self.createdAt = Date()
-        self.roomID = roomID  // ゾーン名と一致させる
-        log("ChatRoom: Created with remoteUserID: '\(remoteUserID)', roomID(zoneName): '\(self.roomID)'", category: "DEBUG")
+    enum ParticipantRole: String, Codable {
+        case owner
+        case participant
+        case unknown
     }
-    
+
+    struct Participant: Codable, Hashable {
+        var userID: String
+        var isLocal: Bool
+        var role: ParticipantRole
+        var displayName: String?
+        var avatarData: Data?
+        var lastUpdatedAt: Date
+    }
+
+    var id: UUID
+    var displayName: String?
+    var roomID: String
+    var lastMessageText: String?
+    var lastMessageDate: Date?
+    var unreadCount: Int
+    var createdAt: Date
+    var autoDownloadImages: Bool
+    private static let participantsEncoder = JSONEncoder()
+    private static let participantsDecoder = JSONDecoder()
+    private static let emptyParticipantsData: Data = {
+        (try? ChatRoom.participantsEncoder.encode([Participant]())) ?? Data()
+    }()
+
+    @Attribute(.externalStorage)
+    private var participantsBlob: Data
+
+    @Transient
+    var participants: [Participant] {
+        get {
+            guard !participantsBlob.isEmpty else { return [] }
+            do {
+                return try ChatRoom.participantsDecoder.decode([Participant].self, from: participantsBlob)
+            } catch {
+                log("ChatRoom participants decode failed: \(error)", category: "SwiftData")
+                return []
+            }
+        }
+        set {
+            do {
+                participantsBlob = try ChatRoom.participantsEncoder.encode(newValue)
+            } catch {
+                log("ChatRoom participants encode failed: \(error)", category: "SwiftData")
+            }
+        }
+    }
+
+    init(roomID: String, displayName: String? = nil) {
+        self.id = UUID()
+        self.displayName = displayName
+        self.roomID = roomID
+        self.lastMessageText = nil
+        self.lastMessageDate = nil
+        self.unreadCount = 0
+        self.createdAt = Date()
+        self.autoDownloadImages = false
+        self.participantsBlob = ChatRoom.emptyParticipantsData
+        log("ChatRoom: Created roomID(zoneName): '\(roomID)'", category: "DEBUG")
+    }
+
+    var primaryCounterpart: Participant? {
+        participants.first(where: { !$0.isLocal })
+    }
+
+    func participant(for userID: String) -> Participant? {
+        participants.first(where: { $0.userID == userID })
+    }
+
+    func upsertParticipant(_ participant: Participant) {
+        if let idx = participants.firstIndex(where: { $0.userID == participant.userID }) {
+            participants[idx] = participant
+        } else {
+            participants.append(participant)
+        }
+    }
+
+    func removeParticipant(userID: String) {
+        participants.removeAll { $0.userID == userID }
+    }
+
     // MARK: - Hashable
     static func == (lhs: ChatRoom, rhs: ChatRoom) -> Bool {
-        return lhs.id == rhs.id
+        lhs.id == rhs.id
     }
-    
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
-} 
+}
+
+extension ChatRoom {
+    var remoteUserID: String {
+        primaryCounterpart?.userID.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+}

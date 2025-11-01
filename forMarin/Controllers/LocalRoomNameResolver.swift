@@ -28,7 +28,7 @@ enum LocalRoomNameResolver {
 
         // 2人（自分+相手1人）
         if participantIDs.count == 2 {
-            let otherID = participantIDs.first { $0 != openerUserID } ?? room.remoteUserID
+            let otherID = participantIDs.first { $0 != openerUserID } ?? room.primaryCounterpart?.userID ?? ""
             let display = displayName(for: otherID, roomID: roomID, hints: nameHints)
             return display
         }
@@ -79,7 +79,7 @@ enum LocalRoomNameResolver {
             (participantIDs, nameHints) = collectParticipantsAndHints(roomID: roomID, modelContext: modelContext)
         }
         if participantIDs.count == 2 {
-            let otherID = participantIDs.first { $0 != openerUserID } ?? room.remoteUserID
+            let otherID = participantIDs.first { $0 != openerUserID } ?? room.primaryCounterpart?.userID ?? ""
             let display = displayName(for: otherID, roomID: roomID, hints: nameHints)
             room.displayName = display
             try? modelContext.save()
@@ -110,7 +110,7 @@ enum LocalRoomNameResolver {
             (participantIDs, nameHints) = collectParticipantsAndHints(roomID: room.roomID, modelContext: modelContext)
         }
         if participantIDs.count == 2 {
-            let otherID = participantIDs.first { $0 != openerUserID } ?? room.remoteUserID
+            let otherID = participantIDs.first { $0 != openerUserID } ?? room.primaryCounterpart?.userID ?? ""
             return displayName(for: otherID, roomID: room.roomID, hints: nameHints)
         }
         if participantIDs.count >= 3 {
@@ -122,7 +122,7 @@ enum LocalRoomNameResolver {
             return names.joined(separator: "、")
         }
 
-        let rid = room.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rid = room.primaryCounterpart?.userID.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return rid.isEmpty ? "新規チャット" : rid
     }
 

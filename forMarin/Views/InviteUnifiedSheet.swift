@@ -95,10 +95,18 @@ struct InviteUnifiedSheet: View {
         do {
             let roomID = CKSchema.makeZoneName()
             let descriptor = try await CloudKitChatManager.shared.createSharedChatRoom(roomID: roomID, invitedUserID: nil)
+            let ownerID = try? await CloudKitChatManager.shared.ensureCurrentUserID()
 
             await MainActor.run {
-                let newRoom = ChatRoom(roomID: roomID, remoteUserID: "", displayName: nil)
+                let newRoom = ChatRoom(roomID: roomID)
                 modelContext.insert(newRoom)
+                let participant = ChatRoom.Participant(userID: (ownerID ?? ""),
+                                                        isLocal: true,
+                                                        role: .owner,
+                                                        displayName: nil,
+                                                        avatarData: nil,
+                                                        lastUpdatedAt: Date())
+                newRoom.participants.append(participant)
                 try? modelContext.save()
                 onChatCreated(newRoom)
                 createdRoomID = roomID

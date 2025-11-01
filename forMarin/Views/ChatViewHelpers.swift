@@ -392,13 +392,13 @@ extension ChatView {
                 var effectiveRemoteID = remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
                 if effectiveRemoteID.isEmpty {
                     await CloudKitChatManager.shared.inferRemoteParticipantAndUpdateRoom(roomID: roomID, modelContext: modelContext)
-                    effectiveRemoteID = chatRoom.remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                    effectiveRemoteID = remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
                 }
 
-                let remoteArg = effectiveRemoteID.isEmpty ? nil : effectiveRemoteID
-                P2PController.shared.startIfNeeded(roomID: roomID, myID: myID, remoteID: remoteArg)
+                let remoteArg = remoteUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+                P2PController.shared.startIfNeeded(roomID: roomID, myID: myID, remoteID: remoteArg.isEmpty ? nil : remoteArg)
 
-                guard let remoteForProfile = remoteArg else {
+                guard !effectiveRemoteID.isEmpty else {
                     log("ChatView: skip participant profile fetch (remote unresolved) room=\(roomID)", category: "ChatView")
                     return
                 }
@@ -408,11 +408,11 @@ extension ChatView {
                 let myAvatar = UserDefaults.standard.data(forKey: "myAvatarData") ?? Data()
                 try await CloudKitChatManager.shared.upsertParticipantProfile(in: roomID, name: myName, avatarData: myAvatar)
 
-                let sharedResult = try await CloudKitChatManager.shared.fetchParticipantProfile(userID: remoteForProfile, roomID: roomID)
+                let sharedResult = try await CloudKitChatManager.shared.fetchParticipantProfile(userID: effectiveRemoteID, roomID: roomID)
                 var nameToUse: String? = sharedResult.name
                 var avatarToUse: Data? = sharedResult.avatarData
                 if (nameToUse == nil || nameToUse!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
-                    let privateResult = await CloudKitChatManager.shared.fetchProfile(userID: remoteForProfile)
+                    let privateResult = await CloudKitChatManager.shared.fetchProfile(userID: effectiveRemoteID)
                     if let privateResult {
                         nameToUse = privateResult.name
                         if avatarToUse == nil { avatarToUse = privateResult.avatarData }

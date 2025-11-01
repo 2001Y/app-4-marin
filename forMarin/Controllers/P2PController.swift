@@ -40,9 +40,9 @@ final class P2PController: NSObject, ObservableObject {
     private var needsNegotiation: Bool = false
     private var negotiationDebounceTask: Task<Void, Never>?
     private var ensureOfferTask: Task<Void, Never>?
+    private var signalInfraRetryTask: Task<Void, Never>?
     private static var globalOffersInFlight: Int = 0
     private static let globalOfferLimit: Int = 2
-    private var processedCandidates: Set<String> = []
     private var pendingRemoteCandidates: [String] = [] // remoteDescription未設定時に一時保持
     private var publishedCandidateCount: Int = 0 {
         didSet {
@@ -55,24 +55,23 @@ final class P2PController: NSObject, ObservableObject {
     private var publishedCandidateTypeCounts: [String: Int] = [:]
     private let pathMonitor = NWPathMonitor()
     private var path: NWPath?
-    private var expectedRemoteUserID: String?
     private var resolvedRemoteUserID: String?
-    private var myMailbox: CloudKitChatManager.SignalMailboxRecord?
-    private var remoteMailbox: CloudKitChatManager.SignalMailboxRecord?
+    private var signalSession: CloudKitChatManager.SignalSessionSnapshot?
     private var activeCallEpoch: Int = 0
     private var lastAppliedOfferEpoch: Int = -1
     private var lastAppliedAnswerEpoch: Int = -1
     private var publishedCandidateFingerprints: Set<String> = []
-    private var appliedRemoteCandidateFingerprints: Set<String> = []
+    private var appliedEnvelopeRecordIDs: Set<String> = []
+    private var appliedIceRecordIDs: Set<String> = []
 
     private func resetSignalState(resetRoomContext: Bool) {
         negotiationDebounceTask?.cancel(); negotiationDebounceTask = nil
         ensureOfferTask?.cancel(); ensureOfferTask = nil
+        signalInfraRetryTask?.cancel(); signalInfraRetryTask = nil
         needsNegotiation = false
         hasPublishedOffer = false
         hasSetRemoteDescription = false
         isMakingOffer = false
-        processedCandidates.removeAll()
         pendingRemoteCandidates.removeAll()
         publishedCandidateCount = 0
         addedRemoteCandidateCount = 0
@@ -80,15 +79,14 @@ final class P2PController: NSObject, ObservableObject {
 #if canImport(WebRTC)
         videoTransceiver = nil
 #endif
-        expectedRemoteUserID = nil
         resolvedRemoteUserID = nil
-        myMailbox = nil
-        remoteMailbox = nil
+        signalSession = nil
         activeCallEpoch = 0
         lastAppliedOfferEpoch = -1
         lastAppliedAnswerEpoch = -1
         publishedCandidateFingerprints.removeAll()
-        appliedRemoteCandidateFingerprints.removeAll()
+        appliedEnvelopeRecordIDs.removeAll()
+        appliedIceRecordIDs.removeAll()
         if resetRoomContext {
             currentRoomID = ""
             currentMyID = ""
@@ -98,14 +96,13 @@ final class P2PController: NSObject, ObservableObject {
     }
     // 1on1限定の安定キー（同一ルーム内の2者で一致するキー）
     private func computePairKey(roomID: String, myID: String) -> String {
-        // 2者間の衝突回避のため、参加者2名のユーザーIDを決定的順序で含める
-        // 例: pair:<roomID>:<idLow>-<idHigh>
-        let a = myID
-        let b = currentRemoteID
-        let (lo, hi) = (a <= b) ? (a, b) : (b, a)
-        return "pair:\(roomID):\(lo)-\(hi)"
+        let trimmedRoom = roomID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let me = myID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remote = currentRemoteID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (lo, hi) = me <= remote ? (me, remote) : (remote, me)
+        return "\(trimmedRoom)#\(lo)#\(hi)"
     }
-    
+
     // 現在のチャットルーム情報
     var currentRoomID: String = ""
     private var currentMyID: String = ""
@@ -129,7 +126,6 @@ final class P2PController: NSObject, ObservableObject {
     func startIfNeeded(roomID: String, myID: String, remoteID: String? = nil) {
         let normalizedRoom = roomID.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedMyID = myID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedRemote = remoteID?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !normalizedMyID.isEmpty else {
             log("[P2P] Skip start: myID unavailable room=\(normalizedRoom)", category: "P2P")
@@ -148,10 +144,11 @@ final class P2PController: NSObject, ObservableObject {
 
         currentRoomID = normalizedRoom
         currentMyID = normalizedMyID
-        currentRemoteID = normalizedRemote ?? ""
-
         resetSignalState(resetRoomContext: false)
-        expectedRemoteUserID = normalizedRemote
+
+        let initialRemote = remoteID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        currentRemoteID = initialRemote ?? ""
+        resolvedRemoteUserID = initialRemote
 
         state = .connecting
         publishedCandidateCount = 0
@@ -163,7 +160,7 @@ final class P2PController: NSObject, ObservableObject {
         }
 
         setupPeer()
-        log("[P2P] startIfNeeded roomID=\(normalizedRoom) myID=\(String(normalizedMyID.prefix(8))) expectedRemote=\(String((normalizedRemote ?? "").prefix(8)))", category: "P2P")
+        log("[P2P] startIfNeeded roomID=\(normalizedRoom) myID=\(String(normalizedMyID.prefix(8))) initialRemote=\(String((initialRemote ?? "").prefix(8)))", category: "P2P")
 #if canImport(WebRTC)
         log("[P2P] WebRTC framework present", category: "P2P")
 #else
@@ -208,6 +205,10 @@ final class P2PController: NSObject, ObservableObject {
         let expected = roomID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !expected.isEmpty && expected != currentRoomID {
             log("[P2P] closeIfCurrent skipped (reason=\(reason)) current=\(currentRoomID) expected=\(expected)", category: "P2P")
+            return
+        }
+        if reason.hasPrefix("navigation") && state == .connecting {
+            log("[P2P] closeIfCurrent deferred (reason=\(reason)) while connecting room=\(currentRoomID)", category: "P2P")
             return
         }
         log("[P2P] closeIfCurrent invoked (reason=\(reason)) room=\(currentRoomID) state=\(state)", category: "P2P")
@@ -322,12 +323,12 @@ final class P2PController: NSObject, ObservableObject {
     // MARK: - SDP Negotiation
     private func maybeExchangeSDP() {
         Task { @MainActor in
-            await prepareMailboxChannel(initial: true)
+            await prepareSignalChannel(initial: true)
         }
     }
 
     @MainActor
-    private func prepareMailboxChannel(initial: Bool) async {
+    private func prepareSignalChannel(initial: Bool) async {
         guard state == .connecting else { return }
         let myID = currentMyID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !myID.isEmpty else {
@@ -335,65 +336,72 @@ final class P2PController: NSObject, ObservableObject {
             return
         }
 
-        do {
-            let ensured = try await CloudKitChatManager.shared.ensureSignalMailbox(roomID: currentRoomID,
-                                                                                   userID: myID,
-                                                                                   targetUserID: expectedRemoteUserID)
-            self.myMailbox = ensured
+        let zoneReady = await CloudKitChatManager.shared.isSignalZoneReady(roomID: currentRoomID)
+        if !zoneReady {
+            if signalInfraRetryTask == nil {
+                log("[P2P] Signal prep deferred: zone not yet available room=\(currentRoomID)", category: "P2P")
+            }
+            scheduleSignalInfraRetry(afterMilliseconds: initial ? 1500 : 2500)
+            return
+        }
 
-            var allMailboxes = try await CloudKitChatManager.shared.fetchSignalMailboxes(roomID: currentRoomID)
-            if let idx = allMailboxes.firstIndex(where: { $0.ownerUserID == myID }) {
-                allMailboxes[idx] = ensured
-            } else {
-                allMailboxes.append(ensured)
+        signalInfraRetryTask?.cancel()
+        signalInfraRetryTask = nil
+
+        do {
+            let remoteHint = currentRemoteID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if resolvedRemoteUserID == nil {
+                if let hinted = (!remoteHint.isEmpty ? remoteHint : nil) {
+                    resolvedRemoteUserID = hinted
+                } else if let counterpart = CloudKitChatManager.shared.primaryCounterpartUserID(roomID: currentRoomID) {
+                    resolvedRemoteUserID = counterpart
+                }
             }
 
-            guard let remoteID = resolveRemoteUserID(in: allMailboxes, myID: myID) else {
-                log("[P2P] Mailbox prep: remote mailbox not yet available", category: "P2P")
+            guard let remoteID = resolvedRemoteUserID?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else {
+                log("[P2P] Signal prep: remote user unresolved", category: "P2P")
                 return
             }
 
             if remoteID == myID {
-                log("[P2P] Mailbox resolved to self — closing peer", category: "P2P")
+                log("[P2P] Signal prep resolved to self — closing peer", category: "P2P")
                 close()
                 return
             }
 
-            if resolvedRemoteUserID != remoteID {
-                resolvedRemoteUserID = remoteID
+            if currentRemoteID != remoteID {
                 currentRemoteID = remoteID
-                expectedRemoteUserID = expectedRemoteUserID ?? remoteID
-                isPolite = (myID > remoteID)
-                log("[P2P] PerfectNegotiation role resolved: isPolite=\(isPolite) remote=\(String(remoteID.prefix(8)))", category: "P2P")
             }
+            isPolite = (myID > remoteID)
+            log("[P2P] PerfectNegotiation role resolved: isPolite=\(isPolite) remote=\(String(remoteID.prefix(8)))", category: "P2P")
+            persistRemoteParticipant(userID: remoteID)
 
-            if ensured.targetUserID != resolvedRemoteUserID {
-                do {
-                    self.myMailbox = try await CloudKitChatManager.shared.mutateSignalMailbox(roomID: currentRoomID, userID: myID) { mailbox in
-                        mailbox.targetUserID = resolvedRemoteUserID
-                    }
-                } catch {
-                    log("[P2P] Failed to update mailbox target: \(error)", category: "P2P")
-                }
-            }
-
-            if let remoteSnapshot = allMailboxes.first(where: { $0.ownerUserID == remoteID }) {
-                self.remoteMailbox = remoteSnapshot
-                _ = await applyMailboxSnapshot(remoteSnapshot, source: initial ? "prepare" : "update")
-            }
-
+            signalSession = try await CloudKitChatManager.shared.ensureSignalSession(roomID: currentRoomID,
+                                                                                    localUserID: myID,
+                                                                                    remoteUserID: remoteID)
             await markActiveAndMaybeInitialOffer()
+        } catch let error as CloudKitChatManager.CloudKitChatError where error == .signalingZoneUnavailable {
+            log("[P2P] Signal zone unavailable — scheduling retry room=\(currentRoomID)", category: "P2P")
+            scheduleSignalInfraRetry(afterMilliseconds: 2500)
         } catch {
-            log("[P2P] Failed to prepare mailbox channel: \(error)", category: "P2P")
+            log("[P2P] Failed to prepare signal session: \(error)", category: "P2P")
         }
     }
 
-    private func resolveRemoteUserID(in mailboxes: [CloudKitChatManager.SignalMailboxRecord], myID: String) -> String? {
-        if let expected = expectedRemoteUserID,
-           let match = mailboxes.first(where: { $0.ownerUserID == expected }) {
-            return match.ownerUserID
+    private func scheduleSignalInfraRetry(afterMilliseconds ms: UInt64) {
+        signalInfraRetryTask?.cancel()
+        let delay = max(ms, 500)
+        signalInfraRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+            guard let self else { return }
+            await self.prepareSignalChannel(initial: false)
         }
-        return mailboxes.first(where: { $0.ownerUserID != myID })?.ownerUserID
+    }
+
+    private func persistRemoteParticipant(userID: String) {
+        let trimmed = userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        log("[P2P] Remote participant resolved userID=\(String(trimmed.prefix(8)))", category: "P2P")
     }
 
     private func freshCallEpoch() -> Int {
@@ -457,162 +465,156 @@ final class P2PController: NSObject, ObservableObject {
 #endif
 
     private func publishOfferSDP(_ sdp: String, callEpoch: Int) async {
-        guard !currentMyID.isEmpty else { return }
+        guard !currentMyID.isEmpty, let remote = resolvedRemoteUserID else { return }
         do {
-            let snapshot = try await CloudKitChatManager.shared.mutateSignalMailbox(roomID: currentRoomID, userID: currentMyID) { mailbox in
-                mailbox.intentEpoch += 1
-                mailbox.callEpoch = callEpoch
-                mailbox.targetUserID = resolvedRemoteUserID
-                mailbox.payload.offerSDP = sdp
-                mailbox.payload.answerSDP = nil
-                mailbox.payload.iceCandidates.removeAll()
-                mailbox.lastSeenAt = Date()
+            let envelope = try await CloudKitChatManager.shared.publishOffer(roomID: currentRoomID,
+                                                                             localUserID: currentMyID,
+                                                                             remoteUserID: remote,
+                                                                             callEpoch: callEpoch,
+                                                                             sdp: sdp)
+            hasPublishedOffer = true
+            publishedCandidateFingerprints.removeAll()
+            activeCallEpoch = max(activeCallEpoch, envelope.callEpoch)
+            if var session = signalSession {
+                session.activeCallEpoch = max(session.activeCallEpoch, envelope.callEpoch)
+                session.updatedAt = envelope.createdAt
+                signalSession = session
             }
-            self.myMailbox = snapshot
-            self.hasPublishedOffer = true
-            self.publishedCandidateFingerprints.removeAll()
-            log("[P2P] Offer mailbox updated callEpoch=\(callEpoch)", category: "P2P")
+            log("[P2P] Offer published (callEpoch=\(envelope.callEpoch))", category: "P2P")
         } catch {
-            log("[P2P] Failed to publish offer to mailbox: \(error)", category: "P2P")
+            log("[P2P] Failed to publish offer: \(error)", category: "P2P")
         }
     }
 
     private func publishAnswerSDP(_ sdp: String, callEpoch: Int) async {
-        guard !currentMyID.isEmpty else { return }
+        guard !currentMyID.isEmpty, let remote = resolvedRemoteUserID else { return }
         do {
-            let snapshot = try await CloudKitChatManager.shared.mutateSignalMailbox(roomID: currentRoomID, userID: currentMyID) { mailbox in
-                mailbox.intentEpoch += 1
-                mailbox.callEpoch = callEpoch
-                mailbox.targetUserID = resolvedRemoteUserID
-                mailbox.payload.answerSDP = sdp
-                mailbox.lastSeenAt = Date()
+            let envelope = try await CloudKitChatManager.shared.publishAnswer(roomID: currentRoomID,
+                                                                              localUserID: currentMyID,
+                                                                              remoteUserID: remote,
+                                                                              callEpoch: callEpoch,
+                                                                              sdp: sdp)
+            activeCallEpoch = max(activeCallEpoch, envelope.callEpoch)
+            if var session = signalSession {
+                session.activeCallEpoch = max(session.activeCallEpoch, envelope.callEpoch)
+                session.updatedAt = envelope.createdAt
+                signalSession = session
             }
-            self.myMailbox = snapshot
-            log("[P2P] Answer mailbox updated callEpoch=\(callEpoch)", category: "P2P")
+            log("[P2P] Answer published (callEpoch=\(envelope.callEpoch))", category: "P2P")
         } catch {
-            log("[P2P] Failed to publish answer to mailbox: \(error)", category: "P2P")
+            log("[P2P] Failed to publish answer: \(error)", category: "P2P")
         }
     }
 
     private func publishCandidateEncoded(_ encoded: String, callEpoch: Int) async {
-        guard !currentMyID.isEmpty else { return }
+        guard !currentMyID.isEmpty, let remote = resolvedRemoteUserID else { return }
         guard !publishedCandidateFingerprints.contains(encoded) else { return }
         publishedCandidateFingerprints.insert(encoded)
         do {
-            let snapshot = try await CloudKitChatManager.shared.mutateSignalMailbox(roomID: currentRoomID, userID: currentMyID) { mailbox in
-                mailbox.intentEpoch += 1
-                mailbox.callEpoch = max(mailbox.callEpoch, callEpoch)
-                mailbox.targetUserID = resolvedRemoteUserID
-                if !mailbox.payload.iceCandidates.contains(encoded) {
-                    mailbox.payload.iceCandidates.append(encoded)
-                }
-                mailbox.lastSeenAt = Date()
-            }
-            self.myMailbox = snapshot
-            log("[P2P] Published ICE candidate to mailbox epoch=\(snapshot.callEpoch) totalICE=\(snapshot.payload.iceCandidates.count)", level: "DEBUG", category: "P2P")
+            let chunk = try await CloudKitChatManager.shared.publishIceCandidate(roomID: currentRoomID,
+                                                                                 localUserID: currentMyID,
+                                                                                 remoteUserID: remote,
+                                                                                 callEpoch: callEpoch,
+                                                                                 encodedCandidate: encoded,
+                                                                                 candidateType: nil)
+            activeCallEpoch = max(activeCallEpoch, chunk.callEpoch)
+            log("[P2P] Published ICE chunk record=\(chunk.recordID.recordName)", level: "DEBUG", category: "P2P")
         } catch {
             log("[P2P] Failed to publish ICE candidate: \(error)", category: "P2P")
         }
     }
 
-    // MARK: - Mailbox ingestion
-    func applyMailboxRecord(_ rec: CKRecord) async -> Bool {
-        guard rec.recordID.zoneID.zoneName == currentRoomID else { return false }
-        let snapshot = CloudKitChatManager.shared.signalMailboxSnapshot(from: rec)
-        return await applyMailboxSnapshot(snapshot, source: "delta")
+    // MARK: - Signal ingestion
+    func applySignalRecord(_ record: CKRecord) async -> Bool {
+        guard record.recordID.zoneID.zoneName == currentRoomID else { return false }
+        if let envelope = CloudKitChatManager.shared.decodeSignalRecord(record) {
+            return await applySignalEnvelope(envelope)
+        }
+        if let chunk = CloudKitChatManager.shared.decodeSignalIceRecord(record) {
+            return await applySignalIceChunk(chunk)
+        }
+        return false
     }
 
-    @discardableResult
-    @MainActor
-    private func applyMailboxSnapshot(_ snapshot: CloudKitChatManager.SignalMailboxRecord, source: String) async -> Bool {
-        let owner = snapshot.ownerUserID
-        if owner == currentMyID {
-            self.myMailbox = snapshot
-            return false
-        }
+    private func matchesCurrentSession(_ sessionKey: String) -> Bool {
+        guard !currentRoomID.isEmpty, !currentMyID.isEmpty else { return false }
+        let expected = computePairKey(roomID: currentRoomID, myID: currentMyID)
+        return sessionKey == expected
+    }
 
-        guard !currentMyID.isEmpty else { return false }
-
+    private func ensureSessionForRemote(_ owner: String) {
         if resolvedRemoteUserID == nil {
             resolvedRemoteUserID = owner
             currentRemoteID = owner
             isPolite = (currentMyID > owner)
-            log("[P2P] Mailbox resolved remote=\(String(owner.prefix(8))) source=\(source)", category: "P2P")
+            log("[P2P] Remote resolved via signal owner=\(String(owner.prefix(8)))", category: "P2P")
         }
+    }
 
-        guard owner == resolvedRemoteUserID else {
-            log("[P2P] Skip mailbox from unexpected owner=\(owner)", level: "DEBUG", category: "P2P")
+    @MainActor
+    private func applySignalEnvelope(_ envelope: CloudKitChatManager.SignalEnvelopeSnapshot) async -> Bool {
+        guard !currentMyID.isEmpty else { return false }
+        ensureSessionForRemote(envelope.ownerUserID)
+        guard envelope.ownerUserID != currentMyID else { return false }
+        guard matchesCurrentSession(envelope.sessionKey) else {
+            log("[P2P] Skip envelope (session mismatch) record=\(envelope.recordID.recordName)", level: "DEBUG", category: "P2P")
             return false
         }
-
-        if let target = snapshot.targetUserID,
-           !target.isEmpty,
-           target != currentMyID {
-            log("[P2P] Skip mailbox (target mismatch) owner=\(owner) target=\(target)", level: "DEBUG", category: "P2P")
-            return false
-        }
-
-        remoteMailbox = snapshot
-        let epoch = snapshot.callEpoch
-        if epoch == 0 {
-            log("[P2P] Mailbox ignored (epoch=0) owner=\(owner) source=\(source)", level: "DEBUG", category: "P2P")
-            return false
-        }
-
-        if epoch > activeCallEpoch {
-            activeCallEpoch = epoch
+        let isNewEpoch = envelope.callEpoch > activeCallEpoch
+        if isNewEpoch {
             hasSetRemoteDescription = false
             hasPublishedOffer = false
-            processedCandidates.removeAll()
             pendingRemoteCandidates.removeAll()
-            appliedRemoteCandidateFingerprints.removeAll()
+            appliedIceRecordIDs.removeAll()
+            appliedEnvelopeRecordIDs.removeAll()
             publishedCandidateFingerprints.removeAll()
+            addedRemoteCandidateCount = 0
         }
+        let recordKey = envelope.recordID.recordName
+        guard !appliedEnvelopeRecordIDs.contains(recordKey) else { return false }
+        appliedEnvelopeRecordIDs.insert(recordKey)
 
-        var callId = ""
-        if !currentRemoteID.isEmpty {
-            callId = computePairKey(roomID: currentRoomID, myID: currentMyID)
-        }
-
+        activeCallEpoch = max(activeCallEpoch, envelope.callEpoch)
         var applied = false
-        log("[P2P] Mailbox applied start owner=\(owner) epoch=\(epoch) source=\(source) offers=\(snapshot.payload.offerSDP != nil) answers=\(snapshot.payload.answerSDP != nil) ice=\(snapshot.payload.iceCandidates.count)", category: "P2P")
-        if let offer = snapshot.payload.offerSDP, epoch != lastAppliedOfferEpoch {
-            if await applyOfferPayload(callId: callId, sdp: offer) {
-                lastAppliedOfferEpoch = epoch
-                applied = true
+        switch envelope.type {
+        case .offer:
+            if envelope.callEpoch >= lastAppliedOfferEpoch {
+                lastAppliedOfferEpoch = envelope.callEpoch
+                applied = await applyOfferPayload(callId: recordKey, sdp: envelope.sdp)
+            }
+        case .answer:
+            if envelope.callEpoch >= lastAppliedAnswerEpoch {
+                lastAppliedAnswerEpoch = envelope.callEpoch
+                applied = await applyAnswerPayload(callId: recordKey, sdp: envelope.sdp)
             }
         }
-
-        if let answer = snapshot.payload.answerSDP, epoch != lastAppliedAnswerEpoch {
-            if await applyAnswerPayload(callId: callId, sdp: answer) {
-                lastAppliedAnswerEpoch = epoch
-                applied = true
-            }
-        }
-
-        if !snapshot.payload.iceCandidates.isEmpty {
-            for candidate in snapshot.payload.iceCandidates {
-                if appliedRemoteCandidateFingerprints.contains(candidate) { continue }
-                if await applyCandidatePayload(callId: callId, encodedCandidate: candidate) {
-                    appliedRemoteCandidateFingerprints.insert(candidate)
-                    applied = true
-                }
-            }
-        }
-
-        if applied {
-            do {
-                self.myMailbox = try await CloudKitChatManager.shared.mutateSignalMailbox(roomID: currentRoomID, userID: currentMyID) { mailbox in
-                    mailbox.consumedEpoch = max(mailbox.consumedEpoch, epoch)
-                }
-            } catch {
-                log("[P2P] Failed to acknowledge mailbox epoch=\(epoch): \(error)", category: "P2P")
-            }
-        } else {
-            log("[P2P] Mailbox snapshot contained no new SDP/ICE (owner=\(owner) epoch=\(epoch))", level: "DEBUG", category: "P2P")
-        }
-
         return applied
+    }
+
+    @MainActor
+    private func applySignalIceChunk(_ chunk: CloudKitChatManager.SignalIceChunkSnapshot) async -> Bool {
+        guard !currentMyID.isEmpty else { return false }
+        ensureSessionForRemote(chunk.ownerUserID)
+        guard chunk.ownerUserID != currentMyID else { return false }
+        guard matchesCurrentSession(chunk.sessionKey) else {
+            log("[P2P] Skip ICE chunk (session mismatch) record=\(chunk.recordID.recordName)", level: "DEBUG", category: "P2P")
+            return false
+        }
+        if chunk.callEpoch < activeCallEpoch {
+            log("[P2P] Skip ICE chunk (stale epoch) record=\(chunk.recordID.recordName)", level: "DEBUG", category: "P2P")
+            return false
+        }
+        let recordKey = chunk.recordID.recordName
+        guard !appliedIceRecordIDs.contains(recordKey) else { return false }
+        appliedIceRecordIDs.insert(recordKey)
+        activeCallEpoch = max(activeCallEpoch, chunk.callEpoch)
+        if hasSetRemoteDescription {
+            return await applyCandidatePayload(callId: recordKey, encodedCandidate: chunk.candidate)
+        } else {
+            pendingRemoteCandidates.append(chunk.candidate)
+            log("[P2P] Buffered ICE chunk (pending RD) record=\(recordKey)", level: "DEBUG", category: "P2P")
+            return true
+        }
     }
 
 #if canImport(WebRTC)
@@ -711,11 +713,6 @@ final class P2PController: NSObject, ObservableObject {
     }
 
     private func applyCandidatePayload(callId: String, encodedCandidate: String) async -> Bool {
-        if processedCandidates.contains(encodedCandidate) {
-            log("[P2P] Duplicate ICE candidate ignored callId=\(callId)", level: "DEBUG", category: "P2P")
-            return true
-        }
-        processedCandidates.insert(encodedCandidate)
         let cand = decodeCandidate(encodedCandidate)
         do {
             if let peer = self.pc, peer.remoteDescription != nil {
@@ -771,7 +768,7 @@ final class P2PController: NSObject, ObservableObject {
 #endif
 
     // MARK: - Record ingestion from CloudKit
-    // PresenceCK 経由の起動は廃止。SignalMailbox の差分通知のみで駆動する。
+    // PresenceCK 経由の起動は廃止。SignalEnvelope / SignalIceChunk の差分通知のみで駆動する。
 
     // MARK: - Diagnostics
     func debugDump() {
@@ -916,12 +913,9 @@ extension P2PController: RTCPeerConnectionDelegate {
             @unknown default:
                 break
             }
-            if state == .connected {
-                await self.cleanupSignalRecords()
-                if !self.publishedCandidateTypeCounts.isEmpty {
-                    let summary = self.publishedCandidateTypeCounts.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
-                    log("[P2P] connected with ICE summary {\(summary)}", category: "P2P")
-                }
+            if state == .connected, !self.publishedCandidateTypeCounts.isEmpty {
+                let summary = self.publishedCandidateTypeCounts.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+                log("[P2P] connected with ICE summary {\(summary)}", category: "P2P")
             }
             _ = callId
         }
@@ -970,7 +964,6 @@ private extension P2PController {
     func scheduleRestartAfterDelay(reason: String, cooldownMs: Int) {
         let room = self.currentRoomID
         let me = self.currentMyID
-        let remote = self.currentRemoteID
         log("[P2P] Scheduling full reset due to: \(reason)", category: "P2P")
         Task { @MainActor in
             // 遅延後に“まだ同じroomに居る”ことを確認してからリセットを実行
@@ -982,7 +975,8 @@ private extension P2PController {
             }
             _ = self.computePairKey(roomID: room, myID: me)
             self.close()
-            if !room.isEmpty, !me.isEmpty, !remote.isEmpty {
+            if !room.isEmpty, !me.isEmpty {
+                let remote = self.currentRemoteID.isEmpty ? nil : self.currentRemoteID
                 self.startIfNeeded(roomID: room, myID: me, remoteID: remote)
             }
         }
@@ -991,10 +985,3 @@ private extension P2PController {
 
 // Placeholder bridge used by the overlay to trigger SwiftUI transitions.
 // FloatingVideoOverlayBridge は不要（システムPiP不採用）
-
-extension P2PController {
-    private func cleanupSignalRecords() async {
-        guard !currentRoomID.isEmpty else { return }
-        await CloudKitChatManager.shared.cleanupStaleSignalMailboxes(roomID: currentRoomID)
-    }
-}

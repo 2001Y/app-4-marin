@@ -541,6 +541,8 @@ final class MessageSyncPipeline: NSObject {
             } else {
                 isOwner = await chatManager.isOwnerOfRoom(roomID)
             }
+            // Zone-wide sharingの場合、オーナーはPrivate Database、参加者はShared Databaseを使用
+            // ただし、Zone-wide sharingでは、Shared DatabaseからオーナーのPrivate Databaseのレコードも参照できるはず
             scopesToSync = [isOwner ? .private : .shared]
         } else {
             scopesToSync = [.private, .shared]
@@ -592,8 +594,13 @@ final class MessageSyncPipeline: NSObject {
         var iceApplied = 0
         var roomMemberApplied = 0
 
+        log("[DEBUG] [MessageSyncPipeline] processNonMessageRecords called with \(records.count) records roomFilter=\(roomFilter ?? "nil")", category: "MessageSyncPipeline")
+        
         for record in records {
-            if reactionTypes.contains(record.recordType) {
+            let recordType = record.recordType
+            log("[DEBUG] [MessageSyncPipeline] Processing record type=\(recordType) recordName=\(record.recordID.recordName)", category: "MessageSyncPipeline")
+            
+            if reactionTypes.contains(recordType) {
                 if let messageRef = record[CKSchema.FieldKey.messageRef] as? CKRecord.Reference {
                     let zoneRoomID = messageRef.recordID.zoneID.zoneName
                     let messageName = messageRef.recordID.recordName
@@ -603,11 +610,21 @@ final class MessageSyncPipeline: NSObject {
                 continue
             }
 
-            if record.recordType == CKSchema.SharedType.roomMember {
+            if recordType == CKSchema.SharedType.roomMember {
                 let roomID = record.recordID.zoneID.zoneName
-                if let filter = roomFilter, filter != roomID { continue }
-                await CloudKitChatManager.shared.ingestRoomMemberRecord(record)
-                roomMemberApplied += 1
+                log("[DEBUG] [MessageSyncPipeline] Found RoomMember record=\(record.recordID.recordName) room=\(roomID) roomFilter=\(roomFilter ?? "nil")", category: "MessageSyncPipeline")
+                if let filter = roomFilter, filter != roomID {
+                    log("[DEBUG] [MessageSyncPipeline] Skipping RoomMember record due to roomFilter mismatch room=\(roomID) filter=\(filter)", category: "MessageSyncPipeline")
+                    continue
+                }
+                log("[DEBUG] [MessageSyncPipeline] Processing RoomMember record=\(record.recordID.recordName) room=\(roomID)", category: "MessageSyncPipeline")
+                do {
+                    await CloudKitChatManager.shared.ingestRoomMemberRecord(record)
+                    roomMemberApplied += 1
+                    log("[DEBUG] [MessageSyncPipeline] Successfully ingested RoomMember record=\(record.recordID.recordName) room=\(roomID)", category: "MessageSyncPipeline")
+                } catch {
+                    log("⚠️ [MessageSyncPipeline] Failed to ingest RoomMember record=\(record.recordID.recordName) room=\(roomID): \(error)", category: "MessageSyncPipeline")
+                }
                 continue
             }
 

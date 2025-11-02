@@ -1125,12 +1125,40 @@ class CloudKitChatManager: ObservableObject {
                 if existingRoomRecord == nil {
                     await seedTutorialMessages(to: zoneID, ownerID: ownerRecordName)
                 }
-                log("✅ Created zone-wide share roomID=\(normalizedRoomID)", category: "share")
-            } else {
-                log("ℹ️ Updated zone-wide share roomID=\(normalizedRoomID)", category: "share")
-            }
+                
+                // オーナーのRoomMemberレコードを作成
+                // 重要: Zone-wide sharingでは、オーナーはPrivate Databaseで操作する
+                // オーナーがPrivate DBに作成したレコードは、参加者がShared DBから参照できる
+                // 逆に、参加者がShared DBに作成したレコードは、オーナーがPrivate DBから参照できる
+                let memberRecordID = CKSchema.roomMemberRecordID(userId: ownerRecordName, zoneID: zoneID)
+                let memberRecord = CKRecord(recordType: CKSchema.SharedType.roomMember, recordID: memberRecordID)
+                memberRecord[CKSchema.FieldKey.userId] = ownerRecordName as CKRecordValue
+                
+                let displayName = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !displayName.isEmpty {
+                    memberRecord[CKSchema.FieldKey.displayName] = displayName as CKRecordValue
+                }
+                
+                do {
+                    _ = try await privateDB.save(memberRecord)
+                    log("✅ Created owner's RoomMember record in private DB roomID=\(normalizedRoomID)", category: "share")
+                } catch {
+                    log("⚠️ Failed to create owner's RoomMember record: \(error)", category: "share")
+                    // エラーの詳細をログ出力
+                    if let ckError = error as? CKError {
+                        log("⚠️ CKError code=\(ckError.code.rawValue) desc=\(ckError.localizedDescription)", category: "share")
+                    }
+                }
+                
+            log("✅ Created zone-wide share roomID=\(normalizedRoomID)", category: "share")
+        } else {
+            log("ℹ️ Updated zone-wide share roomID=\(normalizedRoomID)", category: "share")
+        }
+        
+        // 共有URLのログ
+        log("📎 [SHARE URL] Generated share URL for roomID=\(normalizedRoomID): \(url.absoluteString)", category: "share")
 
-            return ChatShareDescriptor(share: savedShare, shareURL: url, roomRecordID: roomRecordID, zoneID: zoneID)
+        return ChatShareDescriptor(share: savedShare, shareURL: url, roomRecordID: roomRecordID, zoneID: zoneID)
         } catch {
             if let ckError = error as? CKError,
                let partial = ckError.partialErrorsByItemID {
@@ -1335,8 +1363,12 @@ class CloudKitChatManager: ObservableObject {
                 ensureLocalParticipant(for: room, scope: .shared)
 
                 // 可能なら相手プロフィールを反映
+                log("[DEBUG] Fetching remote participant profile for room=\(roomID)", category: "share")
                 if let profile = try? await fetchRemoteParticipantFromRoomMember(roomID: roomID) {
+                    log("[DEBUG] Found remote profile for room=\(roomID): \(String(profile.userID.prefix(8)))", category: "share")
                     apply(profile: profile, to: room)
+                } else {
+                    log("[DEBUG] No remote profile found yet for room=\(roomID)", category: "share")
                 }
 
                 do { try modelContext.save(); createdOrUpdated += 1 } catch { log("⚠️ Failed to save ChatRoom bootstrap (shared): \(error)", category: "share") }
@@ -2293,7 +2325,15 @@ class CloudKitChatManager: ObservableObject {
 
     func primaryCounterpartUserID(roomID: String) -> String? {
         let participants = ModelContainerBroker.shared.participantsSnapshot(roomID: roomID)
-        return participants.first(where: { !$0.isLocal })?.userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remoteParticipant = participants.first(where: { !$0.isLocal })
+        
+        if let remote = remoteParticipant {
+            log("[P2P] primaryCounterpartUserID found remote participant: \(String(remote.userID.prefix(8))) for room=\(roomID)", category: "share")
+            return remote.userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            log("[P2P] primaryCounterpartUserID no remote participant found for room=\(roomID). Total participants=\(participants.count)", category: "share")
+            return nil
+        }
     }
 
     // MARK: - Participant Profiles
@@ -2542,12 +2582,19 @@ class CloudKitChatManager: ObservableObject {
 
     @MainActor
     func ingestRoomMemberRecord(_ record: CKRecord) async {
+        log("[DEBUG] [SIGNAL] ingestRoomMemberRecord called record=\(record.recordID.recordName) recordType=\(record.recordType)", category: "share")
+        
         let zoneID = record.recordID.zoneID
         let roomID = zoneID.zoneName
-        guard !roomID.isEmpty else { return }
+        guard !roomID.isEmpty else {
+            log("⚠️ [SIGNAL] Empty roomID in RoomMember record=\(record.recordID.recordName)", category: "share")
+            return
+        }
 
         let scope: RoomScope = zoneID.ownerName.isEmpty ? .private : .shared
         cache(roomID: roomID, scope: scope, zoneID: zoneID)
+        
+        log("[DEBUG] [SIGNAL] Zone info roomID=\(roomID) scope=\(scope) ownerName=\(zoneID.ownerName)", category: "share")
 
         guard let context = try? ModelContainerBroker.shared.mainContext() else {
             log("⚠️ [SIGNAL] Unable to ingest RoomMember (no model context) room=\(roomID)", category: "share")
@@ -2560,18 +2607,26 @@ class CloudKitChatManager: ObservableObject {
         let room: ChatRoom
         if let existing = (try? context.fetch(descriptor))?.first {
             room = existing
+            log("[DEBUG] [SIGNAL] Found existing room for RoomMember room=\(roomID)", category: "share")
         } else {
             room = ChatRoom(roomID: roomID)
             context.insert(room)
             ensureLocalParticipant(for: room, scope: scope)
+            log("[DEBUG] [SIGNAL] Created new room for RoomMember room=\(roomID)", category: "share")
         }
 
         let profile = snapshot(from: record)
         let normalizedID = profile.userID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedID.isEmpty else { return }
+        guard !normalizedID.isEmpty else {
+            log("⚠️ [SIGNAL] Empty userID in RoomMember record=\(record.recordID.recordName) room=\(roomID)", category: "share")
+            return
+        }
 
         let current = (currentUserID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let isLocal = normalizedID == current
+        
+        log("[DEBUG] [SIGNAL] Processing RoomMember record=\(record.recordID.recordName) room=\(roomID) userID=\(String(normalizedID.prefix(8))) isLocal=\(isLocal) current=\(String(current.prefix(8)))", category: "share")
+        
         let participant = ChatRoom.Participant(userID: normalizedID,
                                                isLocal: isLocal,
                                                role: isLocal ? .owner : .participant,
@@ -2580,6 +2635,9 @@ class CloudKitChatManager: ObservableObject {
                                                lastUpdatedAt: Date())
 
         room.upsertParticipant(participant)
+        
+        let participantsBefore = room.participants.count
+        log("[DEBUG] [SIGNAL] After upsertParticipant room=\(roomID) participants count=\(participantsBefore)", category: "share")
 
         if !isLocal,
            let name = participant.displayName,
@@ -2590,9 +2648,28 @@ class CloudKitChatManager: ObservableObject {
 
         do {
             try context.save()
-            log("[SIGNAL] Ingested RoomMember record=\(record.recordID.recordName) room=\(roomID)", category: "share")
+            let participantsAfter = room.participants.count
+            log("[SIGNAL] Ingested RoomMember record=\(record.recordID.recordName) room=\(roomID) userID=\(String(normalizedID.prefix(8))) isLocal=\(isLocal) participants=\(participantsAfter)", category: "share")
+            
+            // P2P再起動: リモート参加者が設定された場合、P2Pを再起動
+            if !isLocal && P2PController.shared.currentRoomID == roomID {
+                let myID = (currentUserID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                log("[P2P] Remote participant resolved via RoomMember, triggering P2P restart for room=\(roomID) remote=\(String(normalizedID.prefix(8)))", category: "share")
+                
+                // 少し遅延を入れてからP2Pを再起動
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒待機
+                    if P2PController.shared.currentRoomID == roomID {
+                        P2PController.shared.closeIfCurrent(roomID: roomID, reason: "remote-participant-resolved")
+                        P2PController.shared.startIfNeeded(roomID: roomID, myID: myID, remoteID: normalizedID)
+                    }
+                }
+            }
         } catch {
             log("⚠️ [SIGNAL] Failed to persist RoomMember room=\(roomID): \(error)", category: "share")
+            if let nsError = error as NSError? {
+                log("⚠️ [SIGNAL] NSError domain=\(nsError.domain) code=\(nsError.code) desc=\(nsError.localizedDescription)", category: "share")
+            }
         }
     }
 

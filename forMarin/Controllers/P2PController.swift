@@ -353,13 +353,20 @@ final class P2PController: NSObject, ObservableObject {
             if resolvedRemoteUserID == nil {
                 if let hinted = (!remoteHint.isEmpty ? remoteHint : nil) {
                     resolvedRemoteUserID = hinted
+                    log("[P2P] Using hinted remote ID: \(String(hinted.prefix(8)))", category: "P2P")
                 } else if let counterpart = CloudKitChatManager.shared.primaryCounterpartUserID(roomID: currentRoomID) {
                     resolvedRemoteUserID = counterpart
+                    log("[P2P] Using counterpart from CloudKit: \(String(counterpart.prefix(8)))", category: "P2P")
+                } else {
+                    log("[P2P] No remote ID available yet, will retry", category: "P2P")
                 }
             }
 
             guard let remoteID = resolvedRemoteUserID?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else {
-                log("[P2P] Signal prep: remote user unresolved", category: "P2P")
+                log("[P2P] Signal prep: remote user unresolved - scheduling retry", category: "P2P")
+                // 初回は短い間隔でリトライ
+                let retryDelay: UInt64 = initial ? 500 : 2000
+                scheduleSignalInfraRetry(afterMilliseconds: retryDelay)
                 return
             }
 

@@ -4,6 +4,12 @@ struct OfflineStatusView: View {
     @ObservedObject var connectivityManager: ConnectivityManager
     @Environment(\.dismiss) private var dismiss
     
+    private var connectionStatus: (label: String, color: Color) {
+        connectivityManager.isConnected
+            ? ("オンライン", .green)
+            : ("オフライン", .red)
+    }
+    
     var body: some View {
         VStack(spacing: 20) {
             // アイコン
@@ -42,12 +48,12 @@ struct OfflineStatusView: View {
             // 接続状態
             HStack {
                 Circle()
-                    .fill(connectivityManager.isConnected ? .green : .red)
+                    .fill(connectionStatus.color)
                     .frame(width: 10, height: 10)
                 
-                Text(connectivityManager.isConnected ? "オンライン" : "オフライン")
+                Text(connectionStatus.label)
                     .font(.subheadline)
-                    .foregroundColor(connectivityManager.isConnected ? .green : .red)
+                    .foregroundColor(connectionStatus.color)
             }
             .padding()
             .background(Color(.systemGray6))

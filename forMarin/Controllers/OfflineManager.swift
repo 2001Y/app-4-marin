@@ -42,35 +42,32 @@ class OfflineManager: ObservableObject {
     // MARK: - Queue Management (Engine委譲)
 
     func queueMessage(_ message: Message) {
-        if #available(iOS 17.0, *) {
-            Task { @MainActor in
-                await CKSyncEngineManager.shared.queueMessage(message)
-                if let path = message.assetPath {
-                    await CKSyncEngineManager.shared.queueAttachment(
-                        messageRecordName: message.id.uuidString,
-                        roomID: message.roomID,
-                        localFileURL: URL(fileURLWithPath: path)
-                    )
-                }
-                let stats = await CKSyncEngineManager.shared.pendingStats()
-                self.queuedMessagesCount = stats.total
-                log("[Engine] Queued message to CKSyncEngine: id=\(message.id) pending=\(stats.total)", category: "OfflineManager")
-                if self.isOnline { await CKSyncEngineManager.shared.kickSyncNow() }
-            }
-        } else {
+        guard #available(iOS 17.0, *) else {
             log("CKSyncEngine unavailable on this OS. Skipping queue.", category: "OfflineManager")
+            return
+        }
+
+        Task { @MainActor in
+            await CKSyncEngineManager.shared.queueMessage(message)
+            if let path = message.assetPath {
+                await CKSyncEngineManager.shared.queueAttachment(
+                    messageRecordName: message.id.uuidString,
+                    roomID: message.roomID,
+                    localFileURL: URL(fileURLWithPath: path)
+                )
+            }
+            await updateQueuedMessagesCount()
+            log("[Engine] Queued message to CKSyncEngine: id=\(message.id) pending=\(queuedMessagesCount)", category: "OfflineManager")
+            if isOnline { await CKSyncEngineManager.shared.kickSyncNow() }
         }
     }
     
     func processOfflineQueue() {
-        if #available(iOS 17.0, *) {
-            guard isOnline else { return }
-            Task { @MainActor in
-                await CKSyncEngineManager.shared.kickSyncNow()
-                let stats = await CKSyncEngineManager.shared.pendingStats()
-                queuedMessagesCount = stats.total
-                log("[Engine] Kicked sync. pending=\(stats.total)", category: "OfflineManager")
-            }
+        guard #available(iOS 17.0, *), isOnline else { return }
+        Task { @MainActor in
+            await CKSyncEngineManager.shared.kickSyncNow()
+            await updateQueuedMessagesCount()
+            log("[Engine] Kicked sync. pending=\(queuedMessagesCount)", category: "OfflineManager")
         }
     }
     
@@ -79,13 +76,15 @@ class OfflineManager: ObservableObject {
     // MARK: - Public API
     
     func clearQueue() {
-        if #available(iOS 17.0, *) {
-            Task { @MainActor in
-                await CKSyncEngineManager.shared.resetEngines()
-                let stats = await CKSyncEngineManager.shared.pendingStats()
-                queuedMessagesCount = stats.total
-                log("[Engine] Reset engines. pending=\(stats.total)", category: "OfflineManager")
-            }
+        guard #available(iOS 17.0, *) else {
+            log("CKSyncEngine unavailable on this OS. Skipping queue reset.", category: "OfflineManager")
+            return
+        }
+
+        Task { @MainActor in
+            await CKSyncEngineManager.shared.resetEngines()
+            await updateQueuedMessagesCount()
+            log("[Engine] Reset engines. pending=\(queuedMessagesCount)", category: "OfflineManager")
         }
     }
     
@@ -113,20 +112,29 @@ class OfflineManager: ObservableObject {
     
     func getConnectionType() -> String {
         let path = monitor.currentPath
-        
-        if path.usesInterfaceType(.wifi) {
-            return "WiFi"
-        } else if path.usesInterfaceType(.cellular) {
-            return "Cellular"
-        } else if path.usesInterfaceType(.wiredEthernet) {
-            return "Ethernet"
-        } else {
-            return "Unknown"
+
+        let interfaces: [(NWInterface.InterfaceType, String)] = [
+            (.wifi, "WiFi"),
+            (.cellular, "Cellular"),
+            (.wiredEthernet, "Ethernet")
+        ]
+
+        if let matched = interfaces.first(where: { path.usesInterfaceType($0.0) }) {
+            return matched.1
         }
+        return "Unknown"
     }
     
     deinit {
         monitor.cancel()
+    }
+
+    // MARK: - Helpers
+
+    @MainActor
+    private func updateQueuedMessagesCount() async {
+        let stats = await CKSyncEngineManager.shared.pendingStats()
+        queuedMessagesCount = stats.total
     }
 }
 

@@ -6,6 +6,7 @@ import WebRTC
 #endif
 import Combine
 import SwiftUI
+import SwiftData
 import Network
 
 @MainActor
@@ -30,13 +31,22 @@ final class P2PController: NSObject, ObservableObject {
     private var capturer: RTCCameraVideoCapturer?
     private var hasPublishedOffer: Bool = false
     private var hasSetRemoteDescription: Bool = false
+    // Connection timeout and retry
+    private var connectionTimer: Timer?
+    private var connectionAttempts = 0
+    private let maxConnectionAttempts = 3
+    private let connectionTimeout: TimeInterval = 10.0
     // Perfect Negotiation用の簡易状態
     private var isPolite: Bool = false
     private var isMakingOffer: Bool = false
-    // --- PN設計の検討と決定（コメント） ---
-    // - 以前は「impoliteのみOffer作成」だったが、polite側でローカル変更が起こると交渉が進まない欠点があった。
-    // - o3の推奨に基づき、どちら側でもOffer作成可とし、衝突はisPoliteで解決（polite: rollback受け入れ、impolite: 無視）。
-    // - 嵐（storm）回避のため、PC単位で交渉をデバウンス・直列化し、端末全体の同時Offer生成数にも上限を設ける。
+    
+    // Offer作成者を決定する固定ロジック
+    private var isOfferCreator: Bool = false
+    // --- 固定Offer作成ロジック ---
+    // - UserID比較でOffer作成者を決定（辞書順で小さい方）
+    // - Offer作成者のみがOfferを送信し、相手からAnswerを受信
+    // - Offer作成者でない端末はOfferを受信してAnswerを送信
+    // - この方式によりGlareを完全に回避し、メッシュ接続にも拡張可能
     private var needsNegotiation: Bool = false
     private var negotiationDebounceTask: Task<Void, Never>?
     private var ensureOfferTask: Task<Void, Never>?
@@ -72,6 +82,7 @@ final class P2PController: NSObject, ObservableObject {
         hasPublishedOffer = false
         hasSetRemoteDescription = false
         isMakingOffer = false
+        isOfferCreator = false
         pendingRemoteCandidates.removeAll()
         publishedCandidateCount = 0
         addedRemoteCandidateCount = 0
@@ -107,6 +118,43 @@ final class P2PController: NSObject, ObservableObject {
     var currentRoomID: String = ""
     private var currentMyID: String = ""
     private var currentRemoteID: String = ""
+    
+    // MARK: - Offer Creation Logic
+    
+    /// Offer作成者を決定（UserID比較方式）
+    /// - Parameters:
+    ///   - myID: 自分のUserID
+    ///   - remoteID: 相手のUserID
+    /// - Returns: 自分がOffer作成者の場合true
+    private func shouldCreateOffer(myID: String, remoteID: String) -> Bool {
+        // UserIDを辞書順で比較し、小さい方がOfferを作成
+        // これにより両端末で必ず同じ結果となる
+        return myID < remoteID
+    }
+    
+    /// メッシュ接続用：複数参加者での接続ペアごとのOffer作成者を決定
+    /// - Parameter participants: 参加者のUserIDリスト
+    /// - Returns: 接続ペアとOffer作成者のマッピング
+    private func calculateMeshOfferMatrix(participants: [String]) -> [String: String] {
+        var matrix: [String: String] = [:]
+        let sorted = participants.sorted() // 辞書順でソート
+        
+        // 全ての接続ペアを計算
+        for i in 0..<sorted.count {
+            for j in (i+1)..<sorted.count {
+                let pairKey = computePairKey(id1: sorted[i], id2: sorted[j])
+                matrix[pairKey] = sorted[i] // 小さい方がOffer作成者
+            }
+        }
+        
+        return matrix
+    }
+    
+    /// 接続ペアのキーを生成（順序に依存しない）
+    private func computePairKey(id1: String, id2: String) -> String {
+        let (smaller, larger) = id1 < id2 ? (id1, id2) : (id2, id1)
+        return "\(smaller)#\(larger)"
+    }
 
     // Initialiser hidden
     private override init() {
@@ -119,6 +167,56 @@ final class P2PController: NSObject, ObservableObject {
             }
         }
         pathMonitor.start(queue: DispatchQueue(label: "p2p.path"))
+    }
+
+    // MARK: - Connection Management
+    
+    private func startConnectionTimer() {
+        connectionTimer?.invalidate()
+        connectionTimer = Timer.scheduledTimer(withTimeInterval: connectionTimeout, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                log("[P2P] ⏰ Connection timeout after \(self.connectionTimeout)s", category: "P2P")
+                self.handleConnectionTimeout()
+            }
+        }
+        log("[P2P] Connection timer started (\(connectionTimeout)s)", category: "P2P")
+    }
+    
+    private func handleConnectionTimeout() {
+        if connectionAttempts < maxConnectionAttempts {
+            connectionAttempts += 1
+            log("[P2P] 🔄 Retrying connection (attempt \(connectionAttempts)/\(maxConnectionAttempts))", category: "P2P")
+            
+            // 既存の接続をリセット
+            resetSignalState(resetRoomContext: false)
+            close()
+            
+            // 再試行
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒待機
+                if !currentRoomID.isEmpty && !currentMyID.isEmpty {
+                    startIfNeeded(roomID: currentRoomID, myID: currentMyID, remoteID: currentRemoteID)
+                }
+            }
+        } else {
+            log("[P2P] ❌ Max connection attempts reached. Giving up.", category: "P2P")
+            handleConnectionFailure()
+        }
+    }
+    
+    private func handleConnectionFailure() {
+        connectionTimer?.invalidate()
+        connectionTimer = nil
+        localTrack = nil
+        remoteTrack = nil
+        state = .failed
+        
+        // 診断情報を出力
+        diagnoseVideoState()
+        
+        // UIに通知（必要に応じて）
+        log("[P2P] Connection failed. Please try again later.", category: "P2P")
     }
 
     // MARK: - Lifecycle
@@ -138,6 +236,18 @@ final class P2PController: NSObject, ObservableObject {
                 close()
             } else {
                 log("[P2P] Skip start: already active for room=\(normalizedRoom) state=\(state)", category: "P2P")
+                
+                // 既にアクティブな場合でも現在の状態をログ出力
+                if let context = try? ModelContainerBroker.shared.mainContext() {
+                    var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == normalizedRoom })
+                    descriptor.fetchLimit = 1
+                    if let room = (try? context.fetch(descriptor))?.first {
+                        log("[P2P] Current participants in room=\(normalizedRoom): \(room.participants.count)", category: "P2P")
+                        for participant in room.participants {
+                            log("[P2P]   - userID=\(String(participant.userID.prefix(8))) isLocal=\(participant.isLocal) displayName=\(participant.displayName ?? "nil")", category: "P2P")
+                        }
+                    }
+                }
                 return
             }
         }
@@ -154,6 +264,9 @@ final class P2PController: NSObject, ObservableObject {
         publishedCandidateCount = 0
         addedRemoteCandidateCount = 0
         publishedCandidateTypeCounts.removeAll()
+        
+        // Start connection timer
+        startConnectionTimer()
         if let p = path {
             let ifType: String = p.usesInterfaceType(.wifi) ? "wifi" : (p.usesInterfaceType(.cellular) ? "cellular" : (p.usesInterfaceType(.wiredEthernet) ? "ethernet" : "other") )
             log("[P2P] Network path type=\(ifType) constrained=\(p.isConstrained)", category: "P2P")
@@ -183,6 +296,10 @@ final class P2PController: NSObject, ObservableObject {
         }
         log("[P2P] close() called. Resetting peer + tracks", category: "P2P")
 
+        // Cancel all timers and tasks
+        connectionTimer?.invalidate()
+        connectionTimer = nil
+        connectionAttempts = 0
         negotiationDebounceTask?.cancel(); negotiationDebounceTask = nil
         ensureOfferTask?.cancel(); ensureOfferTask = nil
 
@@ -317,6 +434,7 @@ final class P2PController: NSObject, ObservableObject {
         capturer?.startCapture(with: device, format: format, fps: Int(fps/2))
         let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         log("[P2P] startCapture device=front format=\(dims.width)x\(dims.height) fps=\(Int(fps/2))", category: "P2P")
+        log("[P2P] Local video capture started successfully", category: "P2P")
 #endif
     }
 
@@ -379,8 +497,13 @@ final class P2PController: NSObject, ObservableObject {
             if currentRemoteID != remoteID {
                 currentRemoteID = remoteID
             }
+            // Perfect Negotiationのロールを決定
             isPolite = (myID > remoteID)
-            log("[P2P] PerfectNegotiation role resolved: isPolite=\(isPolite) remote=\(String(remoteID.prefix(8)))", category: "P2P")
+            
+            // Offer作成者を決定（UserID比較で固定）
+            isOfferCreator = shouldCreateOffer(myID: myID, remoteID: remoteID)
+            
+            log("[P2P] Role resolved: isPolite=\(isPolite) isOfferCreator=\(isOfferCreator) remote=\(String(remoteID.prefix(8)))", category: "P2P")
             persistRemoteParticipant(userID: remoteID)
 
             signalSession = try await CloudKitChatManager.shared.ensureSignalSession(roomID: currentRoomID,
@@ -553,8 +676,13 @@ final class P2PController: NSObject, ObservableObject {
         if resolvedRemoteUserID == nil {
             resolvedRemoteUserID = owner
             currentRemoteID = owner
+            // Perfect Negotiationのロールを決定
             isPolite = (currentMyID > owner)
-            log("[P2P] Remote resolved via signal owner=\(String(owner.prefix(8)))", category: "P2P")
+            
+            // Offer作成者を決定（UserID比較で固定）
+            isOfferCreator = shouldCreateOffer(myID: currentMyID, remoteID: owner)
+            
+            log("[P2P] Remote resolved via signal: isPolite=\(isPolite) isOfferCreator=\(isOfferCreator) owner=\(String(owner.prefix(8)))", category: "P2P")
         }
     }
 
@@ -664,20 +792,23 @@ final class P2PController: NSObject, ObservableObject {
 
 #if canImport(WebRTC)
     private func applyOfferPayload(callId: String, sdp: String) async -> Bool {
+        // 固定ロジック: Offer作成者でない端末のみがOfferを受信して処理
+        if isOfferCreator {
+            log("[P2P] ⚠️ Unexpected: Offer creator received offer. Ignoring. callId=\(callId)", category: "P2P")
+            return false
+        }
+        
         if hasSetRemoteDescription {
             scheduleRestartAfterDelay(reason: "stale offer after RD", cooldownMs: 300)
             return true
         }
         let desc = RTCSessionDescription(type: .offer, sdp: sdp)
         do {
+            // Glareは発生しないはず（固定ロジックのため）
             if let peer = self.pc, peer.signalingState == .haveLocalOffer {
-                if !self.isPolite {
-                    log("[P2P] Glare detected (impolite). Ignoring remote offer callId=\(callId)", category: "P2P")
-                    return false
-                } else {
-                    scheduleRestartAfterDelay(reason: "glare (polite)", cooldownMs: 300)
-                    return false
-                }
+                log("[P2P] ⚠️ Unexpected state: haveLocalOffer when receiving offer. Restarting.", category: "P2P")
+                scheduleRestartAfterDelay(reason: "unexpected glare", cooldownMs: 300)
+                return false
             }
             guard let peer = self.pc else {
                 log("[P2P] No peer connection when applying offer callId=\(callId)", category: "P2P")
@@ -698,6 +829,12 @@ final class P2PController: NSObject, ObservableObject {
     }
 
     private func applyAnswerPayload(callId: String, sdp: String) async -> Bool {
+        // 固定ロジック: Offer作成者のみがAnswerを受信して処理
+        if !isOfferCreator {
+            log("[P2P] ⚠️ Unexpected: Non-offer creator received answer. Ignoring. callId=\(callId)", category: "P2P")
+            return false
+        }
+        
         if hasSetRemoteDescription {
             scheduleRestartAfterDelay(reason: "stale answer after RD", cooldownMs: 300)
             return true
@@ -781,6 +918,78 @@ final class P2PController: NSObject, ObservableObject {
     func debugDump() {
         log("[P2P] diag state=\(state) roomID=\(currentRoomID) myID=\(String(currentMyID.prefix(8))) pcExists=\(pc != nil) localTrack=\(localTrack != nil) remoteTrack=\(remoteTrack != nil)", category: "P2P")
     }
+    
+    /// P2Pビデオの状態を診断して詳細ログを出力
+    func diagnoseVideoState() {
+        log("[P2P] === VIDEO DIAGNOSTICS ===", category: "P2P")
+        log("[P2P] Connection state: \(state)", category: "P2P")
+        
+        if let pc = pc {
+            log("[P2P] PeerConnection: state=\(pc.connectionState) iceState=\(pc.iceConnectionState)", category: "P2P")
+            
+            #if canImport(WebRTC)
+            // トランシーバーの状態
+            for (index, transceiver) in pc.transceivers.enumerated() {
+                let mediaType = transceiver.mediaType == .video ? "video" : "audio"
+                log("[P2P] Transceiver[\(index)] type=\(mediaType) direction=\(transceiver.direction) stopped=\(transceiver.isStopped)", category: "P2P")
+                
+                if transceiver.mediaType == .video {
+                    if let senderTrack = transceiver.sender.track as? RTCVideoTrack {
+                        log("[P2P]   Sender: trackId=\(senderTrack.trackId) enabled=\(senderTrack.isEnabled)", category: "P2P")
+                    } else {
+                        log("[P2P]   Sender: no track", category: "P2P")
+                    }
+                    
+                    if let receiverTrack = transceiver.receiver.track as? RTCVideoTrack {
+                        log("[P2P]   Receiver: trackId=\(receiverTrack.trackId) enabled=\(receiverTrack.isEnabled)", category: "P2P")
+                    } else {
+                        log("[P2P]   Receiver: no track", category: "P2P")
+                    }
+                }
+            }
+            #endif
+        } else {
+            log("[P2P] PeerConnection: nil", category: "P2P")
+        }
+        
+        log("[P2P] Local video track: \(localTrack != nil ? "present" : "nil")", category: "P2P")
+        if let local = localTrack {
+            log("[P2P]   trackId=\(local.trackId) enabled=\(local.isEnabled)", category: "P2P")
+        }
+        
+        log("[P2P] Remote video track: \(remoteTrack != nil ? "present" : "nil")", category: "P2P")
+        if let remote = remoteTrack {
+            log("[P2P]   trackId=\(remote.trackId) enabled=\(remote.isEnabled)", category: "P2P")
+        }
+        
+        // シグナリング状態の診断
+        log("[P2P] Signaling diagnostics:", category: "P2P")
+        log("[P2P]   - hasPublishedOffer: \(hasPublishedOffer)", category: "P2P")
+        log("[P2P]   - hasSetRemoteDescription: \(hasSetRemoteDescription)", category: "P2P")
+        log("[P2P]   - isOfferCreator: \(isOfferCreator)", category: "P2P")
+        log("[P2P]   - isPolite: \(isPolite)", category: "P2P")
+        log("[P2P]   - isMakingOffer: \(isMakingOffer)", category: "P2P")
+        log("[P2P]   - needsNegotiation: \(needsNegotiation)", category: "P2P")
+        log("[P2P]   - pendingRemoteCandidates: \(pendingRemoteCandidates.count)", category: "P2P")
+        
+        log("[P2P] Expected behavior:", category: "P2P")
+        log("[P2P]   - Both local and remote tracks should be present", category: "P2P")
+        log("[P2P]   - Both tracks should be enabled=true", category: "P2P")
+        log("[P2P]   - Connection state should be 'connected'", category: "P2P")
+        log("[P2P]   - At least one video transceiver with direction=sendRecv", category: "P2P")
+        
+        // UI側の状態も診断
+        log("[P2P] UI State:", category: "P2P")
+        log("[P2P]   - Local track: \(localTrack != nil ? "present" : "nil")", category: "P2P")
+        log("[P2P]   - Remote track: \(remoteTrack != nil ? "present" : "nil")", category: "P2P")
+        
+        if remoteTrack != nil {
+            log("[P2P] ⚠️ Remote track exists - ensure VideoCallView or P2PVideoView is properly connected", category: "P2P")
+            log("[P2P] ⚠️ Check that remoteTrack is added to the renderer in your UI layer", category: "P2P")
+        }
+        
+        log("[P2P] === END DIAGNOSTICS ===", category: "P2P")
+    }
 }
 
 extension P2PController: RTCPeerConnectionDelegate {
@@ -790,20 +999,49 @@ extension P2PController: RTCPeerConnectionDelegate {
     nonisolated public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         Task { @MainActor in
             let callId = (!self.currentRoomID.isEmpty && !self.currentMyID.isEmpty) ? self.computePairKey(roomID: self.currentRoomID, myID: self.currentMyID) : ""
+            log("[P2P] ICE connection state changed: \(newState)", category: "P2P")
+            
             switch newState {
             case .connected, .completed:
                 self.state = .connected
+                self.connectionTimer?.invalidate()
+                self.connectionTimer = nil
+                self.connectionAttempts = 0
+                log("[P2P] ✅ Connection established!", category: "P2P")
+                // 診断情報を出力
+                self.diagnoseVideoState()
+                
             case .disconnected:
                 // 一時切断はトラックを保持して再接続を待つ
                 log("[P2P] ICE state changed: disconnected — keep tracks and wait", category: "P2P")
-                if self.state != .failed { self.state = .connecting }
-            case .failed, .closed:
-                log("[P2P] ICE state changed: \(newState) — tearing down tracks", category: "P2P")
+                if self.state != .failed { 
+                    self.state = .connecting
+                    self.startConnectionTimer()
+                }
+                
+            case .failed:
+                log("[P2P] ❌ ICE connection failed", category: "P2P")
+                self.handleConnectionFailure()
+                
+            case .closed:
+                log("[P2P] ICE connection closed", category: "P2P")
+                self.connectionTimer?.invalidate()
+                self.connectionTimer = nil
                 self.localTrack = nil
                 self.remoteTrack = nil
-                self.state = (newState == .failed ? .failed : .idle)
-            case .checking, .new:
+                self.state = .idle
+                
+            case .checking:
+                if self.state != .failed { 
+                    self.state = .connecting
+                    if self.connectionTimer == nil {
+                        self.startConnectionTimer()
+                    }
+                }
+                
+            case .new:
                 if self.state != .failed { self.state = .connecting }
+                
             case .count:
                 break
             @unknown default:
@@ -842,9 +1080,21 @@ extension P2PController: RTCPeerConnectionDelegate {
                 self.remoteTrack = track
                 _ = OverlaySupport.checkAndLog()
                 log("[P2P] Remote video track received (didAdd stream)", category: "P2P")
+                log("[P2P] Remote track enabled=\(track.isEnabled) trackId=\(track.trackId)", category: "P2P")
+                log("[P2P] Stream has \(stream.videoTracks.count) video tracks, \(stream.audioTracks.count) audio tracks", category: "P2P")
+                
                 if self.localTrack != nil {
-                    // overlay auto-shown by SwiftUI
+                    log("[P2P] Both local and remote tracks are now available - video should be visible", category: "P2P")
+                    self.state = .connected
+                    // 接続後に診断を実行
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.diagnoseVideoState()
+                    }
                 }
+            }
+        } else {
+            Task { @MainActor in
+                log("[P2P] ⚠️ Stream received but no video tracks found", category: "P2P")
             }
         }
     }
@@ -855,9 +1105,51 @@ extension P2PController: RTCPeerConnectionDelegate {
                 self.remoteTrack = videoTrack
                 _ = OverlaySupport.checkAndLog()
                 log("[P2P] Remote video track received (didAdd rtpReceiver)", category: "P2P")
+                log("[P2P] Remote track enabled=\(videoTrack.isEnabled) trackId=\(videoTrack.trackId)", category: "P2P")
+                log("[P2P] RTP receiver mediaType=\(rtpReceiver.track?.kind ?? "nil")", category: "P2P")
+                
                 if self.localTrack != nil {
-                    // overlay auto-shown by SwiftUI
+                    log("[P2P] Both local and remote tracks are now available - video should be visible", category: "P2P")
+                    self.state = .connected
+                    
+                    // 接続成功時の参加者情報を詳細にログ
+                    let roomID = self.currentRoomID
+                    let myID = self.currentMyID
+                    let remoteID = self.currentRemoteID
+                    log("🎥 [P2P] === VIDEO CONNECTION ESTABLISHED ===", category: "P2P")
+                    log("🎥 [P2P] Room: \(roomID)", category: "P2P")
+                    log("🎥 [P2P] My ID: \(String(myID.prefix(8)))", category: "P2P")
+                    log("🎥 [P2P] Remote ID: \(String(remoteID.prefix(8)))", category: "P2P")
+                    
+                    // 参加者の詳細情報
+                    if let context = try? ModelContainerBroker.shared.mainContext() {
+                        var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
+                        descriptor.fetchLimit = 1
+                        if let room = (try? context.fetch(descriptor))?.first {
+                            log("🎥 [P2P] Total participants: \(room.participants.count)", category: "P2P")
+                            for (index, participant) in room.participants.enumerated() {
+                                let role = participant.role == .owner ? "owner" : "participant"
+                                let isMe = participant.userID == myID
+                                log("🎥 [P2P] Participant[\(index)]: \(participant.displayName ?? "NoName") (ID: \(String(participant.userID.prefix(8)))) - role:\(role) isMe:\(isMe)", category: "P2P")
+                            }
+                        }
+                    }
+                    log("🎥 [P2P] === END CONNECTION INFO ===", category: "P2P")
+                    
+                    // 接続後に診断を実行
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.diagnoseVideoState()
+                    }
                 }
+                
+                // トランシーバーの状態も確認
+                if let transceiver = peerConnection.transceivers.first(where: { $0.receiver == rtpReceiver }) {
+                    log("[P2P] Transceiver direction=\(transceiver.direction) stopped=\(transceiver.isStopped)", category: "P2P")
+                }
+            }
+        } else {
+            Task { @MainActor in
+                log("[P2P] ⚠️ RTP receiver added but not a video track: \(rtpReceiver.track?.kind ?? "nil")", category: "P2P")
             }
         }
     }
@@ -877,6 +1169,42 @@ extension P2PController: RTCPeerConnectionDelegate {
                 case .some(.stopped): dirStr = "stopped"
                 case .none: dirStr = "nil"
                 @unknown default: dirStr = "unknown"
+                }
+                
+                // より詳細な状態ログ
+                log("[P2P] === VIDEO STATE SUMMARY ===", category: "P2P")
+                log("[P2P] Local track: \(self.localTrack != nil ? "present" : "nil") enabled=\(self.localTrack?.isEnabled ?? false)", category: "P2P")
+                log("[P2P] Remote track: \(self.remoteTrack != nil ? "present" : "nil") enabled=\(self.remoteTrack?.isEnabled ?? false)", category: "P2P")
+                log("[P2P] Transceiver direction=\(dirStr) stopped=\(self.videoTransceiver?.isStopped ?? true)", category: "P2P")
+                
+                // 接続統計を取得（非同期）
+                peerConnection.statistics { stats in
+                    Task { @MainActor in
+                        var hasInboundVideo = false
+                        var hasOutboundVideo = false
+                        for (_, report) in stats.statistics {
+                            if report.type == "inbound-rtp" && report.values["mediaType"] as? String == "video" {
+                                hasInboundVideo = true
+                                if let bytesReceived = report.values["bytesReceived"] as? Int {
+                                    log("[P2P] Inbound video: \(bytesReceived) bytes received", category: "P2P")
+                                }
+                            }
+                            if report.type == "outbound-rtp" && report.values["mediaType"] as? String == "video" {
+                                hasOutboundVideo = true
+                                if let bytesSent = report.values["bytesSent"] as? Int {
+                                    log("[P2P] Outbound video: \(bytesSent) bytes sent", category: "P2P")
+                                }
+                            }
+                        }
+                        log("[P2P] Video streams: inbound=\(hasInboundVideo) outbound=\(hasOutboundVideo)", category: "P2P")
+                        log("[P2P] === END VIDEO STATE ===", category: "P2P")
+                        
+                        // ビデオが流れていない場合の診断
+                        if !hasInboundVideo || !hasOutboundVideo {
+                            log("[P2P] ⚠️ VIDEO ISSUE DETECTED: No video data flowing", category: "P2P")
+                            self.diagnoseVideoState()
+                        }
+                    }
                 }
 #else
                 let dirStr = "n/a"
@@ -952,11 +1280,14 @@ extension P2PController: RTCPeerConnectionDelegate {
 
     nonisolated public func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {
         Task { @MainActor in
-            log("[P2P] peerConnectionShouldNegotiate fired (isPolite=\(self.isPolite))", category: "P2P")
+            log("[P2P] peerConnectionShouldNegotiate fired (isPolite=\(self.isPolite) isOfferCreator=\(self.isOfferCreator))", category: "P2P")
 #if canImport(WebRTC)
-            // o3推奨: 両側で交渉を許可し、glareはisPoliteで解決（polite: rollback受け入れ / impolite: 無視）
-            // 嵐防止はPC単位のデバウンス＋in-flight上限で担保
-            self.scheduleNegotiationDebounced()
+            // 固定ロジック: Offer作成者のみがOfferを作成
+            if self.isOfferCreator {
+                self.scheduleNegotiationDebounced()
+            } else {
+                log("[P2P] Skip negotiation - not the offer creator", category: "P2P")
+            }
 #endif
         }
     }

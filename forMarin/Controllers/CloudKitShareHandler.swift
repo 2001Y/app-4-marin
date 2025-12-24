@@ -174,7 +174,27 @@ final class CloudKitShareHandler {
         let container = CKContainer(identifier: metadata.containerIdentifier)
 
         log("✅ [SYSJOIN] Participant joined room=\(inferredRoomID)", category: "CloudKitShareHandler")
+        
+        // 参加者自身のRoomMemberレコードを作成
+        await createParticipantRoomMemberRecord(zoneID: zoneIDForPost, container: container)
+        
+        // RoomMemberレコードの作成後、すぐにCKSyncEngineに同期を要求
+        log("🔄 [SYSJOIN] Triggering immediate sync for RoomMember records", category: "CloudKitShareHandler")
+        MessageSyncPipeline.shared.checkForUpdates(roomID: inferredRoomID)
+        
+        // 少し遅延を入れてから再度同期を試行
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒待機
+            log("🔄 [SYSJOIN] Second sync attempt for RoomMember records", category: "CloudKitShareHandler")
+            MessageSyncPipeline.shared.checkForUpdates(roomID: inferredRoomID)
+        }
+        
         await postJoinSystemMessage(to: zoneIDForPost, container: container, roomID: inferredRoomID)
+        
+        // オーナーのRoomMemberレコードを明示的に取得して取り込む
+        // Zone-wide sharingでは、Shared DatabaseからオーナーのPrivate Databaseのレコードも参照できるはずだが、
+        // CKSyncEngineの同期が期待通りに動作しない場合があるため、明示的に取得する
+        await fetchAndIngestRoomMemberRecords(zoneID: zoneIDForPost, container: container, roomID: inferredRoomID)
 
         if #available(iOS 17.0, *) {
             await MainActor.run {
@@ -222,24 +242,39 @@ final class CloudKitShareHandler {
     private func setRoomNameIfThresholdReached(container: CKContainer, zoneID: CKRecordZone.ID, roomID: String) async {
         do {
             let sharedDB = container.sharedCloudDatabase
-            // 参加者数チェック
-            let query = CKQuery(recordType: CKSchema.SharedType.roomMember, predicate: NSPredicate(value: true))
-            let (results, _) = try await sharedDB.records(matching: query, inZoneWith: zoneID)
+            // 参加者数チェック - CloudKitSyncEngineに任せる
+            // NOTE: CKQueryは避ける（recordNameフィールドがqueryableでないため）
+            // RoomMemberレコードはCKSyncEngineによって自動的に同期される
+            
+            // ローカルで同期済みのRoomMemberから参加者を取得
+            guard let context = try? ModelContainerBroker.shared.mainContext() else {
+                log("⚠️ [JOINER NAMING] No model context available", category: "CloudKitShareHandler")
+                return
+            }
+            
+            var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
+            descriptor.fetchLimit = 1
+            guard let room = try? context.fetch(descriptor).first else {
+                log("⚠️ [JOINER NAMING] Room not found locally: \(roomID)", category: "CloudKitShareHandler")
+                return
+            }
+            
+            let participants = room.participants
+            guard participants.count >= 3 else {
+                log("[JOINER NAMING] Not enough participants yet: \(participants.count)", category: "CloudKitShareHandler")
+                return
+            }
             var ids: [String] = []
             var nameMap: [String: String] = [:]
-            for (_, r) in results {
-                if case .success(let rec) = r {
-                    if let uid = rec[CKSchema.FieldKey.userId] as? String {
-                        let trimmed = uid.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty { ids.append(trimmed) }
-                        if let dn = rec[CKSchema.FieldKey.displayName] as? String {
-                            let n = dn.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !n.isEmpty { nameMap[trimmed] = n }
-                        }
+            for participant in participants {
+                let trimmed = participant.userID.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                if !trimmed.isEmpty { 
+                    ids.append(trimmed)
+                    if let displayName = participant.displayName, !displayName.isEmpty {
+                        nameMap[trimmed] = displayName
                     }
                 }
             }
-            guard ids.count >= 3 else { return }
 
             // 既にCloudKitのRoom.nameが設定済みなら何もしない
             let roomRecordID = CKSchema.roomRecordID(for: roomID, zoneID: zoneID)
@@ -307,6 +342,43 @@ final class CloudKitShareHandler {
     }
 
     @MainActor
+    private func createParticipantRoomMemberRecord(zoneID: CKRecordZone.ID, container: CKContainer) async {
+        do {
+            let userID = try await CloudKitChatManager.shared.ensureCurrentUserID()
+            let roomID = zoneID.zoneName
+            
+            let displayName = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            log("📤 [SYSJOIN] Creating participant RoomMember via CKSyncEngine record=RM_\(userID) room=\(roomID)", category: "CloudKitShareHandler")
+            
+            // メッセージと同じようにCKSyncEngineManagerを使用
+            if #available(iOS 17.0, *) {
+                await CKSyncEngineManager.shared.queueRoomMember(userID: userID, displayName: displayName, roomID: roomID)
+                
+                // 即座に同期を試行
+                await CKSyncEngineManager.shared.kickSyncNow()
+                
+                log("✅ [SYSJOIN] Queued participant's RoomMember record to CKSyncEngine", category: "CloudKitShareHandler")
+            } else {
+                // iOS 17未満の場合は従来の方法を使用
+                let sharedDB = container.sharedCloudDatabase
+                let memberRecordID = CKSchema.roomMemberRecordID(userId: userID, zoneID: zoneID)
+                let memberRecord = CKRecord(recordType: CKSchema.SharedType.roomMember, recordID: memberRecordID)
+                
+                memberRecord[CKSchema.FieldKey.userId] = userID as CKRecordValue
+                if !displayName.isEmpty {
+                    memberRecord[CKSchema.FieldKey.displayName] = displayName as CKRecordValue
+                }
+                
+                let savedRecord = try await sharedDB.save(memberRecord)
+                log("✅ [SYSJOIN] Created participant's RoomMember record=\(savedRecord.recordID.recordName) in shared DB (legacy)", category: "CloudKitShareHandler")
+            }
+        } catch {
+            log("⚠️ [SYSJOIN] Failed to create participant's RoomMember record: \(error)", category: "CloudKitShareHandler")
+        }
+    }
+    
+    @MainActor
     private func postJoinSystemMessage(to zoneID: CKRecordZone.ID, container: CKContainer, roomID: String) async {
         do {
             let userID = try await CloudKitChatManager.shared.ensureCurrentUserID()
@@ -335,6 +407,32 @@ final class CloudKitShareHandler {
                     log("🧭 [GUIDE] 同ゾーンの CKShare で参加者 Permission を READ_WRITE に設定", category: "CloudKitShareHandler")
                     log("🧭 [GUIDE] container=\(containerID) zoneOwner=\(zoneID.ownerName) zone=\(zoneID.zoneName) scope=shared", category: "CloudKitShareHandler")
                 }
+            }
+        }
+    }
+    
+    /// 参加者側で、オーナーのRoomMemberレコードを明示的に取得して取り込む
+    /// Zone-wide sharingでは、Shared DatabaseからオーナーのPrivate Databaseのレコードも参照できるはずだが、
+    /// CKSyncEngineの同期が期待通りに動作しない場合があるため、明示的に取得する
+    @MainActor
+    private func fetchAndIngestRoomMemberRecords(zoneID: CKRecordZone.ID, container: CKContainer, roomID: String) async {
+        // NOTE: CKQueryは使用しない（recordNameフィールドがqueryableでないため）
+        // RoomMemberレコードはCKSyncEngineによって自動的に同期される
+        log("[DEBUG] [SYSJOIN] Triggering sync for RoomMember records room=\(roomID)", category: "CloudKitShareHandler")
+        
+        // CKSyncEngineに同期を促す
+        MessageSyncPipeline.shared.checkForUpdates(roomID: roomID)
+        
+        // 少し待って同期が完了するのを待つ
+        try? await Task.sleep(for: .seconds(1))
+        
+        // ローカルで同期済みのRoomMemberを確認
+        if let context = try? ModelContainerBroker.shared.mainContext() {
+            var descriptor = FetchDescriptor<ChatRoom>(predicate: #Predicate<ChatRoom> { $0.roomID == roomID })
+            descriptor.fetchLimit = 1
+            if let room = try? context.fetch(descriptor).first {
+                let participants = room.participants
+                log("✅ [SYSJOIN] Room has \(participants.count) participants after sync", category: "CloudKitShareHandler")
             }
         }
     }

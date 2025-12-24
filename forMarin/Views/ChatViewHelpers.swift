@@ -368,6 +368,40 @@ extension ChatView {
     func handleViewAppearance() {
         AudioSessionManager.configureForAmbient()
 
+            // オンライン状態の詳細なトラッキング
+            let participants = chatRoom.participants
+            let localCount = participants.filter { $0.isLocal }.count
+            let remoteCount = participants.filter { !$0.isLocal }.count
+            
+            log("👁️ [ONLINE] === CHAT OPENED ===", category: "ChatView")
+            log("👁️ [ONLINE] Room: \(roomID)", category: "ChatView")
+            log("👁️ [ONLINE] Current user: \(String(myID.prefix(8)))", category: "ChatView")
+            log("👁️ [ONLINE] Total participants: \(participants.count) (local: \(localCount), remote: \(remoteCount))", category: "ChatView")
+            
+            for (index, participant) in participants.enumerated() {
+                let role = participant.role == .owner ? "owner" : "participant"
+                let isLocal = participant.isLocal ? "local" : "remote"
+                let isCurrentUser = participant.userID == myID
+                log("👁️ [ONLINE] Participant[\(index)]:", category: "ChatView")
+                log("👁️ [ONLINE]   - userID: \(String(participant.userID.prefix(8)))\(isCurrentUser ? " (ME)" : "")", category: "ChatView")
+                log("👁️ [ONLINE]   - role: \(role)", category: "ChatView")
+                log("👁️ [ONLINE]   - isLocal: \(isLocal)", category: "ChatView")
+                log("👁️ [ONLINE]   - displayName: \(participant.displayName ?? "nil")", category: "ChatView")
+                log("👁️ [ONLINE]   - lastUpdated: \(participant.lastUpdatedAt)", category: "ChatView")
+            }
+            
+            // P2P接続に必要な条件の確認
+            if remoteCount == 0 {
+                log("👁️ [ONLINE] ⚠️ No remote participant found - P2P connection cannot be established", category: "ChatView")
+                log("👁️ [ONLINE] ⚠️ Waiting for RoomMember sync to complete", category: "ChatView")
+            } else if remoteCount > 1 {
+                log("👁️ [ONLINE] ⚠️ Multiple remote participants found - P2P expects exactly 2 participants", category: "ChatView")
+            } else {
+                log("👁️ [ONLINE] ✅ Remote participant found - P2P connection can proceed", category: "ChatView")
+            }
+            
+            log("👁️ [ONLINE] === END CHAT OPENED ===", category: "ChatView")
+
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             if settings.authorizationStatus == .notDetermined {
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in

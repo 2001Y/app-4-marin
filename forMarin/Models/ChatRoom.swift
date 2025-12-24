@@ -19,14 +19,14 @@ final class ChatRoom: Hashable {
         var lastUpdatedAt: Date
     }
 
-    var id: UUID
+    var id: UUID = UUID()
     var displayName: String?
-    var roomID: String
+    var roomID: String = ""
     var lastMessageText: String?
     var lastMessageDate: Date?
-    var unreadCount: Int
-    var createdAt: Date
-    var autoDownloadImages: Bool
+    var unreadCount: Int = 0
+    var createdAt: Date = Date()
+    var autoDownloadImages: Bool = false
     private static let participantsEncoder = JSONEncoder()
     private static let participantsDecoder = JSONDecoder()
     private static let emptyParticipantsData: Data = {
@@ -34,7 +34,7 @@ final class ChatRoom: Hashable {
     }()
 
     @Attribute(.externalStorage)
-    private var participantsBlob: Data
+    private var participantsBlob: Data = ChatRoom.emptyParticipantsData
 
     @Transient
     var participants: [Participant] {

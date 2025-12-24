@@ -1132,21 +1132,34 @@ class CloudKitChatManager: ObservableObject {
                 // 逆に、参加者がShared DBに作成したレコードは、オーナーがPrivate DBから参照できる
                 let memberRecordID = CKSchema.roomMemberRecordID(userId: ownerRecordName, zoneID: zoneID)
                 let memberRecord = CKRecord(recordType: CKSchema.SharedType.roomMember, recordID: memberRecordID)
+                
+                // メッセージと同じようにCKRecordValueとして設定
                 memberRecord[CKSchema.FieldKey.userId] = ownerRecordName as CKRecordValue
+                
+                // DEBUG: RoomMemberレコード作成時のuserIDフィールドを確認
+                log("[DEBUG] Creating RoomMember record=\(memberRecordID.recordName) with userId=\(ownerRecordName)", category: "share")
                 
                 let displayName = (UserDefaults.standard.string(forKey: "myDisplayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if !displayName.isEmpty {
                     memberRecord[CKSchema.FieldKey.displayName] = displayName as CKRecordValue
                 }
                 
-                do {
-                    _ = try await privateDB.save(memberRecord)
-                    log("✅ Created owner's RoomMember record in private DB roomID=\(normalizedRoomID)", category: "share")
-                } catch {
-                    log("⚠️ Failed to create owner's RoomMember record: \(error)", category: "share")
-                    // エラーの詳細をログ出力
-                    if let ckError = error as? CKError {
-                        log("⚠️ CKError code=\(ckError.code.rawValue) desc=\(ckError.localizedDescription)", category: "share")
+                // メッセージと同じようにCKSyncEngineManagerを使用
+                if #available(iOS 17.0, *) {
+                    log("📤 [ZONE-SHARE] Creating owner RoomMember via CKSyncEngine", category: "share")
+                    await CKSyncEngineManager.shared.queueRoomMember(userID: ownerRecordName, displayName: displayName, roomID: normalizedRoomID)
+                    await CKSyncEngineManager.shared.kickSyncNow()
+                    log("✅ [ZONE-SHARE] Queued owner's RoomMember record to CKSyncEngine", category: "share")
+                } else {
+                    // iOS 17未満の場合は従来の方法を使用
+                    do {
+                        _ = try await privateDB.save(memberRecord)
+                        log("✅ Created owner's RoomMember record in private DB roomID=\(normalizedRoomID) (legacy)", category: "share")
+                    } catch {
+                        log("⚠️ Failed to create owner's RoomMember record: \(error)", category: "share")
+                        if let ckError = error as? CKError {
+                            log("⚠️ CKError code=\(ckError.code.rawValue) desc=\(ckError.localizedDescription)", category: "share")
+                        }
                     }
                 }
                 
@@ -2570,7 +2583,36 @@ class CloudKitChatManager: ObservableObject {
     }
 
     private func snapshot(from record: CKRecord) -> ParticipantProfileSnapshot {
-        let userID = (record[CKSchema.FieldKey.userId] as? String) ?? ""
+        // より柔軟な型変換を試みる
+        var userID = ""
+        
+        if let stringValue = record[CKSchema.FieldKey.userId] as? String {
+            userID = stringValue
+        } else if let nsStringValue = record[CKSchema.FieldKey.userId] as? NSString {
+            userID = nsStringValue as String
+        } else if let ckRecordValue = record[CKSchema.FieldKey.userId] {
+            // CKRecordValueの場合の処理
+            userID = String(describing: ckRecordValue)
+        }
+        
+        // フォールバック: recordNameからuserIDを抽出
+        // RoomMemberのrecordNameは "RM_{userId}" の形式
+        if userID.isEmpty {
+            let recordName = record.recordID.recordName
+            if recordName.hasPrefix("RM_") {
+                userID = String(recordName.dropFirst(3))
+                log("🔧 [FALLBACK] Extracted userID from recordName: \(recordName) -> \(userID)", category: "share")
+            } else {
+                log("⚠️ [DEBUG] RoomMember record=\(recordName) has empty userId field and unexpected recordName format", category: "share")
+                log("⚠️ [DEBUG] Record fields: \(record.allKeys())", category: "share") 
+                if let rawValue = record[CKSchema.FieldKey.userId] {
+                    log("⚠️ [DEBUG] userId raw value type=\(type(of: rawValue)) value=\(rawValue)", category: "share")
+                } else {
+                    log("⚠️ [DEBUG] userId field is nil in record", category: "share")
+                }
+            }
+        }
+        
         var avatarData: Data?
         if let asset = record[CKSchema.FieldKey.avatarAsset] as? CKAsset,
            let url = asset.fileURL {

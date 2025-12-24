@@ -54,7 +54,11 @@ actor CKSyncEngineManager: CKSyncEngineDelegate {
             let (database, zoneID) = try await CloudKitChatManager.shared.resolveZone(for: roomID, purpose: purpose)
             guard let engine = engine(for: database.databaseScope) else { return }
 
-            engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
+            // 参加者がShared DBに書き込む際はゾーン更新を試みない
+            // オーナーのPrivate DBの場合のみゾーンを保存
+            if database.databaseScope == .private {
+                engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
+            }
 
             let record = build(zoneID, database.databaseScope)
             let recordID = record.recordID
@@ -434,6 +438,23 @@ actor CKSyncEngineManager: CKSyncEngineDelegate {
         }
     }
 
+    func queueRoomMember(userID: String, displayName: String?, roomID: String) async {
+        await enqueueRecord(roomID: roomID, purpose: .message) { zoneID, _ in
+            let memberRecordID = CKSchema.roomMemberRecordID(userId: userID, zoneID: zoneID)
+            let record = CKRecord(recordType: CKSchema.SharedType.roomMember, recordID: memberRecordID)
+            
+            // メッセージと同じようにCKRecordValueとして設定
+            record[CKSchema.FieldKey.userId] = userID as CKRecordValue
+            
+            if let displayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !displayName.isEmpty {
+                record[CKSchema.FieldKey.displayName] = displayName as CKRecordValue
+            }
+            
+            log("[CKSyncEngine] Queuing RoomMember record=\(memberRecordID.recordName) userID=\(userID) room=\(roomID)", category: "CKSyncEngine")
+            return record
+        }
+    }
+    
     func queueAttachment(messageRecordName: String, roomID: String, localFileURL: URL) async {
         await enqueueRecord(roomID: roomID, purpose: .message) { zoneID, _ in
             let recID = CKRecord.ID(recordName: UUID().uuidString, zoneID: zoneID)

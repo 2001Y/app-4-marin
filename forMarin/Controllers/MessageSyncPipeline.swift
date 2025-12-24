@@ -71,6 +71,11 @@ final class MessageSyncPipeline: NSObject {
         CKSchema.FieldKey.emoji,
         // MessageAttachment
         CKSchema.FieldKey.asset,
+        // RoomMember fields - CloudKitで確実に取得するため重複して指定
+        CKSchema.FieldKey.userId,
+        "userId",  // 念のため直接文字列でも指定
+        CKSchema.FieldKey.displayName,
+        CKSchema.FieldKey.avatarAsset,
         // Signal envelopes / ICE chunks
         CKSchema.FieldKey.sessionKey,
         CKSchema.FieldKey.ownerUserId,
@@ -618,13 +623,9 @@ final class MessageSyncPipeline: NSObject {
                     continue
                 }
                 log("[DEBUG] [MessageSyncPipeline] Processing RoomMember record=\(record.recordID.recordName) room=\(roomID)", category: "MessageSyncPipeline")
-                do {
-                    await CloudKitChatManager.shared.ingestRoomMemberRecord(record)
-                    roomMemberApplied += 1
-                    log("[DEBUG] [MessageSyncPipeline] Successfully ingested RoomMember record=\(record.recordID.recordName) room=\(roomID)", category: "MessageSyncPipeline")
-                } catch {
-                    log("⚠️ [MessageSyncPipeline] Failed to ingest RoomMember record=\(record.recordID.recordName) room=\(roomID): \(error)", category: "MessageSyncPipeline")
-                }
+                await CloudKitChatManager.shared.ingestRoomMemberRecord(record)
+                roomMemberApplied += 1
+                log("[DEBUG] [MessageSyncPipeline] Successfully ingested RoomMember record=\(record.recordID.recordName) room=\(roomID)", category: "MessageSyncPipeline")
                 continue
             }
 

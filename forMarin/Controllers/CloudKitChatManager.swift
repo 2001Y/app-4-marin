@@ -23,6 +23,8 @@ class CloudKitChatManager: ObservableObject {
     // roomID -> scope ("private" or "shared") を永続キャッシュ
     private var roomScopeCache: [String: String] = [:]
     private let roomScopeDefaultsKey = "CloudKitChatManager.RoomScopeCache"
+    // ensureOwnerShareForSignal の実行済みキャッシュ（session内のみ有効）
+    private var ensuredOwnerShareForSignal: Set<String> = []
     private let privateDBTokenKey = "CloudKitChatManager.PrivateDBChangeToken"
     private let sharedDBTokenKey = "CloudKitChatManager.SharedDBChangeToken"
     private let zoneTokenKey = "CloudKitChatManager.ZoneChangeTokens"
@@ -288,6 +290,7 @@ class CloudKitChatManager: ObservableObject {
         roomScopeCache.removeAll()
         privateZoneCache.removeAll()
         sharedZoneCache.removeAll()
+        ensuredOwnerShareForSignal.removeAll()
         UserDefaults.standard.removeObject(forKey: roomScopeDefaultsKey)
         UserDefaults.standard.removeObject(forKey: privateZoneCacheKey)
         UserDefaults.standard.removeObject(forKey: sharedZoneCacheKey)
@@ -1908,13 +1911,19 @@ class CloudKitChatManager: ObservableObject {
     }
 
     private func ensureOwnerShareForSignal(roomID: String) async {
+        // セッション内で既に実行済みならスキップ（CloudKit API呼び出しの削減）
+        guard !ensuredOwnerShareForSignal.contains(roomID) else {
+            return
+        }
         do {
             if let descriptor = try? await fetchShare(for: roomID) {
                 await ensureOwnerParticipant(for: descriptor)
+                ensuredOwnerShareForSignal.insert(roomID)
                 return
             }
             let descriptor = try await createSharedChatRoom(roomID: roomID)
             await ensureOwnerParticipant(for: descriptor)
+            ensuredOwnerShareForSignal.insert(roomID)
         } catch {
             log("⚠️ [SIGNAL] Failed to ensure shared zone for room=\(roomID): \(error)", category: "share")
         }

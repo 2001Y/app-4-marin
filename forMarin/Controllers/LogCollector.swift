@@ -102,9 +102,10 @@ final class AppLogger {
     private var logEntries: [LogEntry] = []
     private let maxEntries = 1000
     private let queue = DispatchQueue(label: "com.fourmarin.applogger", attributes: .concurrent)
-#if targetEnvironment(simulator)
-    /// Simulator上での「確実なログ回収」用。unified logging が取りづらい/時刻やpredicateで取りこぼすケースがあるため、
-    /// 最低限のログをファイルにも追記して後から data container から回収できるようにする。
+#if DEBUG
+    /// Debug環境での「確実なログ回収」用。unified logging が取りづらい/時刻やpredicateで取りこぼすケースがあるため、
+    /// 最低限のログをファイルにも追記して後から回収できるようにする。
+    /// 実機でも有効（Debugビルド限定）。
     private let fileQueue = DispatchQueue(label: "com.fourmarin.applogger.file", qos: .utility)
     private lazy var fileURL: URL? = {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
@@ -131,9 +132,10 @@ final class AppLogger {
         }
         oslog("[\(level)] [\(category)] \(message)", category: "AppLogger")
 
-#if targetEnvironment(simulator)
-        // Simulatorではファイルにも追記して、テスト後に `simctl get_app_container ... data` から回収できるようにする。
-        // 例: <data container>/Library/Caches/applogger.log
+#if DEBUG
+        // Debug環境ではファイルにも追記して、テスト後に回収できるようにする。
+        // 実機: devicectl device copy from で回収
+        // Simulator: simctl get_app_container で回収
         if let fileURL {
             let line = "[\(DateFormatter.logTimestamp.string(from: entry.timestamp))] [\(entry.level)] [\(entry.category)] \(entry.message)\n"
             fileQueue.async {

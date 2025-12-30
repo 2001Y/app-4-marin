@@ -1935,10 +1935,33 @@ class CloudKitChatManager: ObservableObject {
             log("[ZONE] resolveZone(message) room=\(roomID) scope=\(context.scope.rawValue) zone=\(context.zoneID.zoneName)", category: "share")
             return (context.database, context.zoneID)
         case .signal:
+            // IMPORTANT:
+            // - SignalEnvelope/SignalIceChunk は「同一の参加者間で必ず同じDB/zone」に置かれないと成立しない。
+            // - しかし resolveDatabaseAndZone() は privateDB を先に探索するため、参加者端末でも private zone を拾ってしまい、
+            //   Answer/ICE が privateDB に書かれて Offer作成者から見えない事故が発生する（今回の再現）。
+            // - よって signal 用途では「shared zone が存在するなら常に shared を優先」する。
+            if let cachedShared = sharedZoneCache[roomID] {
+                cache(roomID: roomID, scope: .shared, zoneID: cachedShared)
+                log("[ZONE] resolveZone(signal) prefer sharedCache zone=\(cachedShared.zoneName)", category: "share")
+                // Signalは「shared DBに統一」する必要があるため、ここでは shared -> private の自動切替をしない。
+                return (sharedDB, cachedShared)
+            }
+            if let sharedZoneID = try? await findZone(named: roomID, in: sharedDB) {
+                cache(roomID: roomID, scope: .shared, zoneID: sharedZoneID)
+                log("[ZONE] resolveZone(signal) prefer sharedLookup zone=\(sharedZoneID.zoneName)", category: "share")
+                // Signalは「shared DBに統一」する必要があるため、ここでは shared -> private の自動切替をしない。
+                return (sharedDB, sharedZoneID)
+            }
             switch context.scope {
             case .private:
                 await ensureOwnerShareForSignal(roomID: roomID)
-                log("[ZONE] resolveZone(signal) owner scope=private zone=\(context.zoneID.zoneName)", category: "share")
+                // share作成/参加者追加後にshared zoneが見えるようになるケースがあるため、最後に再チェックする。
+                if let sharedZoneID = try? await findZone(named: roomID, in: sharedDB) {
+                    cache(roomID: roomID, scope: .shared, zoneID: sharedZoneID)
+                    log("[ZONE] resolveZone(signal) owner created share -> use shared zone=\(sharedZoneID.zoneName)", category: "share")
+                    return (sharedDB, sharedZoneID)
+                }
+                log("[ZONE] resolveZone(signal) owner scope=private (no shared zone found) zone=\(context.zoneID.zoneName)", category: "share")
                 return (context.database, context.zoneID)
             case .shared:
                 log("[ZONE] resolveZone(signal) participant scope=shared zone=\(context.zoneID.zoneName)", category: "share")
@@ -2324,6 +2347,31 @@ class CloudKitChatManager: ObservableObject {
         )
         let saved = try extractSavedRecord(from: results, recordID: recordID)
         return decodeSignalIceChunk(saved)!
+    }
+
+    // MARK: - ICE batching (CloudKit rate-limit mitigation)
+    // CloudKitのシグナリングゾーンは短時間に大量のModifyが走ると "Request Rate Limited"(503) / "Zone Busy" が出やすい。
+    // 1候補=1レコードを避けるため、複数候補をJSONで1レコードにまとめて送る（Schema変更なしでcandidate文字列に詰める）。
+    private struct IceBatchV1Payload: Codable {
+        let v: Int
+        let candidates: [String]
+    }
+
+    func publishIceCandidatesBatch(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, encodedCandidates: [String]) async throws -> SignalIceChunkSnapshot {
+        let trimmed = encodedCandidates.filter { !$0.isEmpty }
+        if trimmed.isEmpty {
+            // 空は送らない（呼び出し側のバグ防止）
+            throw NSError(domain: "CloudKitChatManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "encodedCandidates is empty"])
+        }
+        let payload = IceBatchV1Payload(v: 1, candidates: trimmed)
+        let data = try JSONEncoder().encode(payload)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        return try await publishIceCandidate(roomID: roomID,
+                                             localUserID: localUserID,
+                                             remoteUserID: remoteUserID,
+                                             callEpoch: callEpoch,
+                                             encodedCandidate: json,
+                                             candidateType: "batch-v1")
     }
 
     func decodeSignalRecord(_ record: CKRecord) -> SignalEnvelopeSnapshot? {

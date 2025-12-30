@@ -236,16 +236,19 @@ struct InviteUnifiedSheet: View {
                 .buttonStyle(.bordered)
                 .controlSize(.large)
             } else if !allowCreatingNewChat {
-                Button {
-                    didLoadExistingShare = false
-                    Task { await loadExistingShareIfNeeded() }
-                } label: {
-                    Label("リンクを再取得", systemImage: "arrow.clockwise")
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
+                // 既存チャットの共有URLがまだ取得できていない場合のみ「再取得」を出す（取得済みなら上部の共有UIで十分）
+                if shareURLString == nil {
+                    Button {
+                        didLoadExistingShare = false
+                        Task { await loadExistingShareIfNeeded() }
+                    } label: {
+                        Label("リンクを再取得", systemImage: "arrow.clockwise")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
             }
         }
         .padding(.horizontal, 24)

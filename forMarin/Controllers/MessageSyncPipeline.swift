@@ -652,6 +652,18 @@ final class MessageSyncPipeline: NSObject {
                 let zoneRoomID = record.recordID.zoneID.zoneName
                 if let filter = roomFilter, filter != zoneRoomID { continue }
                 let applied = await P2PController.shared.applySignalRecord(record)
+                // #region agent log
+                AgentNDJSONLogger.post(runId: "pre-fix",
+                                       hypothesisId: "H4",
+                                       location: "MessageSyncPipeline.swift:processNonMessageRecords",
+                                       message: "applySignalRecord",
+                                       data: [
+                                        "roomID": zoneRoomID,
+                                        "type": record.recordType,
+                                        "record": String(record.recordID.recordName.suffix(8)),
+                                        "applied": applied
+                                       ])
+                // #endregion
                 if applied {
                     if record.recordType == CKSchema.SharedType.signalEnvelope {
                         envelopeApplied += 1

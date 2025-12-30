@@ -6,6 +6,8 @@ import AVFoundation
 // 特徴ページ（旧: ウェルカム画面）
 struct FeaturesPage: View {
     @AppStorage("myDisplayName") private var myDisplayName: String = ""
+    // CloudKitから取得した表示名（RootViewと同じ判定基準を使用）
+    @State private var myDisplayNameCloud: String? = nil
     @State private var showWelcomeModal = false
     @State private var showNameSheet = false
     @State private var showQRScanner = false
@@ -66,14 +68,15 @@ struct FeaturesPage: View {
                             // 触覚フィードバック
                             let impactFeedback = UIImpactFeedbackGenerator(style: .light)
                             impactFeedback.impactOccurred()
-                            // 名前が未設定なら名前入力、設定済みなら統合シート
-                            let name = myDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if name.isEmpty {
+                            // CloudKitの表示名で判定（RootViewと同じ基準、フォールバックなし）
+                            let name = myDisplayNameCloud?.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if name?.isEmpty ?? true {
                                 showNameSheet = true
                             } else {
                                 showInviteSheet = true
                             }
                         } label: { startButtonLabel(width: width) }
+                        .keyboardShortcut("n", modifiers: .command)
                         .padding(.bottom, 21)
                         
                         // 「招待を受ける」ボタンは削除。名前入力後に統合シートで選択させる
@@ -92,6 +95,25 @@ struct FeaturesPage: View {
                 // 作成時は親に通知（RootViewが遷移を担当）
                 onChatCreated(room)
             }, onJoined: nil)
+        }
+        .task(id: myDisplayNameCloud == nil) {
+            // CloudKitから表示名を取得（RootViewと同じ処理）
+            if myDisplayNameCloud == nil {
+                let name = await CloudKitChatManager.shared.fetchMyDisplayNameFromCloud()
+                await MainActor.run { self.myDisplayNameCloud = name }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .displayNameUpdated)) { notif in
+            // 表示名更新の通知を受けて、即座に判定を更新
+            if let name = notif.userInfo?["name"] as? String {
+                myDisplayNameCloud = name
+            } else {
+                // name未添付ならクラウド再フェッチ
+                Task {
+                    let name = await CloudKitChatManager.shared.fetchMyDisplayNameFromCloud()
+                    await MainActor.run { self.myDisplayNameCloud = name }
+                }
+            }
         }
         .onAppear { }
     }

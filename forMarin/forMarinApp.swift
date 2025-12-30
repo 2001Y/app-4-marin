@@ -392,10 +392,22 @@ struct RootView: View {
         if accepted {
             log("✅ [IDEAL SHARING] Accepted CloudKit share via in-app fallback", category: "RootView")
             // 共有ゾーンからローカルをブートストラップして一覧に反映
-            await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
+            do {
+                await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
+                log("✅ [IDEAL SHARING] bootstrapSharedRooms completed successfully", category: "RootView")
+            } catch {
+                log("❌ [IDEAL SHARING] bootstrapSharedRooms failed: \(error)", category: "RootView")
+            }
             // ウェルカム表示判定は部屋数で行うため、フラグ更新は不要
         } else {
             log("⚠️ [IDEAL SHARING] In-app acceptance failed (OS may still complete later)", category: "RootView")
+            // エラーが発生した場合でも、OSが後で処理する可能性があるため、bootstrapSharedRoomsを試みる
+            do {
+                await CloudKitChatManager.shared.bootstrapSharedRooms(modelContext: modelContext)
+                log("✅ [IDEAL SHARING] bootstrapSharedRooms completed (after failed acceptance)", category: "RootView")
+            } catch {
+                log("❌ [IDEAL SHARING] bootstrapSharedRooms failed (after failed acceptance): \(error)", category: "RootView")
+            }
         }
     }
     

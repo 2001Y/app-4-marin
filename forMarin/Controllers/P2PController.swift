@@ -9,6 +9,10 @@ import SwiftUI
 import SwiftData
 import Network
 
+/// 役割:
+/// - WebRTC PeerConnection のライフサイクル管理
+/// - CloudKit シグナリング（SignalSession / Envelope / IceChunk）の適用
+/// - UI向けに `localTrack` / `remoteTrack` を公開
 @MainActor
 final class P2PController: NSObject, ObservableObject {
     // Singleton instance used across SwiftUI views
@@ -27,15 +31,26 @@ final class P2PController: NSObject, ObservableObject {
     private var pc: RTCPeerConnection?
     #if canImport(WebRTC)
     private var videoTransceiver: RTCRtpTransceiver?
+    /// Simulator用: バンドル動画を「疑似カメラ」として送出するためのcapturer
+    private var fileCapturer: RTCFileVideoCapturer?
     #endif
     private var capturer: RTCCameraVideoCapturer?
     private var hasPublishedOffer: Bool = false
+    private var hasPublishedAnswer: Bool = false
     private var hasSetRemoteDescription: Bool = false
+    /// `setRemoteDescription` 済みのSDPが属するepoch（ICEのstale判定に使用）
+    /// - `activeCallEpoch` は publish(Offer/ICE) で先に進みうるため、ICE側のstale判定には不適切なケースがある（H13）。
+    private var remoteDescriptionCallEpoch: Int = 0
     // Connection timeout and retry
     private var connectionTimer: Timer?
     private var connectionAttempts = 0
     private let maxConnectionAttempts = 3
-    private let connectionTimeout: TimeInterval = 10.0
+    // シグナルポーリング: CloudKit変更を定期的にfetchしてOffer/Answerを検出
+    private var signalPollingTimer: Timer?
+    private let signalPollingInterval: TimeInterval = 2.0
+    // CloudKitシグナリング（offer/answer/ice + session update）は実環境で10秒を超えることがある。
+    // 10秒で切ると offer が保存される前に close → 文脈リセットが走り、永遠に接続できなくなる。
+    private let connectionTimeout: TimeInterval = 25.0
     // Perfect Negotiation用の簡易状態
     private var isPolite: Bool = false
     private var isMakingOffer: Bool = false
@@ -54,6 +69,14 @@ final class P2PController: NSObject, ObservableObject {
     private static var globalOffersInFlight: Int = 0
     private static let globalOfferLimit: Int = 2
     private var pendingRemoteCandidates: [String] = [] // remoteDescription未設定時に一時保持
+    private var pendingLocalCandidates: [String] = []  // offer/answer未公開時に一時保持（CloudKit書込みバースト抑制）
+    
+    // CloudKitのICE書き込みをレート制限(503/ZoneBusy)から守るため、候補を短時間でバッチ化して送信する。
+    // - 0.4秒デバウンス / 最大12件で即フラッシュ
+    // - epochが切り替わったら（再交渉/リトライ）旧epochは先に送る
+    private var outgoingIceBatchEpoch: Int?
+    private var outgoingIceBatchCandidates: [String] = []
+    private var outgoingIceBatchTask: Task<Void, Never>?
     private var publishedCandidateCount: Int = 0 {
         didSet {
             if publishedCandidateCount > 0, publishedCandidateCount % 10 == 0 {
@@ -80,10 +103,17 @@ final class P2PController: NSObject, ObservableObject {
         signalInfraRetryTask?.cancel(); signalInfraRetryTask = nil
         needsNegotiation = false
         hasPublishedOffer = false
+        hasPublishedAnswer = false
         hasSetRemoteDescription = false
+        remoteDescriptionCallEpoch = 0
         isMakingOffer = false
         isOfferCreator = false
         pendingRemoteCandidates.removeAll()
+        pendingLocalCandidates.removeAll()
+        outgoingIceBatchEpoch = nil
+        outgoingIceBatchCandidates.removeAll()
+        outgoingIceBatchTask?.cancel()
+        outgoingIceBatchTask = nil
         publishedCandidateCount = 0
         addedRemoteCandidateCount = 0
         publishedCandidateTypeCounts.removeAll()
@@ -177,37 +207,286 @@ final class P2PController: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self = self else { return }
                 log("[P2P] ⏰ Connection timeout after \(self.connectionTimeout)s", category: "P2P")
-                self.handleConnectionTimeout()
+                await self.handleConnectionTimeout()
             }
         }
         log("[P2P] Connection timer started (\(connectionTimeout)s)", category: "P2P")
     }
     
-    private func handleConnectionTimeout() {
+    /// シグナルポーリング開始: CloudKit変更を定期的にfetchしてOffer/Answerを検出
+    /// Push通知が届かない環境（シミュレータ等）でもシグナリングを機能させるため
+    private func startSignalPolling() {
+        stopSignalPolling()
+        signalPollingTimer = Timer.scheduledTimer(withTimeInterval: signalPollingInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, self.state == .connecting else { return }
+                await self.pollSignalChanges()
+            }
+        }
+        log("[P2P] Signal polling started (interval=\(signalPollingInterval)s)", category: "P2P")
+    }
+    
+    private func stopSignalPolling() {
+        signalPollingTimer?.invalidate()
+        signalPollingTimer = nil
+    }
+    
+    /// CloudKitからゾーン変更を直接取得してOffer/Answerを検出
+    private func pollSignalChanges() async {
+        guard state == .connecting else { return }
+        let roomID = currentRoomID
+        guard !roomID.isEmpty else { return }
+        
+        do {
+            let (database, zoneID) = try await CloudKitChatManager.shared.resolveZone(for: roomID, purpose: .signal)
+            
+            // recordZoneChanges を使ってゾーン内の全変更を取得
+            let changes = try await database.recordZoneChanges(inZoneWith: zoneID, since: nil)
+            
+            var appliedCount = 0
+            for modification in changes.modificationResultsByID {
+                if let record = try? modification.value.get().record {
+                    let recordType = record.recordType
+                    if recordType == CKSchema.SharedType.signalEnvelope || recordType == CKSchema.SharedType.signalIceChunk {
+                        let applied = await applySignalRecord(record)
+                        if applied { appliedCount += 1 }
+                    }
+                }
+            }
+            
+            if appliedCount > 0 {
+                log("[P2P] Signal polling: applied \(appliedCount) records", category: "P2P")
+            }
+        } catch {
+            // エラーは無視（ゾーン未発見などの場合）
+        }
+    }
+    
+    /// タイムアウト時の処理。
+    /// NOTE: Simulator/Push通知なし環境ではSignalの取り込みが遅れることがあるため、
+    /// Offer作成者側は「CloudKitにAnswerが存在するのに適用できていない」ケースを救済する。
+    @MainActor
+    private func handleConnectionTimeout() async {
+        // --- Timeout救済: Offer作成者で、AnswerがCloudKit上に既に存在するなら直fetch→適用して延命 ---
+        if isOfferCreator,
+           hasPublishedOffer,
+           !hasSetRemoteDescription,
+           !currentRoomID.isEmpty,
+           !currentMyID.isEmpty,
+           !currentRemoteID.isEmpty,
+           activeCallEpoch > 0 {
+            let room = currentRoomID
+            let me = currentMyID
+            let remote = currentRemoteID
+            let epoch = activeCallEpoch
+
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "post-fix-1",
+                                   hypothesisId: "H12",
+                                   location: "P2PController.swift:handleConnectionTimeout",
+                                   message: "timeout rescue: try fetch+apply answer",
+                                   data: [
+                                    "roomID": room,
+                                    "my": String(me.prefix(8)),
+                                    "remote": String(remote.prefix(8)),
+                                    "epoch": epoch,
+                                    "hasPublishedOffer": hasPublishedOffer,
+                                    "hasSetRD": hasSetRemoteDescription
+                                   ])
+            // #endregion
+
+            do {
+                let (db, zoneID) = try await CloudKitChatManager.shared.resolveZone(for: room, purpose: .signal)
+                let (lo, hi) = me <= remote ? (me, remote) : (remote, me)
+                let sessionKey = "\(room)#\(lo)#\(hi)"
+                let answerRecordName = "SE_\(sessionKey)_\(epoch)_answer"
+                let recordID = CKRecord.ID(recordName: answerRecordName, zoneID: zoneID)
+
+                let record = try await db.record(for: recordID)
+                let applied = await applySignalRecord(record)
+
+                // #region agent log
+                AgentNDJSONLogger.post(runId: "post-fix-1",
+                                       hypothesisId: "H12",
+                                       location: "P2PController.swift:handleConnectionTimeout",
+                                       message: "timeout rescue: fetched answer",
+                                       data: [
+                                        "roomID": room,
+                                        "epoch": epoch,
+                                        "dbScope": db.databaseScope.rawValue,
+                                        "recordSuffix": String(record.recordID.recordName.suffix(12)),
+                                        "applied": applied,
+                                        "hasSetRD": hasSetRemoteDescription
+                                       ])
+                // #endregion
+
+                if applied || hasSetRemoteDescription {
+                    // ここで接続が進む可能性があるので、タイムアウトを延長して様子を見る
+                    startConnectionTimer()
+                    return
+                }
+            } catch {
+                // #region agent log
+                AgentNDJSONLogger.post(runId: "post-fix-1",
+                                       hypothesisId: "H12",
+                                       location: "P2PController.swift:handleConnectionTimeout",
+                                       message: "timeout rescue: fetch failed",
+                                       data: [
+                                        "roomID": room,
+                                        "epoch": epoch,
+                                        "err": String(describing: error)
+                                       ])
+                // #endregion
+            }
+        }
+
         if connectionAttempts < maxConnectionAttempts {
             connectionAttempts += 1
             log("[P2P] 🔄 Retrying connection (attempt \(connectionAttempts)/\(maxConnectionAttempts))", category: "P2P")
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix-2",
+                                   hypothesisId: "H1",
+                                   location: "P2PController.swift:handleConnectionTimeout",
+                                   message: "connection timeout -> will close",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remoteHint": String(currentRemoteID.prefix(8)),
+                                    "resolvedRemote": String((resolvedRemoteUserID ?? "").prefix(8)),
+                                    "hasPublishedOffer": hasPublishedOffer,
+                                    "hasSetRD": hasSetRemoteDescription,
+                                    "activeCallEpoch": activeCallEpoch,
+                                    "state": String(describing: state)
+                                   ])
+            // #endregion
+
+            // #region agent log
+            // Offer作成者側で「AnswerがCloudKit上で見えているのに適用できていない」vs「そもそも見えていない」を切り分ける。
+            let diagRoomID = currentRoomID
+            let diagMyID = currentMyID
+            let diagRemoteID = (resolvedRemoteUserID ?? currentRemoteID)
+            let diagEpoch = activeCallEpoch
+            let diagIsOfferCreator = isOfferCreator
+            Task { @MainActor in
+                await self.debugProbeAnswerVisibilityOnTimeout(roomID: diagRoomID,
+                                                              myID: diagMyID,
+                                                              remoteID: diagRemoteID,
+                                                              activeCallEpoch: diagEpoch,
+                                                              isOfferCreator: diagIsOfferCreator)
+            }
+            // #endregion
             
-            // 既存の接続をリセット
-            resetSignalState(resetRoomContext: false)
-            close()
-            
-            // 再試行
-            Task {
-                try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒待機
-                if !currentRoomID.isEmpty && !currentMyID.isEmpty {
-                    startIfNeeded(roomID: currentRoomID, myID: currentMyID, remoteID: currentRemoteID)
-                }
+            // 既存の接続をリセット（room文脈は維持して再試行する）
+            let room = currentRoomID
+            let me = currentMyID
+            let remote = currentRemoteID
+            teardownPeer(resetRoomContext: false, resetRetryAttempts: false)
+
+            // 再試行（room文脈を保持しているので startIfNeeded に渡せる）
+            if !room.isEmpty, !me.isEmpty {
+                startIfNeeded(roomID: room, myID: me, remoteID: remote.isEmpty ? nil : remote)
             }
         } else {
             log("[P2P] ❌ Max connection attempts reached. Giving up.", category: "P2P")
             handleConnectionFailure()
         }
     }
+
+    // #region agent log
+    /// DEBUG MODE用: Offer作成者がAnswerを受け取れていないときに、CloudKit上の可視性（存在/最新epoch）を診断する。
+    /// - NOTE: userID等はprefixに丸めてログへ出す（PIIを避ける）。
+    @MainActor
+    private func debugProbeAnswerVisibilityOnTimeout(roomID: String,
+                                                    myID: String,
+                                                    remoteID: String,
+                                                    activeCallEpoch: Int,
+                                                    isOfferCreator: Bool) async {
+        guard isOfferCreator else { return }
+        let room = roomID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let me = myID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remote = remoteID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !room.isEmpty, !me.isEmpty, !remote.isEmpty else { return }
+        guard activeCallEpoch > 0 else { return }
+
+        do {
+            // 現在端末の視点で「シグナルはどのDB/zoneで見えるべきか」を採用
+            let (db, zoneID) = try await CloudKitChatManager.shared.resolveZone(for: room, purpose: .signal)
+            let (lo, hi) = me <= remote ? (me, remote) : (remote, me)
+            let sessionKey = "\(room)#\(lo)#\(hi)"
+
+            // 1) 「このepochのAnswer」が見えるか（直接fetch）
+            let expectedAnswerRecordName = "SE_\(sessionKey)_\(activeCallEpoch)_answer"
+            let expectedAnswerID = CKRecord.ID(recordName: expectedAnswerRecordName, zoneID: zoneID)
+            var expectedFound = false
+            var expectedError: String = ""
+            do {
+                _ = try await db.record(for: expectedAnswerID)
+                expectedFound = true
+            } catch {
+                expectedError = String(describing: error)
+            }
+
+            // 2) 見えているAnswerのうち「最新callEpoch」を探す（query）
+            var latestEpoch: Int = -1
+            var latestSuffix: String = ""
+            var queryError: String = ""
+            do {
+                let predicate = NSPredicate(format: "%K == %@ AND %K == %@",
+                                            CKSchema.FieldKey.sessionKey, sessionKey,
+                                            CKSchema.FieldKey.envelopeType, CloudKitChatManager.SignalEnvelopeType.answer.rawValue)
+                let query = CKQuery(recordType: CKSchema.SharedType.signalEnvelope, predicate: predicate)
+                let (results, _) = try await db.records(matching: query, inZoneWith: zoneID)
+                for (_, res) in results {
+                    if let rec = try? res.get() {
+                        let epoch = rec[CKSchema.FieldKey.callEpoch] as? Int ?? -1
+                        if epoch > latestEpoch {
+                            latestEpoch = epoch
+                            latestSuffix = String(rec.recordID.recordName.suffix(8))
+                        }
+                    }
+                }
+            } catch {
+                queryError = String(describing: error)
+            }
+
+            AgentNDJSONLogger.post(runId: "diag-1",
+                                   hypothesisId: "H7",
+                                   location: "P2PController.swift:debugProbeAnswerVisibilityOnTimeout",
+                                   message: "answer visibility probe",
+                                   data: [
+                                    "roomID": room,
+                                    "my": String(me.prefix(8)),
+                                    "remote": String(remote.prefix(8)),
+                                    "dbScope": db.databaseScope.rawValue,
+                                    "zoneOwner": String(zoneID.ownerName.prefix(8)),
+                                    "epoch": activeCallEpoch,
+                                    "expectedAnswerSuffix": String(expectedAnswerRecordName.suffix(8)),
+                                    "expectedAnswerFound": expectedFound,
+                                    "expectedAnswerErr": expectedError,
+                                    "latestAnswerEpoch": latestEpoch,
+                                    "latestAnswerSuffix": latestSuffix,
+                                    "queryErr": queryError
+                                   ])
+        } catch {
+            AgentNDJSONLogger.post(runId: "diag-1",
+                                   hypothesisId: "H7",
+                                   location: "P2PController.swift:debugProbeAnswerVisibilityOnTimeout",
+                                   message: "answer visibility probe error",
+                                   data: [
+                                    "roomID": room,
+                                    "my": String(me.prefix(8)),
+                                    "remote": String(remote.prefix(8)),
+                                    "epoch": activeCallEpoch,
+                                    "err": String(describing: error)
+                                   ])
+        }
+    }
+    // #endregion
     
     private func handleConnectionFailure() {
         connectionTimer?.invalidate()
         connectionTimer = nil
+        stopSignalPolling()
         localTrack = nil
         remoteTrack = nil
         state = .failed
@@ -265,8 +544,9 @@ final class P2PController: NSObject, ObservableObject {
         addedRemoteCandidateCount = 0
         publishedCandidateTypeCounts.removeAll()
         
-        // Start connection timer
+        // Start connection timer and signal polling
         startConnectionTimer()
+        startSignalPolling()
         if let p = path {
             let ifType: String = p.usesInterfaceType(.wifi) ? "wifi" : (p.usesInterfaceType(.cellular) ? "cellular" : (p.usesInterfaceType(.wiredEthernet) ? "ethernet" : "other") )
             log("[P2P] Network path type=\(ifType) constrained=\(p.isConstrained)", category: "P2P")
@@ -291,6 +571,11 @@ final class P2PController: NSObject, ObservableObject {
     }
 
     func close() {
+        teardownPeer(resetRoomContext: true, resetRetryAttempts: true)
+    }
+
+    /// close() の実体。timeoutリトライ等では room 文脈や retry 回数を保持したいので引数で制御する。
+    private func teardownPeer(resetRoomContext: Bool, resetRetryAttempts: Bool) {
         if state == .idle && currentRoomID.isEmpty {
             return
         }
@@ -299,7 +584,10 @@ final class P2PController: NSObject, ObservableObject {
         // Cancel all timers and tasks
         connectionTimer?.invalidate()
         connectionTimer = nil
-        connectionAttempts = 0
+        stopSignalPolling()
+        if resetRetryAttempts {
+            connectionAttempts = 0
+        }
         negotiationDebounceTask?.cancel(); negotiationDebounceTask = nil
         ensureOfferTask?.cancel(); ensureOfferTask = nil
 
@@ -309,12 +597,16 @@ final class P2PController: NSObject, ObservableObject {
 #endif
         capturer?.stopCapture()
         capturer = nil
+        #if canImport(WebRTC)
+        fileCapturer?.stopCapture()
+        fileCapturer = nil
+        #endif
         localTrack = nil
         remoteTrack = nil
         pc?.close()
         pc = nil
 
-        resetSignalState(resetRoomContext: true)
+        resetSignalState(resetRoomContext: resetRoomContext)
         state = .idle
     }
 
@@ -322,6 +614,23 @@ final class P2PController: NSObject, ObservableObject {
         let expected = roomID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !expected.isEmpty && expected != currentRoomID {
             log("[P2P] closeIfCurrent skipped (reason=\(reason)) current=\(currentRoomID) expected=\(expected)", category: "P2P")
+            return
+        }
+        // post-fix-2: RoomMember更新などの「リモート解決」による自動リスタートが、
+        // ちょうどOffer適用直後に走ると self-close して交渉を破壊する（実ログで発生）。
+        // 接続中は defer して、シグナリングを優先する。
+        if reason.contains("remote-participant-resolved") && state == .connecting {
+            log("[P2P] closeIfCurrent deferred (reason=\(reason)) while connecting room=\(currentRoomID)", category: "P2P")
+            AgentNDJSONLogger.post(runId: "post-fix-2",
+                                   hypothesisId: "H16",
+                                   location: "P2PController.swift:closeIfCurrent",
+                                   message: "defer closeIfCurrent (remote-participant-resolved) while connecting",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "state": String(describing: state),
+                                    "hasSetRD": hasSetRemoteDescription,
+                                    "activeCallEpoch": activeCallEpoch
+                                   ])
             return
         }
         if reason.hasPrefix("navigation") && state == .connecting {
@@ -396,8 +705,56 @@ final class P2PController: NSObject, ObservableObject {
 
     private func startLocalCamera() {
 #if targetEnvironment(simulator)
-        // Simulator にはカメラデバイスが無く WebRTC が abort するためスキップ
-        log("[P2P] startLocalCamera skipped on Simulator", category: "P2P")
+        // Simulator にはカメラデバイスが無いので、バンドル動画を疑似カメラとして送出する。
+        // A/Bで別動画になるよう、myID と remoteID の辞書順でファイルを選ぶ（両端末で必ず反転する）。
+        guard let pc else { return }
+        let f = RTCPeerConnectionFactory()
+        let source = f.videoSource()
+
+        let my = currentMyID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remote = (resolvedRemoteUserID ?? currentRemoteID).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let fileName: String
+        if my.isEmpty || remote.isEmpty {
+            // remote未解決でもクラッシュしないよう固定値にフォールバック
+            fileName = "logo2.mp4"
+        } else {
+            // 片側がlogo2、もう片側がlogo3になる
+            fileName = (my < remote) ? "logo2.mp4" : "logo3.mp4"
+        }
+
+        if Bundle.main.url(forResource: fileName, withExtension: nil) == nil {
+            log("[P2P] ⚠️ Simulator file camera missing in bundle: \(fileName)", category: "P2P")
+        } else {
+            log("[P2P] Simulator file camera selected: \(fileName)", category: "P2P")
+        }
+
+        #if canImport(WebRTC)
+        fileCapturer?.stopCapture()
+        fileCapturer = RTCFileVideoCapturer(delegate: source)
+        #endif
+
+        localTrack = f.videoTrack(with: source, trackId: "local0")
+        #if canImport(WebRTC)
+        if let track = localTrack {
+            if let tx = self.videoTransceiver {
+                tx.sender.track = track
+                log("[P2P] Local video track attached to transceiver sender (simulator file)", category: "P2P")
+            } else {
+                _ = pc.add(track, streamIds: ["stream0"])
+                log("[P2P] Local video track added via addTrack (simulator file fallback)", category: "P2P")
+            }
+        }
+        #endif
+
+        // RTCFileVideoCapturerは「ファイル名（拡張子込み）」で読み取る
+        #if canImport(WebRTC)
+        fileCapturer?.startCapturing(fromFileNamed: fileName, onError: { error in
+            log("[P2P] ⚠️ Simulator file camera start failed: \(error)", category: "P2P")
+        })
+        #endif
+
+        log("[P2P] startLocalCamera using bundled video (simulator)", category: "P2P")
         return
 #else
         guard let pc else { return }
@@ -455,6 +812,17 @@ final class P2PController: NSObject, ObservableObject {
         }
 
         let zoneReady = await CloudKitChatManager.shared.isSignalZoneReady(roomID: currentRoomID)
+        // #region agent log
+        AgentNDJSONLogger.post(runId: "pre-fix",
+                               hypothesisId: "H2",
+                               location: "P2PController.swift:prepareSignalChannel",
+                               message: "signal zone ready check",
+                               data: [
+                                "roomID": currentRoomID,
+                                "zoneReady": zoneReady,
+                                "initial": initial
+                               ])
+        // #endregion
         if !zoneReady {
             if signalInfraRetryTask == nil {
                 log("[P2P] Signal prep deferred: zone not yet available room=\(currentRoomID)", category: "P2P")
@@ -468,17 +836,33 @@ final class P2PController: NSObject, ObservableObject {
 
         do {
             let remoteHint = currentRemoteID.trimmingCharacters(in: .whitespacesAndNewlines)
+            var resolveSource: String = "existing"
             if resolvedRemoteUserID == nil {
+                resolveSource = "none"
                 if let hinted = (!remoteHint.isEmpty ? remoteHint : nil) {
                     resolvedRemoteUserID = hinted
+                    resolveSource = "hint"
                     log("[P2P] Using hinted remote ID: \(String(hinted.prefix(8)))", category: "P2P")
                 } else if let counterpart = CloudKitChatManager.shared.primaryCounterpartUserID(roomID: currentRoomID) {
                     resolvedRemoteUserID = counterpart
+                    resolveSource = "counterpart"
                     log("[P2P] Using counterpart from CloudKit: \(String(counterpart.prefix(8)))", category: "P2P")
                 } else {
                     log("[P2P] No remote ID available yet, will retry", category: "P2P")
                 }
             }
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix",
+                                   hypothesisId: "H1",
+                                   location: "P2PController.swift:prepareSignalChannel",
+                                   message: "remote resolve attempt",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "remoteHint": String(remoteHint.prefix(8)),
+                                    "source": resolveSource,
+                                    "resolved": String((resolvedRemoteUserID ?? "").prefix(8))
+                                   ])
+            // #endregion
 
             guard let remoteID = resolvedRemoteUserID?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else {
                 log("[P2P] Signal prep: remote user unresolved - scheduling retry", category: "P2P")
@@ -509,11 +893,32 @@ final class P2PController: NSObject, ObservableObject {
             signalSession = try await CloudKitChatManager.shared.ensureSignalSession(roomID: currentRoomID,
                                                                                     localUserID: myID,
                                                                                     remoteUserID: remoteID)
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix",
+                                   hypothesisId: "H3",
+                                   location: "P2PController.swift:prepareSignalChannel",
+                                   message: "ensureSignalSession ok",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "remote": String(remoteID.prefix(8)),
+                                    "activeCallEpoch": signalSession?.activeCallEpoch ?? 0
+                                   ])
+            // #endregion
             await markActiveAndMaybeInitialOffer()
         } catch let error as CloudKitChatManager.CloudKitChatError where error == .signalingZoneUnavailable {
             log("[P2P] Signal zone unavailable — scheduling retry room=\(currentRoomID)", category: "P2P")
             scheduleSignalInfraRetry(afterMilliseconds: 2500)
         } catch {
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix",
+                                   hypothesisId: "H3",
+                                   location: "P2PController.swift:prepareSignalChannel",
+                                   message: "prepareSignalChannel failed",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "err": String(describing: error)
+                                   ])
+            // #endregion
             log("[P2P] Failed to prepare signal session: \(error)", category: "P2P")
         }
     }
@@ -551,6 +956,8 @@ final class P2PController: NSObject, ObservableObject {
             log("[P2P] Offer scheduling deferred: remote unresolved", category: "P2P")
             return
         }
+        // 固定ロジック: Offer作成者のみがOfferを作成する
+        guard isOfferCreator else { return }
         ensureOfferTask?.cancel()
         let jitterMs: UInt64 = isPolite ? UInt64.random(in: 120...300) : UInt64.random(in: 0...80)
         ensureOfferTask = Task { @MainActor in
@@ -610,7 +1017,22 @@ final class P2PController: NSObject, ObservableObject {
                 session.updatedAt = envelope.createdAt
                 signalSession = session
             }
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix-3",
+                                   hypothesisId: "H8",
+                                   location: "P2PController.swift:publishOfferSDP",
+                                   message: "publishOffer ok",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String(remote.prefix(8)),
+                                    "callEpoch": envelope.callEpoch,
+                                    "record": String(envelope.recordID.recordName.suffix(12)),
+                                    "sessionKeySuffix": String(envelope.sessionKey.suffix(20))
+                                   ])
+            // #endregion
             log("[P2P] Offer published (callEpoch=\(envelope.callEpoch))", category: "P2P")
+            await flushPendingLocalCandidates(callEpoch: envelope.callEpoch)
         } catch {
             log("[P2P] Failed to publish offer: \(error)", category: "P2P")
         }
@@ -624,14 +1046,43 @@ final class P2PController: NSObject, ObservableObject {
                                                                               remoteUserID: remote,
                                                                               callEpoch: callEpoch,
                                                                               sdp: sdp)
+            hasPublishedAnswer = true
             activeCallEpoch = max(activeCallEpoch, envelope.callEpoch)
             if var session = signalSession {
                 session.activeCallEpoch = max(session.activeCallEpoch, envelope.callEpoch)
                 session.updatedAt = envelope.createdAt
                 signalSession = session
             }
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix-3",
+                                   hypothesisId: "H8",
+                                   location: "P2PController.swift:publishAnswerSDP",
+                                   message: "publishAnswer ok",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String(remote.prefix(8)),
+                                    "callEpoch": envelope.callEpoch,
+                                    "record": String(envelope.recordID.recordName.suffix(12)),
+                                    "sessionKeySuffix": String(envelope.sessionKey.suffix(20))
+                                   ])
+            // #endregion
             log("[P2P] Answer published (callEpoch=\(envelope.callEpoch))", category: "P2P")
+            await flushPendingLocalCandidates(callEpoch: envelope.callEpoch)
         } catch {
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix-3",
+                                   hypothesisId: "H11",
+                                   location: "P2PController.swift:publishAnswerSDP",
+                                   message: "publishAnswer error",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String((resolvedRemoteUserID ?? "").prefix(8)),
+                                    "callEpoch": callEpoch,
+                                    "err": String(describing: error)
+                                   ])
+            // #endregion
             log("[P2P] Failed to publish answer: \(error)", category: "P2P")
         }
     }
@@ -640,23 +1091,150 @@ final class P2PController: NSObject, ObservableObject {
         guard !currentMyID.isEmpty, let remote = resolvedRemoteUserID else { return }
         guard !publishedCandidateFingerprints.contains(encoded) else { return }
         publishedCandidateFingerprints.insert(encoded)
+        _ = remote
+        await enqueueIceCandidateForBatchPublish(encoded, callEpoch: callEpoch)
+    }
+
+    /// offer/answer が CloudKit に保存される前に ICE を大量送信すると、SignalSession更新がバーストしてCAS lockエラー/遅延を誘発しやすい。
+    /// そのため、SDPが公開されるまではローカル候補をバッファし、公開後にまとめて送る。
+    private func flushPendingLocalCandidates(callEpoch: Int) async {
+        guard !pendingLocalCandidates.isEmpty else { return }
+        let buffered = pendingLocalCandidates
+        pendingLocalCandidates.removeAll()
+        log("[P2P] Flushing \(buffered.count) buffered local ICE candidates (callEpoch=\(callEpoch))", level: "DEBUG", category: "P2P")
+        for enc in buffered {
+            await publishCandidateEncoded(enc, callEpoch: callEpoch)
+            publishedCandidateCount += 1
+            let sep = "\u{1F}"
+            let sdp = enc.components(separatedBy: sep).first ?? ""
+            let parts = sdp.components(separatedBy: " ")
+            if let idx = parts.firstIndex(of: "typ"), parts.count > idx + 1 {
+                let typ = parts[idx + 1]
+                publishedCandidateTypeCounts[typ, default: 0] += 1
+            }
+        }
+        // まとめてキューに積んだら即フラッシュして書込み回数を圧縮する
+        await flushOutgoingIceBatchIfNeeded()
+    }
+
+    // MARK: - ICE batch publish (CloudKit rate-limit mitigation)
+    @MainActor
+    private func enqueueIceCandidateForBatchPublish(_ encoded: String, callEpoch: Int) async {
+        guard !encoded.isEmpty else { return }
+        guard state != .idle, let pc, pc.connectionState != .closed else { return }
+        guard !currentRoomID.isEmpty, !currentMyID.isEmpty, resolvedRemoteUserID != nil else { return }
+        guard hasPublishedOffer || hasPublishedAnswer else { return }
+
+        // epochが変わったら旧epochを先に送る（混ぜない）
+        if let e = outgoingIceBatchEpoch, e != callEpoch, !outgoingIceBatchCandidates.isEmpty {
+            let oldEpoch = e
+            let oldBatch = outgoingIceBatchCandidates
+            outgoingIceBatchCandidates.removeAll()
+            outgoingIceBatchTask?.cancel()
+            outgoingIceBatchTask = nil
+
+            outgoingIceBatchEpoch = callEpoch
+            outgoingIceBatchCandidates.append(encoded)
+
+            Task { @MainActor in
+                await self.publishIceBatchNow(encodedCandidates: oldBatch, callEpoch: oldEpoch)
+                await self.flushOutgoingIceBatchIfNeeded()
+            }
+            return
+        }
+
+        outgoingIceBatchEpoch = callEpoch
+        outgoingIceBatchCandidates.append(encoded)
+
+        // 量が多い場合は即フラッシュ
+        if outgoingIceBatchCandidates.count >= 12 {
+            outgoingIceBatchTask?.cancel()
+            outgoingIceBatchTask = nil
+            await flushOutgoingIceBatchIfNeeded()
+            return
+        }
+
+        if outgoingIceBatchTask == nil {
+            outgoingIceBatchTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
+                await self.flushOutgoingIceBatchIfNeeded()
+            }
+        }
+    }
+
+    @MainActor
+    private func flushOutgoingIceBatchIfNeeded() async {
+        guard let epoch = outgoingIceBatchEpoch else { return }
+        guard !outgoingIceBatchCandidates.isEmpty else { return }
+        let batch = outgoingIceBatchCandidates
+        outgoingIceBatchCandidates.removeAll()
+        outgoingIceBatchTask?.cancel()
+        outgoingIceBatchTask = nil
+        await publishIceBatchNow(encodedCandidates: batch, callEpoch: epoch)
+    }
+
+    @MainActor
+    private func publishIceBatchNow(encodedCandidates: [String], callEpoch: Int) async {
+        guard !currentMyID.isEmpty, let remote = resolvedRemoteUserID else { return }
+        guard !currentRoomID.isEmpty else { return }
         do {
-            let chunk = try await CloudKitChatManager.shared.publishIceCandidate(roomID: currentRoomID,
-                                                                                 localUserID: currentMyID,
-                                                                                 remoteUserID: remote,
-                                                                                 callEpoch: callEpoch,
-                                                                                 encodedCandidate: encoded,
-                                                                                 candidateType: nil)
+            let chunk = try await CloudKitChatManager.shared.publishIceCandidatesBatch(roomID: currentRoomID,
+                                                                                      localUserID: currentMyID,
+                                                                                      remoteUserID: remote,
+                                                                                      callEpoch: callEpoch,
+                                                                                      encodedCandidates: encodedCandidates)
             activeCallEpoch = max(activeCallEpoch, chunk.callEpoch)
-            log("[P2P] Published ICE chunk record=\(chunk.recordID.recordName)", level: "DEBUG", category: "P2P")
+            log("[P2P] Published ICE batch record=\(chunk.recordID.recordName) count=\(encodedCandidates.count)", level: "DEBUG", category: "P2P")
+            AgentNDJSONLogger.post(runId: "post-fix-3",
+                                   hypothesisId: "H17",
+                                   location: "P2PController.swift:publishIceBatchNow",
+                                   message: "publish ICE batch ok",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String(remote.prefix(8)),
+                                    "callEpoch": callEpoch,
+                                    "count": encodedCandidates.count,
+                                    "recordSuffix": String(chunk.recordID.recordName.suffix(24))
+                                   ])
         } catch {
-            log("[P2P] Failed to publish ICE candidate: \(error)", category: "P2P")
+            log("[P2P] Failed to publish ICE batch: \(error)", category: "P2P")
+            AgentNDJSONLogger.post(runId: "post-fix-3",
+                                   hypothesisId: "H18",
+                                   location: "P2PController.swift:publishIceBatchNow",
+                                   message: "publish ICE batch error",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String((resolvedRemoteUserID ?? "").prefix(8)),
+                                    "callEpoch": callEpoch,
+                                    "count": encodedCandidates.count,
+                                    "err": String(describing: error)
+                                   ])
         }
     }
 
     // MARK: - Signal ingestion
     func applySignalRecord(_ record: CKRecord) async -> Bool {
-        guard record.recordID.zoneID.zoneName == currentRoomID else { return false }
+        let recordZoneName = record.recordID.zoneID.zoneName
+        if recordZoneName != currentRoomID {
+            // currentRoomID が空の状態でシグナルが到達している場合、タイムアウト/closeで文脈が消えて適用できていない可能性が高い。
+            // #region agent log
+            if currentRoomID.isEmpty && (record.recordType == "SignalEnvelope" || record.recordType == "SignalIceChunk") {
+                AgentNDJSONLogger.post(runId: "pre-fix-2",
+                                       hypothesisId: "H1",
+                                       location: "P2PController.swift:applySignalRecord",
+                                       message: "skip signal record (currentRoomID empty)",
+                                       data: [
+                                        "recordZone": recordZoneName,
+                                        "recordType": record.recordType,
+                                        "my": String(currentMyID.prefix(8)),
+                                        "state": String(describing: state)
+                                       ])
+            }
+            // #endregion
+            return false
+        }
         if let envelope = CloudKitChatManager.shared.decodeSignalRecord(record) {
             return await applySignalEnvelope(envelope)
         }
@@ -693,11 +1271,74 @@ final class P2PController: NSObject, ObservableObject {
         guard envelope.ownerUserID != currentMyID else { return false }
         guard matchesCurrentSession(envelope.sessionKey) else {
             log("[P2P] Skip envelope (session mismatch) record=\(envelope.recordID.recordName)", level: "DEBUG", category: "P2P")
+            // #region agent log
+            let expected = computePairKey(roomID: currentRoomID, myID: currentMyID)
+            AgentNDJSONLogger.post(runId: "pre-fix-3",
+                                   hypothesisId: "H8",
+                                   location: "P2PController.swift:applySignalEnvelope",
+                                   message: "skip envelope (session mismatch)",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "currentRemote": String(currentRemoteID.prefix(8)),
+                                    "resolvedRemote": String((resolvedRemoteUserID ?? "").prefix(8)),
+                                    "envelopeOwner": String(envelope.ownerUserID.prefix(8)),
+                                    "type": envelope.type.rawValue,
+                                    "callEpoch": envelope.callEpoch,
+                                    "expectedKeySuffix": String(expected.suffix(20)),
+                                    "gotKeySuffix": String(envelope.sessionKey.suffix(20)),
+                                    "state": String(describing: state),
+                                    "isOfferCreator": isOfferCreator
+                                   ])
+            // #endregion
             return false
         }
+        let recordKey = envelope.recordID.recordName
+        guard !appliedEnvelopeRecordIDs.contains(recordKey) else { return false }
+        appliedEnvelopeRecordIDs.insert(recordKey)
+
+        // post-fix-2: ロール不一致のEnvelopeは、epoch更新/状態リセットの前に弾く。
+        // そうしないと「処理しないOffer/Answerが到達→activeCallEpochが進む or stateが初期化」
+        // となり、接続の文脈が壊れてタイムアウトしうる。
+        switch envelope.type {
+        case .offer where isOfferCreator:
+            log("[P2P] ⚠️ Ignoring offer (isOfferCreator=true) record=\(recordKey)", level: "DEBUG", category: "P2P")
+            AgentNDJSONLogger.post(runId: "post-fix-2",
+                                   hypothesisId: "H15",
+                                   location: "P2PController.swift:applySignalEnvelope",
+                                   message: "ignored offer before epoch/state mutation",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String(currentRemoteID.prefix(8)),
+                                    "callEpoch": envelope.callEpoch,
+                                    "recordSuffix": String(recordKey.suffix(24)),
+                                    "activeCallEpoch": activeCallEpoch
+                                   ])
+            return false
+        case .answer where !isOfferCreator:
+            log("[P2P] ⚠️ Ignoring answer (isOfferCreator=false) record=\(recordKey)", level: "DEBUG", category: "P2P")
+            AgentNDJSONLogger.post(runId: "post-fix-2",
+                                   hypothesisId: "H15",
+                                   location: "P2PController.swift:applySignalEnvelope",
+                                   message: "ignored answer before epoch/state mutation",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String(currentRemoteID.prefix(8)),
+                                    "callEpoch": envelope.callEpoch,
+                                    "recordSuffix": String(recordKey.suffix(24)),
+                                    "activeCallEpoch": activeCallEpoch
+                                   ])
+            return false
+        default:
+            break
+        }
+
         let isNewEpoch = envelope.callEpoch > activeCallEpoch
         if isNewEpoch {
             hasSetRemoteDescription = false
+            remoteDescriptionCallEpoch = 0
             hasPublishedOffer = false
             pendingRemoteCandidates.removeAll()
             appliedIceRecordIDs.removeAll()
@@ -705,9 +1346,6 @@ final class P2PController: NSObject, ObservableObject {
             publishedCandidateFingerprints.removeAll()
             addedRemoteCandidateCount = 0
         }
-        let recordKey = envelope.recordID.recordName
-        guard !appliedEnvelopeRecordIDs.contains(recordKey) else { return false }
-        appliedEnvelopeRecordIDs.insert(recordKey)
 
         activeCallEpoch = max(activeCallEpoch, envelope.callEpoch)
         var applied = false
@@ -715,12 +1353,12 @@ final class P2PController: NSObject, ObservableObject {
         case .offer:
             if envelope.callEpoch >= lastAppliedOfferEpoch {
                 lastAppliedOfferEpoch = envelope.callEpoch
-                applied = await applyOfferPayload(callId: recordKey, sdp: envelope.sdp)
+                applied = await applyOfferPayload(callId: recordKey, sdp: envelope.sdp, callEpoch: envelope.callEpoch)
             }
         case .answer:
             if envelope.callEpoch >= lastAppliedAnswerEpoch {
                 lastAppliedAnswerEpoch = envelope.callEpoch
-                applied = await applyAnswerPayload(callId: recordKey, sdp: envelope.sdp)
+                applied = await applyAnswerPayload(callId: recordKey, sdp: envelope.sdp, callEpoch: envelope.callEpoch)
             }
         }
         return applied
@@ -735,8 +1373,30 @@ final class P2PController: NSObject, ObservableObject {
             log("[P2P] Skip ICE chunk (session mismatch) record=\(chunk.recordID.recordName)", level: "DEBUG", category: "P2P")
             return false
         }
-        if chunk.callEpoch < activeCallEpoch {
+        // ICEのstale判定は「いま適用しているremoteDescriptionのepoch」を優先する。
+        // まだRD未設定なら、stale判定で弾かずにバッファしておき、RD確定後にflushする。
+        let floorEpoch = hasSetRemoteDescription ? remoteDescriptionCallEpoch : 0
+        if floorEpoch > 0, chunk.callEpoch < floorEpoch {
             log("[P2P] Skip ICE chunk (stale epoch) record=\(chunk.recordID.recordName)", level: "DEBUG", category: "P2P")
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "post-fix-2",
+                                   hypothesisId: "H13",
+                                   location: "P2PController.swift:applySignalIceChunk",
+                                   message: "skip ICE chunk (stale epoch; floorEpoch=remoteDescriptionCallEpoch)",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String(currentRemoteID.prefix(8)),
+                                    "chunkEpoch": chunk.callEpoch,
+                                    "floorEpoch": floorEpoch,
+                                    "activeCallEpoch": activeCallEpoch,
+                                    "lastAppliedOfferEpoch": lastAppliedOfferEpoch,
+                                    "lastAppliedAnswerEpoch": lastAppliedAnswerEpoch,
+                                    "hasSetRD": hasSetRemoteDescription,
+                                    "isOfferCreator": isOfferCreator,
+                                    "recordSuffix": String(chunk.recordID.recordName.suffix(24))
+                                   ])
+            // #endregion
             return false
         }
         let recordKey = chunk.recordID.recordName
@@ -744,17 +1404,57 @@ final class P2PController: NSObject, ObservableObject {
         appliedIceRecordIDs.insert(recordKey)
         activeCallEpoch = max(activeCallEpoch, chunk.callEpoch)
         if hasSetRemoteDescription {
-            return await applyCandidatePayload(callId: recordKey, encodedCandidate: chunk.candidate)
+            // batch-v1はJSONで複数候補を1レコードに詰めて送る（Schema変更なし）
+            let candidates = decodeIceCandidatesFromChunk(chunk)
+            var anyApplied = false
+            for (idx, enc) in candidates.enumerated() {
+                let ok = await applyCandidatePayload(callId: "\(recordKey)#\(idx)", encodedCandidate: enc)
+                anyApplied = anyApplied || ok
+            }
+            return anyApplied
         } else {
-            pendingRemoteCandidates.append(chunk.candidate)
+            let candidates = decodeIceCandidatesFromChunk(chunk)
+            for enc in candidates {
+                if pendingRemoteCandidates.count < 200 {
+                    pendingRemoteCandidates.append(enc)
+                }
+            }
             log("[P2P] Buffered ICE chunk (pending RD) record=\(recordKey)", level: "DEBUG", category: "P2P")
             return true
         }
     }
 
+    // batch-v1互換: candidateTypeで判定し、JSON payloadなら候補配列を返す
+    private func decodeIceCandidatesFromChunk(_ chunk: CloudKitChatManager.SignalIceChunkSnapshot) -> [String] {
+        guard let t = chunk.candidateType, t == "batch-v1" else {
+            return [chunk.candidate]
+        }
+        struct IceBatchV1Payload: Decodable { let v: Int; let candidates: [String] }
+        guard let data = chunk.candidate.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(IceBatchV1Payload.self, from: data),
+              payload.v == 1 else {
+            // 壊れていたら単一として扱って落ちないようにする
+            return [chunk.candidate]
+        }
+        AgentNDJSONLogger.post(runId: "post-fix-3",
+                               hypothesisId: "H19",
+                               location: "P2PController.swift:decodeIceCandidatesFromChunk",
+                               message: "decoded ICE batch",
+                               data: [
+                                "roomID": currentRoomID,
+                                "my": String(currentMyID.prefix(8)),
+                                "remote": String(currentRemoteID.prefix(8)),
+                                "chunkEpoch": chunk.callEpoch,
+                                "count": payload.candidates.count
+                               ])
+        return payload.candidates
+    }
+
 #if canImport(WebRTC)
     // negotiationneeded時のOffer生成（Perfect Negotiation）
     private func createAndPublishOfferInternal() async {
+        // 固定ロジック: Offer作成者のみがOfferを作成する
+        guard self.isOfferCreator else { return }
         guard !self.isMakingOffer else { return }
         guard self.state != .idle, let pc = self.pc, pc.connectionState != .closed else { return }
 #if canImport(WebRTC)
@@ -791,10 +1491,24 @@ final class P2PController: NSObject, ObservableObject {
 
 
 #if canImport(WebRTC)
-    private func applyOfferPayload(callId: String, sdp: String) async -> Bool {
+    private func applyOfferPayload(callId: String, sdp: String, callEpoch: Int) async -> Bool {
         // 固定ロジック: Offer作成者でない端末のみがOfferを受信して処理
         if isOfferCreator {
             log("[P2P] ⚠️ Unexpected: Offer creator received offer. Ignoring. callId=\(callId)", category: "P2P")
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix-3",
+                                   hypothesisId: "H9",
+                                   location: "P2PController.swift:applyOfferPayload",
+                                   message: "ignored offer (isOfferCreator=true)",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String(currentRemoteID.prefix(8)),
+                                    "callId": String(callId.suffix(8)),
+                                    "state": String(describing: state),
+                                    "isOfferCreator": isOfferCreator
+                                   ])
+            // #endregion
             return false
         }
         
@@ -816,22 +1530,58 @@ final class P2PController: NSObject, ObservableObject {
             }
             try await peer.setRemoteDescription(desc)
             self.hasSetRemoteDescription = true
+            self.remoteDescriptionCallEpoch = callEpoch
             self.ensureOfferTask?.cancel()
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix",
+                                   hypothesisId: "H5",
+                                   location: "P2PController.swift:applyOfferPayload",
+                                   message: "setRemoteDescription(offer) ok",
+                                   data: [
+                                    "callId": String(callId.suffix(8)),
+                                    "signalingState": String(describing: peer.signalingState),
+                                    "pendingICE": self.pendingRemoteCandidates.count
+                                   ])
+            // #endregion
             log("[P2P] Remote offer set callId=\(callId) pendingICE=\(self.pendingRemoteCandidates.count)", category: "P2P")
             self.startLocalCameraWhenPartnerOnline()
             await flushPendingRemoteCandidates()
             await self.createAndPublishAnswer()
             return true
         } catch {
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix",
+                                   hypothesisId: "H5",
+                                   location: "P2PController.swift:applyOfferPayload",
+                                   message: "setRemoteDescription(offer) error",
+                                   data: [
+                                    "callId": String(callId.suffix(8)),
+                                    "err": String(describing: error)
+                                   ])
+            // #endregion
             log("[P2P] setRemoteDescription(offer) error callId=\(callId): \(error)", category: "P2P")
             return false
         }
     }
 
-    private func applyAnswerPayload(callId: String, sdp: String) async -> Bool {
+    private func applyAnswerPayload(callId: String, sdp: String, callEpoch: Int) async -> Bool {
         // 固定ロジック: Offer作成者のみがAnswerを受信して処理
         if !isOfferCreator {
             log("[P2P] ⚠️ Unexpected: Non-offer creator received answer. Ignoring. callId=\(callId)", category: "P2P")
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix-3",
+                                   hypothesisId: "H9",
+                                   location: "P2PController.swift:applyAnswerPayload",
+                                   message: "ignored answer (isOfferCreator=false)",
+                                   data: [
+                                    "roomID": currentRoomID,
+                                    "my": String(currentMyID.prefix(8)),
+                                    "remote": String(currentRemoteID.prefix(8)),
+                                    "callId": String(callId.suffix(8)),
+                                    "state": String(describing: state),
+                                    "isOfferCreator": isOfferCreator
+                                   ])
+            // #endregion
             return false
         }
         
@@ -843,14 +1593,36 @@ final class P2PController: NSObject, ObservableObject {
         let desc = RTCSessionDescription(type: .answer, sdp: sdp)
         do {
             try await peer.setRemoteDescription(desc)
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix",
+                                   hypothesisId: "H5",
+                                   location: "P2PController.swift:applyAnswerPayload",
+                                   message: "setRemoteDescription(answer) ok",
+                                   data: [
+                                    "callId": String(callId.suffix(8)),
+                                    "signalingState": String(describing: peer.signalingState),
+                                    "pendingICE": self.pendingRemoteCandidates.count
+                                   ])
+            // #endregion
             log("[P2P] Remote answer set callId=\(callId)", category: "P2P")
             self.hasSetRemoteDescription = true
+            self.remoteDescriptionCallEpoch = callEpoch
             self.ensureOfferTask?.cancel()
             log("[P2P] RD set (answer) pendingICE=\(self.pendingRemoteCandidates.count)", category: "P2P")
             self.startLocalCameraWhenPartnerOnline()
             await flushPendingRemoteCandidates()
             return true
         } catch {
+            // #region agent log
+            AgentNDJSONLogger.post(runId: "pre-fix",
+                                   hypothesisId: "H5",
+                                   location: "P2PController.swift:applyAnswerPayload",
+                                   message: "setRemoteDescription(answer) error",
+                                   data: [
+                                    "callId": String(callId.suffix(8)),
+                                    "err": String(describing: error)
+                                   ])
+            // #endregion
             log("[P2P] setRemoteDescription(answer) error callId=\(callId): \(error)", category: "P2P")
             return false
         }
@@ -862,6 +1634,19 @@ final class P2PController: NSObject, ObservableObject {
             if let peer = self.pc, peer.remoteDescription != nil {
                 try await peer.add(cand)
                 self.addedRemoteCandidateCount += 1
+                if self.addedRemoteCandidateCount == 1 {
+                    AgentNDJSONLogger.post(runId: "post-fix-2",
+                                           hypothesisId: "H14",
+                                           location: "P2PController.swift:applyCandidatePayload",
+                                           message: "addIce ok (first)",
+                                           data: [
+                                            "roomID": currentRoomID,
+                                            "my": String(currentMyID.prefix(8)),
+                                            "remote": String(currentRemoteID.prefix(8)),
+                                            "epoch": remoteDescriptionCallEpoch,
+                                            "callIdSuffix": String(callId.suffix(12))
+                                           ])
+                }
                 if self.addedRemoteCandidateCount % 10 == 0 {
                     log("[P2P] Remote ICE candidates added total=\(self.addedRemoteCandidateCount) callId=\(callId)", level: "DEBUG", category: "P2P")
                 }
@@ -886,6 +1671,10 @@ final class P2PController: NSObject, ObservableObject {
             do { try await pc.add(c) } catch {
                 log("[P2P] add ICE candidate (flush) error: \(error). Scheduling full reset.", category: "P2P")
                 scheduleRestartAfterDelay(reason: "flush addIce failed", cooldownMs: 300)
+            }
+            self.addedRemoteCandidateCount += 1
+            if self.addedRemoteCandidateCount == 1 || self.addedRemoteCandidateCount % 10 == 0 {
+                log("[P2P] Remote ICE candidates added total=\(self.addedRemoteCandidateCount) (flush)", level: "DEBUG", category: "P2P")
             }
         }
         log("[P2P] Flushed \(pendingRemoteCandidates.count) buffered ICE candidates", category: "P2P")
@@ -1006,6 +1795,7 @@ extension P2PController: RTCPeerConnectionDelegate {
                 self.state = .connected
                 self.connectionTimer?.invalidate()
                 self.connectionTimer = nil
+                self.stopSignalPolling()
                 self.connectionAttempts = 0
                 log("[P2P] ✅ Connection established!", category: "P2P")
                 // 診断情報を出力
@@ -1103,6 +1893,17 @@ extension P2PController: RTCPeerConnectionDelegate {
         if let videoTrack = rtpReceiver.track as? RTCVideoTrack {
             Task { @MainActor in
                 self.remoteTrack = videoTrack
+                // #region agent log
+                AgentNDJSONLogger.post(runId: "pre-fix",
+                                       hypothesisId: "H6",
+                                       location: "P2PController.swift:didAddRtpReceiver",
+                                       message: "remoteTrack received",
+                                       data: [
+                                        "roomID": self.currentRoomID,
+                                        "trackId": videoTrack.trackId,
+                                        "hasLocalTrack": (self.localTrack != nil)
+                                       ])
+                // #endregion
                 _ = OverlaySupport.checkAndLog()
                 log("[P2P] Remote video track received (didAdd rtpReceiver)", category: "P2P")
                 log("[P2P] Remote track enabled=\(videoTrack.isEnabled) trackId=\(videoTrack.trackId)", category: "P2P")
@@ -1261,6 +2062,16 @@ extension P2PController: RTCPeerConnectionDelegate {
             // クローズや未接続状態ではPublishしない（クラッシュ/重複抑止）
             guard self.state != .idle, let pc = self.pc, pc.connectionState != .closed else { return }
             let encoded = self.encodeCandidate(candidate)
+            if !self.hasPublishedOffer && !self.hasPublishedAnswer {
+                if !encoded.isEmpty, self.pendingLocalCandidates.count < 50 {
+                    self.pendingLocalCandidates.append(encoded)
+                    if self.pendingLocalCandidates.count == 1 || self.pendingLocalCandidates.count % 10 == 0 {
+                        log("[P2P] Buffered local ICE candidates count=\(self.pendingLocalCandidates.count) (waiting for SDP publish)", level: "DEBUG", category: "P2P")
+                    }
+                }
+                _ = pc
+                return
+            }
             let epoch = self.activeCallEpoch > 0 ? self.activeCallEpoch : self.freshCallEpoch()
             await self.publishCandidateEncoded(encoded, callEpoch: epoch)
             self.publishedCandidateCount += 1

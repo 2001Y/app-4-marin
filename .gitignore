@@ -7,11 +7,13 @@ xcuserdata/
 *.xcuserstate
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
-*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/
 
 # Build products
 build/
 DerivedData/
+DerivedData-Agent/
+DerivedDataSim/
 .modulecache/
 *.app
 *.ipa
@@ -23,9 +25,10 @@ DerivedData/
 Packages/
 Package.pins
 Package.resolved
-*.xcodeproj
+# *.xcodeproj は通常コミットすべき（SPM使用時）
+# *.xcworkspace は CocoaPods 未使用なのでignoreしてOK
 
-# CocoaPods
+# CocoaPods (未使用)
 Pods/
 *.xcworkspace
 
@@ -48,16 +51,39 @@ iOSInjectionProject/
 *.swo
 *~
 
-# Logs
+# Logs and debug outputs
 *.log
+_logs/
 
-.crush/
+# Database files (ローカルキャッシュ/セッション管理用）
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Simulator runtimes（巨大ファイル・8GB前後）
+_simruntimes/
+*.dmg
+
+# MCP / Agent設定（マシン固有）
+.kamui/
+.serena/
+
+# Cursor / AI tool設定（プロジェクト固有の設定以外）
+.cursor/
+.claude/*.local.*
+.claude/commands/my-workflow.md
+.vscode/workflows/my-workflow.json
 
 # Environment variables
 .env
 .env.local
 .env.development.local
 .env.test.local
-.env.production.local 
-/.worktrees/
-/.worktrees/
+.env.production.local
+
+# Worktrees
+.worktrees/
+
+# Crush（不明なツール）
+.crush/

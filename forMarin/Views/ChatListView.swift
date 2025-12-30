@@ -90,6 +90,7 @@ struct ChatListView: View {
                             .symbolRenderingMode(.hierarchical)
                             .symbolEffect(.bounce, value: showInviteModal)
                     }
+                    .keyboardShortcut("n", modifiers: .command)
                         
                         Button {
                             withAnimation(.easeInOut(duration: 0.2)) {
@@ -149,6 +150,12 @@ struct ChatListView: View {
             .task(id: uniqueChatRooms.map(\.roomID).joined(separator: ",")) {
                 await prefetchMissingDisplayNames()
             }
+            // キーボードショートカット: Command+N で新しいチャット作成
+            .background(KeyboardShortcutWrapper(onCommandN: {
+                Task { @MainActor in
+                    await createNewChatAndOpen()
+                }
+            }))
     }
 
     // MARK: - Actions
@@ -798,6 +805,54 @@ struct HexagonShape: Shape {
         path.closeSubpath()
         
         return path
+    }
+}
+
+// キーボードショートカットハンドラー
+struct KeyboardShortcutView: UIViewRepresentable {
+    let onCommandN: () -> Void
+    
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isHidden = true
+        view.isUserInteractionEnabled = false
+        return view
+    }
+    
+    func updateUIView(_ uiView: UIView, context: Context) {
+        // UIKeyCommandはUIResponderで処理する必要があるため、
+        // ここでは設定のみ行い、実際の処理はUIViewControllerで行う
+    }
+}
+
+extension ChatListView {
+    // UIKeyCommandを処理するためのUIViewControllerラッパー
+    struct KeyboardShortcutWrapper: UIViewControllerRepresentable {
+        let onCommandN: () -> Void
+        
+        func makeUIViewController(context: Context) -> KeyboardShortcutViewController {
+            let vc = KeyboardShortcutViewController()
+            vc.onCommandN = onCommandN
+            return vc
+        }
+        
+        func updateUIViewController(_ uiViewController: KeyboardShortcutViewController, context: Context) {
+            uiViewController.onCommandN = onCommandN
+        }
+    }
+}
+
+class KeyboardShortcutViewController: UIViewController {
+    var onCommandN: (() -> Void)?
+    
+    override var keyCommands: [UIKeyCommand]? {
+        return [
+            UIKeyCommand(input: "n", modifierFlags: .command, action: #selector(handleCommandN))
+        ]
+    }
+    
+    @objc func handleCommandN() {
+        onCommandN?()
     }
 }
 

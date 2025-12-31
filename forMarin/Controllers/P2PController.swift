@@ -46,8 +46,11 @@ final class P2PController: NSObject, ObservableObject {
     private var connectionAttempts = 0
     private let maxConnectionAttempts = 3
     // シグナルポーリング: CloudKit変更を定期的にfetchしてOffer/Answerを検出
+    // ★改善: ポーリング間隔を短縮（2秒→0.5秒）で相手のシグナル検出を高速化
     private var signalPollingTimer: Timer?
-    private let signalPollingInterval: TimeInterval = 2.0
+    private let signalPollingInterval: TimeInterval = 0.5
+    // ★改善: CKServerChangeToken を使用した差分取得（毎回フルスキャンを回避）
+    private var signalChangeToken: CKServerChangeToken?
     // CloudKitシグナリング（offer/answer/ice + session update）は実環境で10秒を超えることがある。
     // 10秒で切ると offer が保存される前に close → 文脈リセットが走り、永遠に接続できなくなる。
     private let connectionTimeout: TimeInterval = 25.0
@@ -114,6 +117,7 @@ final class P2PController: NSObject, ObservableObject {
         outgoingIceBatchCandidates.removeAll()
         outgoingIceBatchTask?.cancel()
         outgoingIceBatchTask = nil
+        hasPublishedFirstIce = false  // ICE初回即送信フラグをリセット
         publishedCandidateCount = 0
         addedRemoteCandidateCount = 0
         publishedCandidateTypeCounts.removeAll()
@@ -128,6 +132,8 @@ final class P2PController: NSObject, ObservableObject {
         publishedCandidateFingerprints.removeAll()
         appliedEnvelopeRecordIDs.removeAll()
         appliedIceRecordIDs.removeAll()
+        appliedIceCandidateFingerprints.removeAll()  // 上書き可能設計: 候補フィンガープリントもクリア
+        signalChangeToken = nil  // ★改善: ポーリングトークンもクリア（次回は差分ではなくフルスキャン）
         if resetRoomContext {
             currentRoomID = ""
             currentMyID = ""
@@ -162,29 +168,8 @@ final class P2PController: NSObject, ObservableObject {
         return myID < remoteID
     }
     
-    /// メッシュ接続用：複数参加者での接続ペアごとのOffer作成者を決定
-    /// - Parameter participants: 参加者のUserIDリスト
-    /// - Returns: 接続ペアとOffer作成者のマッピング
-    private func calculateMeshOfferMatrix(participants: [String]) -> [String: String] {
-        var matrix: [String: String] = [:]
-        let sorted = participants.sorted() // 辞書順でソート
-        
-        // 全ての接続ペアを計算
-        for i in 0..<sorted.count {
-            for j in (i+1)..<sorted.count {
-                let pairKey = computePairKey(id1: sorted[i], id2: sorted[j])
-                matrix[pairKey] = sorted[i] // 小さい方がOffer作成者
-            }
-        }
-        
-        return matrix
-    }
-    
-    /// 接続ペアのキーを生成（順序に依存しない）
-    private func computePairKey(id1: String, id2: String) -> String {
-        let (smaller, larger) = id1 < id2 ? (id1, id2) : (id2, id1)
-        return "\(smaller)#\(larger)"
-    }
+    // ★整理: calculateMeshOfferMatrix / computePairKey(id1:id2:) 削除
+    // 理由: 1:1通話専用アプリのため、マルチパーティ用コードは不要
 
     // Initialiser hidden
     private override init() {
@@ -232,6 +217,7 @@ final class P2PController: NSObject, ObservableObject {
     }
     
     /// CloudKitからゾーン変更を直接取得してOffer/Answerを検出
+    /// ★改善: CKServerChangeToken を使用した差分取得（毎回フルスキャンを回避）
     private func pollSignalChanges() async {
         guard state == .connecting else { return }
         let roomID = currentRoomID
@@ -240,8 +226,9 @@ final class P2PController: NSObject, ObservableObject {
         do {
             let (database, zoneID) = try await CloudKitChatManager.shared.resolveZone(for: roomID, purpose: .signal)
             
-            // recordZoneChanges を使ってゾーン内の全変更を取得
-            let changes = try await database.recordZoneChanges(inZoneWith: zoneID, since: nil)
+            // ★改善: トークンを使って差分のみ取得（初回はnil→フルスキャン、以降は差分のみ）
+            let changes = try await database.recordZoneChanges(inZoneWith: zoneID, since: signalChangeToken)
+            signalChangeToken = changes.changeToken  // 次回用にトークンを保存
             
             var appliedCount = 0
             for modification in changes.modificationResultsByID {
@@ -679,6 +666,9 @@ final class P2PController: NSObject, ObservableObject {
             if let urlTLS = turnURLTLS, !urlTLS.trimmingCharacters(in: .whitespaces).isEmpty {
                 servers.append(RTCIceServer(urlStrings: [urlTLS], username: user, credential: pass))
             }
+        } else {
+            // ★整理: TURN未設定時の警告（対称NAT環境では接続失敗の可能性あり）
+            log("[P2P] ⚠️ TURN not configured. Connection may fail in symmetric NAT environments.", level: "WARNING", category: "P2P")
         }
         cfg.iceServers = servers
         // 公式推奨の Unified Plan を使用
@@ -959,7 +949,8 @@ final class P2PController: NSObject, ObservableObject {
         // 固定ロジック: Offer作成者のみがOfferを作成する
         guard isOfferCreator else { return }
         ensureOfferTask?.cancel()
-        let jitterMs: UInt64 = isPolite ? UInt64.random(in: 120...300) : UInt64.random(in: 0...80)
+        // ★改善: ジッタを大幅短縮（従来: polite 120-300ms, impolite 0-80ms → 両方とも0-30ms）
+        let jitterMs: UInt64 = UInt64.random(in: 0...30)
         ensureOfferTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: jitterMs * 1_000_000)
 #if canImport(WebRTC)
@@ -976,8 +967,8 @@ final class P2PController: NSObject, ObservableObject {
     private func scheduleNegotiationDebounced() {
         self.needsNegotiation = true
         self.negotiationDebounceTask?.cancel()
-        // 50–150msの短いデバウンス＋軽いジッタ
-        let delayMs = UInt64.random(in: 50...150)
+        // ★改善: デバウンスを短縮（従来50-150ms → 10-30ms）
+        let delayMs = UInt64.random(in: 10...30)
         self.negotiationDebounceTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
             guard self.needsNegotiation else { return }
@@ -1117,7 +1108,10 @@ final class P2PController: NSObject, ObservableObject {
         await flushOutgoingIceBatchIfNeeded()
     }
 
-    // MARK: - ICE batch publish (CloudKit rate-limit mitigation)
+    // MARK: - ICE batch publish (CloudKit rate-limit mitigation + 初回即送信)
+    /// 最初のICE候補は即送信（接続確立を前倒し）、2件目以降は短いバッチ（0.2秒）
+    private var hasPublishedFirstIce: Bool = false
+
     @MainActor
     private func enqueueIceCandidateForBatchPublish(_ encoded: String, callEpoch: Int) async {
         guard !encoded.isEmpty else { return }
@@ -1125,13 +1119,14 @@ final class P2PController: NSObject, ObservableObject {
         guard !currentRoomID.isEmpty, !currentMyID.isEmpty, resolvedRemoteUserID != nil else { return }
         guard hasPublishedOffer || hasPublishedAnswer else { return }
 
-        // epochが変わったら旧epochを先に送る（混ぜない）
+        // epochが変わったら旧epochを先に送る（混ぜない）+ 初回フラグをリセット
         if let e = outgoingIceBatchEpoch, e != callEpoch, !outgoingIceBatchCandidates.isEmpty {
             let oldEpoch = e
             let oldBatch = outgoingIceBatchCandidates
             outgoingIceBatchCandidates.removeAll()
             outgoingIceBatchTask?.cancel()
             outgoingIceBatchTask = nil
+            hasPublishedFirstIce = false  // 新しいepochでは再度初回即送信
 
             outgoingIceBatchEpoch = callEpoch
             outgoingIceBatchCandidates.append(encoded)
@@ -1146,6 +1141,15 @@ final class P2PController: NSObject, ObservableObject {
         outgoingIceBatchEpoch = callEpoch
         outgoingIceBatchCandidates.append(encoded)
 
+        // ★改善: 最初の1件は即送信（接続確立を0.2〜0.4秒前倒し）
+        if !hasPublishedFirstIce {
+            hasPublishedFirstIce = true
+            outgoingIceBatchTask?.cancel()
+            outgoingIceBatchTask = nil
+            await flushOutgoingIceBatchIfNeeded()
+            return
+        }
+
         // 量が多い場合は即フラッシュ
         if outgoingIceBatchCandidates.count >= 12 {
             outgoingIceBatchTask?.cancel()
@@ -1154,9 +1158,10 @@ final class P2PController: NSObject, ObservableObject {
             return
         }
 
+        // ★改善: バッチ待ち時間を短縮（0.4秒→0.2秒）
         if outgoingIceBatchTask == nil {
             outgoingIceBatchTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
+                try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s（従来0.4s）
                 await self.flushOutgoingIceBatchIfNeeded()
             }
         }
@@ -1343,6 +1348,7 @@ final class P2PController: NSObject, ObservableObject {
             pendingRemoteCandidates.removeAll()
             appliedIceRecordIDs.removeAll()
             appliedEnvelopeRecordIDs.removeAll()
+            appliedIceCandidateFingerprints.removeAll()  // 上書き可能設計: 候補フィンガープリントもクリア
             publishedCandidateFingerprints.removeAll()
             addedRemoteCandidateCount = 0
         }
@@ -1364,6 +1370,9 @@ final class P2PController: NSObject, ObservableObject {
         return applied
     }
 
+    /// 適用済みICE候補のフィンガープリント（上書き可能設計で重複スキップ用）
+    private var appliedIceCandidateFingerprints: Set<String> = []
+
     @MainActor
     private func applySignalIceChunk(_ chunk: CloudKitChatManager.SignalIceChunkSnapshot) async -> Bool {
         guard !currentMyID.isEmpty else { return false }
@@ -1378,49 +1387,47 @@ final class P2PController: NSObject, ObservableObject {
         let floorEpoch = hasSetRemoteDescription ? remoteDescriptionCallEpoch : 0
         if floorEpoch > 0, chunk.callEpoch < floorEpoch {
             log("[P2P] Skip ICE chunk (stale epoch) record=\(chunk.recordID.recordName)", level: "DEBUG", category: "P2P")
-            // #region agent log
-            AgentNDJSONLogger.post(runId: "post-fix-2",
-                                   hypothesisId: "H13",
-                                   location: "P2PController.swift:applySignalIceChunk",
-                                   message: "skip ICE chunk (stale epoch; floorEpoch=remoteDescriptionCallEpoch)",
-                                   data: [
-                                    "roomID": currentRoomID,
-                                    "my": String(currentMyID.prefix(8)),
-                                    "remote": String(currentRemoteID.prefix(8)),
-                                    "chunkEpoch": chunk.callEpoch,
-                                    "floorEpoch": floorEpoch,
-                                    "activeCallEpoch": activeCallEpoch,
-                                    "lastAppliedOfferEpoch": lastAppliedOfferEpoch,
-                                    "lastAppliedAnswerEpoch": lastAppliedAnswerEpoch,
-                                    "hasSetRD": hasSetRemoteDescription,
-                                    "isOfferCreator": isOfferCreator,
-                                    "recordSuffix": String(chunk.recordID.recordName.suffix(24))
-                                   ])
-            // #endregion
             return false
         }
         let recordKey = chunk.recordID.recordName
-        guard !appliedIceRecordIDs.contains(recordKey) else { return false }
-        appliedIceRecordIDs.insert(recordKey)
+        // 上書き可能設計: RecordIDでの全体スキップは行わない（同じRecordが更新されるため）
+        // 代わりに個々の候補のフィンガープリントで重複チェック
         activeCallEpoch = max(activeCallEpoch, chunk.callEpoch)
+
+        // batch-v1はJSONで複数候補を1レコードに詰めて送る
+        let candidates = decodeIceCandidatesFromChunk(chunk)
+        var appliedCount = 0
+
         if hasSetRemoteDescription {
-            // batch-v1はJSONで複数候補を1レコードに詰めて送る（Schema変更なし）
-            let candidates = decodeIceCandidatesFromChunk(chunk)
-            var anyApplied = false
             for (idx, enc) in candidates.enumerated() {
+                // フィンガープリントで重複チェック（上書き設計で同じ候補を2回適用しない）
+                let fingerprint = String(enc.hashValue)
+                guard !appliedIceCandidateFingerprints.contains(fingerprint) else { continue }
+                appliedIceCandidateFingerprints.insert(fingerprint)
+
                 let ok = await applyCandidatePayload(callId: "\(recordKey)#\(idx)", encodedCandidate: enc)
-                anyApplied = anyApplied || ok
+                if ok { appliedCount += 1 }
             }
-            return anyApplied
+            if appliedCount > 0 {
+                log("[P2P] Applied \(appliedCount) new ICE candidates from record=\(recordKey)", level: "DEBUG", category: "P2P")
+            }
+            return appliedCount > 0
         } else {
-            let candidates = decodeIceCandidatesFromChunk(chunk)
             for enc in candidates {
+                // フィンガープリントで重複チェック
+                let fingerprint = String(enc.hashValue)
+                guard !appliedIceCandidateFingerprints.contains(fingerprint) else { continue }
+                appliedIceCandidateFingerprints.insert(fingerprint)
+
                 if pendingRemoteCandidates.count < 200 {
                     pendingRemoteCandidates.append(enc)
+                    appliedCount += 1
                 }
             }
-            log("[P2P] Buffered ICE chunk (pending RD) record=\(recordKey)", level: "DEBUG", category: "P2P")
-            return true
+            if appliedCount > 0 {
+                log("[P2P] Buffered \(appliedCount) ICE candidates (pending RD) record=\(recordKey)", level: "DEBUG", category: "P2P")
+            }
+            return appliedCount > 0
         }
     }
 
@@ -1512,9 +1519,11 @@ final class P2PController: NSObject, ObservableObject {
             return false
         }
         
+        // 上書き可能設計: stale検出時はリセットせずスキップ
+        // 古いOfferは無視して、現在の接続を維持する
         if hasSetRemoteDescription {
-            scheduleRestartAfterDelay(reason: "stale offer after RD", cooldownMs: 300)
-            return true
+            log("[P2P] Ignoring stale offer (already have RD, epoch=\(callEpoch))", level: "DEBUG", category: "P2P")
+            return false  // リセットせずスキップ
         }
         let desc = RTCSessionDescription(type: .offer, sdp: sdp)
         do {
@@ -1585,9 +1594,11 @@ final class P2PController: NSObject, ObservableObject {
             return false
         }
         
+        // 上書き可能設計: stale検出時はリセットせずスキップ
+        // 古いAnswerは無視して、現在の接続を維持する
         if hasSetRemoteDescription {
-            scheduleRestartAfterDelay(reason: "stale answer after RD", cooldownMs: 300)
-            return true
+            log("[P2P] Ignoring stale answer (already have RD, epoch=\(callEpoch))", level: "DEBUG", category: "P2P")
+            return false  // リセットせずスキップ
         }
         guard let peer = self.pc else { return false }
         let desc = RTCSessionDescription(type: .answer, sdp: sdp)

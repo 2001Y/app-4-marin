@@ -13,6 +13,7 @@ xcuserdata/
 build/
 DerivedData/
 DerivedData-Agent/
+DerivedData-Device/
 DerivedDataSim/
 .modulecache/
 *.app

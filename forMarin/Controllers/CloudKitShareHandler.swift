@@ -178,30 +178,14 @@ final class CloudKitShareHandler {
         // 参加者自身のRoomMemberレコードを作成
         await createParticipantRoomMemberRecord(zoneID: zoneIDForPost, container: container)
         
-        // RoomMemberレコードの作成後、すぐにCKSyncEngineに同期を要求
-        log("🔄 [SYSJOIN] Triggering immediate sync for RoomMember records", category: "CloudKitShareHandler")
+        // ★整理: checkForUpdates は1回のみ（重複呼び出しを削除）
+        log("🔄 [SYSJOIN] Triggering sync for RoomMember records", category: "CloudKitShareHandler")
         MessageSyncPipeline.shared.checkForUpdates(roomID: inferredRoomID)
-        
-        // 少し遅延を入れてから再度同期を試行
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒待機
-            log("🔄 [SYSJOIN] Second sync attempt for RoomMember records", category: "CloudKitShareHandler")
-            MessageSyncPipeline.shared.checkForUpdates(roomID: inferredRoomID)
-        }
         
         await postJoinSystemMessage(to: zoneIDForPost, container: container, roomID: inferredRoomID)
         
         // オーナーのRoomMemberレコードを明示的に取得して取り込む
-        // Zone-wide sharingでは、Shared DatabaseからオーナーのPrivate Databaseのレコードも参照できるはずだが、
-        // CKSyncEngineの同期が期待通りに動作しない場合があるため、明示的に取得する
         await fetchAndIngestRoomMemberRecords(zoneID: zoneIDForPost, container: container, roomID: inferredRoomID)
-
-        if #available(iOS 17.0, *) {
-            await MainActor.run {
-                MessageSyncPipeline.shared.checkForUpdates(roomID: inferredRoomID)
-                log("🔄 [IDEAL SHARING] Triggered MessageSyncPipeline update for room=\(inferredRoomID)", category: "CloudKitShareHandler")
-            }
-        }
 
         // ローカルDBへ即時反映（遷移失敗の回避）
         await MainActor.run {

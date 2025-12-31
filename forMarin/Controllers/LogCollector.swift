@@ -193,9 +193,19 @@ func oslog(_ message: String, level: OSLogType = .info, category: String = "App"
 
 // #region agent log
 /// Cursor DEBUG MODE用: 端末実行中の状態を Mac 側の NDJSON ingest に送るための最小ロガー。
+/// ★整理: DEBUGビルドかつSimulatorでのみHTTP送信（実機では到達不可のため無効化）
 /// - NOTE: PII/秘密情報は送らないこと（IDはprefix等に丸める）
 enum AgentNDJSONLogger {
     private static let endpoint = URL(string: "http://127.0.0.1:7242/ingest/7496e73d-4eec-4b5f-8a58-b80af467f32f")!
+    
+    /// ★整理: HTTP送信はSimulatorでのみ有効（実機では127.0.0.1に到達できない）
+    private static let isHttpEnabled: Bool = {
+        #if DEBUG && targetEnvironment(simulator)
+        return true
+        #else
+        return false
+        #endif
+    }()
 
     static func post(sessionId: String = "debug-session",
                      runId: String,
@@ -203,6 +213,17 @@ enum AgentNDJSONLogger {
                      location: String,
                      message: String,
                      data: [String: Any] = [:]) {
+        #if DEBUG
+        // AppLoggerへの出力は常に行う（DEBUGビルド時）
+        let dataSummary = data.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ",")
+        AppLogger.shared.log("[AGENT_NDJSON] runId=\(runId) hypo=\(hypothesisId) loc=\(location) msg=\(message) data={\(dataSummary)}",
+                             level: "DEBUG",
+                             category: "AgentNDJSON")
+        #endif
+        
+        // HTTP送信はSimulatorでのみ（実機では無駄なネットワーク試行を避ける）
+        guard isHttpEnabled else { return }
+        
         let payload: [String: Any] = [
             "sessionId": sessionId,
             "runId": runId,
@@ -212,13 +233,6 @@ enum AgentNDJSONLogger {
             "data": data,
             "timestamp": Int(Date().timeIntervalSince1970 * 1000)
         ]
-        // ローカル端末（実機）では 127.0.0.1 の ingest に到達できないため、
-        // AppLogger にも同じ情報を出してユーザーが「ログを共有」から提出できるようにする。
-        // NOTE: data は呼び出し側で prefix などに丸め、PII/秘密情報を入れない。
-        let dataSummary = data.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ",")
-        AppLogger.shared.log("[AGENT_NDJSON] runId=\(runId) hypo=\(hypothesisId) loc=\(location) msg=\(message) data={\(dataSummary)}",
-                             level: "DEBUG",
-                             category: "AgentNDJSON")
         guard JSONSerialization.isValidJSONObject(payload),
               let body = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
             return

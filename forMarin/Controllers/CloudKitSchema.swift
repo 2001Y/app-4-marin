@@ -93,11 +93,15 @@ enum CKSchema {
         return CKRecord.ID(recordName: "SS_\(sessionKey)", zoneID: zoneID)
     }
 
-    static func signalEnvelopeRecordID(sessionKey: String, callEpoch: Int, envelopeType: String, zoneID: CKRecordZone.ID) -> CKRecord.ID {
-        return CKRecord.ID(recordName: "SE_\(sessionKey)_\(callEpoch)_\(envelopeType)", zoneID: zoneID)
+    /// SignalEnvelope RecordID - 上書き可能設計
+    /// callEpochを除去することで、同じセッションのOffer/Answerは上書きされる
+    static func signalEnvelopeRecordID(sessionKey: String, envelopeType: String, zoneID: CKRecordZone.ID) -> CKRecord.ID {
+        return CKRecord.ID(recordName: "SE_\(sessionKey)_\(envelopeType)", zoneID: zoneID)
     }
 
-    static func signalIceChunkRecordID(sessionKey: String, callEpoch: Int, ownerUserID: String, uuid: UUID = UUID(), zoneID: CKRecordZone.ID) -> CKRecord.ID {
-        return CKRecord.ID(recordName: "IC_\(sessionKey)_\(callEpoch)_\(ownerUserID)_\(uuid.uuidString)", zoneID: zoneID)
+    /// SignalIceChunk RecordID - 上書き可能設計
+    /// callEpochとUUIDを除去することで、送信者ごとに1レコード（配列で上書き）
+    static func signalIceChunkRecordID(sessionKey: String, ownerUserID: String, zoneID: CKRecordZone.ID) -> CKRecord.ID {
+        return CKRecord.ID(recordName: "IC_\(sessionKey)_\(ownerUserID)", zoneID: zoneID)
     }
 }

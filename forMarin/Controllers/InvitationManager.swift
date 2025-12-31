@@ -62,44 +62,19 @@ class InvitationManager: NSObject, ObservableObject, UICloudSharingControllerDel
         }
     }
     
-    /// 招待URLから直接チャットルームに参加（iOS 17+ 前提: モダンAPIのみ）
+    /// 招待URLから直接チャットルームに参加
+    /// ★整理: 受諾処理はCloudKitShareHandlerに統一（重複実行を防止）
     func acceptInvitation(from url: URL) async -> Bool {
         do {
             log("⬇️ [InvitationManager] Accepting invitation from URL: \(url)", category: "InvitationManager")
             let metadata = try await container.shareMetadata(for: url)
-            log("📋 [InvitationManager] Share metadata retrieved: container=\(metadata.containerIdentifier), shareID=\(metadata.share.recordID.recordName)", category: "InvitationManager")
+            log("📋 [InvitationManager] Delegating to CloudKitShareHandler", category: "InvitationManager")
             
-            // 権限の事前確認
-            if let currentUserParticipant = metadata.share.currentUserParticipant {
-                log("🔍 [InvitationManager] Current user participant found: permission=\(currentUserParticipant.permission.rawValue), role=\(currentUserParticipant.role.rawValue), status=\(currentUserParticipant.acceptanceStatus.rawValue)", category: "InvitationManager")
-                if currentUserParticipant.permission != .readWrite {
-                    log("⚠️ [InvitationManager] WARNING: Permission is not READ_WRITE: \(currentUserParticipant.permission.rawValue)", category: "InvitationManager")
-                }
-            } else {
-                log("⚠️ [InvitationManager] Current user participant not found in share", category: "InvitationManager")
-            }
-            
-            let share = try await container.accept(metadata)
-            log("✅ [InvitationManager] Accepted share: \(share.recordID.recordName)", category: "InvitationManager")
-            
-            // 受諾後の権限確認
-            if let currentUserParticipant = share.currentUserParticipant {
-                log("🔍 [InvitationManager] Post-acceptance permission: \(currentUserParticipant.permission.rawValue)", category: "InvitationManager")
-            }
-            
+            // ★CloudKitShareHandlerに委譲（受諾処理を一本化）
+            await CloudKitShareHandler.shared.acceptShare(from: metadata)
             return true
         } catch {
-            log("❌ [InvitationManager] Failed to accept invitation: \(error)", category: "InvitationManager")
-            if let ckError = error as? CKError {
-                log("❌ [InvitationManager] CKError code: \(ckError.code.rawValue)", category: "InvitationManager")
-                log("❌ [InvitationManager] CKError description: \(ckError.localizedDescription)", category: "InvitationManager")
-                log("❌ [InvitationManager] CKError userInfo: \(ckError.userInfo)", category: "InvitationManager")
-                
-                // 権限エラーの詳細ログ
-                if ckError.code == .permissionFailure {
-                    log("💥 [InvitationManager] PERMISSION FAILURE detected - This may be the cause of the error message", category: "InvitationManager")
-                }
-            }
+            log("❌ [InvitationManager] Failed to get share metadata: \(error)", category: "InvitationManager")
             lastError = error
             return false
         }

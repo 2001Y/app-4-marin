@@ -482,6 +482,13 @@ class CloudKitChatManager: ObservableObject {
         clearChangeTokens(for: .shared)
         persistChangeTokens()
     }
+    
+    /// ★整理: 特定スコープのトークンのみクリア（完全リセットの代替）
+    func clearChangeToken(for scope: CKDatabase.Scope) {
+        clearChangeTokens(for: scope)
+        persistChangeTokens()
+        log("🔄 Cleared change token for scope=\(scope.rawValue)", category: "CloudKitChatManager")
+    }
 
     private func shouldTriggerFullReset(for error: Error) -> Bool {
         guard let ckError = error as? CKError else { return false }
@@ -2091,14 +2098,16 @@ class CloudKitChatManager: ObservableObject {
         return owned
     }
 
+    /// ★整理: CKQueryを避け、allRecordZonesベースに変更
+    /// CloudKitのrecordNameがqueryableでない環境でも動作する
     func getParticipatingRooms() async -> [String] {
         var participating: [String] = []
-        let query = CKQuery(recordType: CKSchema.SharedType.room, predicate: NSPredicate(value: true))
         do {
-            let (results, _) = try await sharedDB.records(matching: query)
-            for (_, result) in results {
-                if let record = try? result.get(),
-                   let roomID = record["roomID"] as? String {
+            let zones = try await sharedDB.allRecordZones()
+            for zone in zones {
+                let roomID = zone.zoneID.zoneName
+                // room_で始まるゾーンのみを対象
+                if roomID.hasPrefix("room_") {
                     participating.append(roomID)
                 }
             }
@@ -2236,19 +2245,21 @@ class CloudKitChatManager: ObservableObject {
         return signalSessionSnapshot(from: saved)
     }
 
+    /// SignalEnvelopeレコードを作成（上書き可能設計）
+    /// RecordIDにcallEpochを含めないことで、同じセッションのOffer/Answerは上書きされる
     private func makeSignalEnvelopeRecord(sessionKey: String,
                                           roomID: String,
                                           ownerUserID: String,
                                           callEpoch: Int,
                                           type: SignalEnvelopeType,
                                           sdp: String,
-                                          existing: CKRecord? = nil,
                                           zoneID: CKRecordZone.ID) -> CKRecord {
-        let recordID = CKSchema.signalEnvelopeRecordID(sessionKey: sessionKey, callEpoch: callEpoch, envelopeType: type.rawValue, zoneID: zoneID)
-        let record = existing ?? CKRecord(recordType: CKSchema.SharedType.signalEnvelope, recordID: recordID)
+        // 上書き可能設計: callEpochをRecordIDから除去
+        let recordID = CKSchema.signalEnvelopeRecordID(sessionKey: sessionKey, envelopeType: type.rawValue, zoneID: zoneID)
+        let record = CKRecord(recordType: CKSchema.SharedType.signalEnvelope, recordID: recordID)
         record[CKSchema.FieldKey.sessionKey] = sessionKey as CKRecordValue
         record[CKSchema.FieldKey.roomID] = roomID as CKRecordValue
-        record[CKSchema.FieldKey.callEpoch] = callEpoch as CKRecordValue
+        record[CKSchema.FieldKey.callEpoch] = callEpoch as CKRecordValue  // フィールドには最新epochを記録
         record[CKSchema.FieldKey.ownerUserId] = ownerUserID as CKRecordValue
         record[CKSchema.FieldKey.envelopeType] = type.rawValue as CKRecordValue
         record[CKSchema.FieldKey.payload] = sdp as CKRecordValue
@@ -2293,61 +2304,149 @@ class CloudKitChatManager: ObservableObject {
                                       createdAt: createdAt)
     }
 
+    /// Offer SDPを発行（上書き可能設計 + バッチ書き込み最適化）
+    /// ★改善: SignalSession + Offer を1回のCloudKit書き込みにまとめる（往復削減）
     func publishOffer(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, sdp: String) async throws -> SignalEnvelopeSnapshot {
         let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
-        let session = try await updateSignalSession(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID, nextCallEpoch: callEpoch)
-        let record = makeSignalEnvelopeRecord(sessionKey: session.sessionKey,
-                                              roomID: roomID,
-                                              ownerUserID: localUserID,
-                                              callEpoch: callEpoch,
-                                              type: .offer,
-                                              sdp: sdp,
-                                              zoneID: zoneID)
+        let sessionKey = signalSessionKey(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID)
+        let sessionRecordID = CKSchema.signalSessionRecordID(sessionKey: sessionKey, zoneID: zoneID)
+
+        // SignalSessionレコードを取得または作成
+        let sessionRecord: CKRecord
+        if let existing = try? await database.record(for: sessionRecordID) {
+            sessionRecord = existing
+        } else {
+            sessionRecord = CKRecord(recordType: CKSchema.SharedType.signalSession, recordID: sessionRecordID)
+            sessionRecord[CKSchema.FieldKey.roomID] = roomID as CKRecordValue
+            sessionRecord[CKSchema.FieldKey.userId] = localUserID as CKRecordValue
+            sessionRecord[CKSchema.FieldKey.otherUserId] = remoteUserID as CKRecordValue
+        }
+        sessionRecord[CKSchema.FieldKey.sessionKey] = sessionKey as CKRecordValue
+        sessionRecord[CKSchema.FieldKey.callEpoch] = callEpoch as CKRecordValue
+        sessionRecord[CKSchema.FieldKey.updatedAt] = Date() as CKRecordValue
+
+        // Offerレコードを作成
+        let offerRecord = makeSignalEnvelopeRecord(sessionKey: sessionKey,
+                                                   roomID: roomID,
+                                                   ownerUserID: localUserID,
+                                                   callEpoch: callEpoch,
+                                                   type: .offer,
+                                                   sdp: sdp,
+                                                   zoneID: zoneID)
+
+        // ★1回の書き込みでSession + Offerを同時保存
         let results = try await performModifyRecordsOperation(
             database: database,
-            recordsToSave: [record],
+            recordsToSave: [sessionRecord, offerRecord],
             groupName: "signal.offer.\(roomID)",
             isAtomic: false
         )
-        let saved = try extractSavedRecord(from: results, recordID: record.recordID)
+        let saved = try extractSavedRecord(from: results, recordID: offerRecord.recordID)
         return decodeSignalEnvelope(saved)!
     }
 
+    /// Answer SDPを発行（上書き可能設計 + バッチ書き込み最適化）
+    /// ★改善: SignalSession + Answer を1回のCloudKit書き込みにまとめる（往復削減）
     func publishAnswer(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, sdp: String) async throws -> SignalEnvelopeSnapshot {
         let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
-        _ = try await updateSignalSession(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID, nextCallEpoch: callEpoch)
-        let record = makeSignalEnvelopeRecord(sessionKey: signalSessionKey(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID),
-                                              roomID: roomID,
-                                              ownerUserID: localUserID,
-                                              callEpoch: callEpoch,
-                                              type: .answer,
-                                              sdp: sdp,
-                                              zoneID: zoneID)
+        let sessionKey = signalSessionKey(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID)
+        let sessionRecordID = CKSchema.signalSessionRecordID(sessionKey: sessionKey, zoneID: zoneID)
+
+        // SignalSessionレコードを取得または作成
+        let sessionRecord: CKRecord
+        if let existing = try? await database.record(for: sessionRecordID) {
+            sessionRecord = existing
+        } else {
+            sessionRecord = CKRecord(recordType: CKSchema.SharedType.signalSession, recordID: sessionRecordID)
+            sessionRecord[CKSchema.FieldKey.roomID] = roomID as CKRecordValue
+            sessionRecord[CKSchema.FieldKey.userId] = localUserID as CKRecordValue
+            sessionRecord[CKSchema.FieldKey.otherUserId] = remoteUserID as CKRecordValue
+        }
+        sessionRecord[CKSchema.FieldKey.sessionKey] = sessionKey as CKRecordValue
+        sessionRecord[CKSchema.FieldKey.callEpoch] = callEpoch as CKRecordValue
+        sessionRecord[CKSchema.FieldKey.updatedAt] = Date() as CKRecordValue
+
+        // Answerレコードを作成
+        let answerRecord = makeSignalEnvelopeRecord(sessionKey: sessionKey,
+                                                    roomID: roomID,
+                                                    ownerUserID: localUserID,
+                                                    callEpoch: callEpoch,
+                                                    type: .answer,
+                                                    sdp: sdp,
+                                                    zoneID: zoneID)
+
+        // ★1回の書き込みでSession + Answerを同時保存
         let results = try await performModifyRecordsOperation(
             database: database,
-            recordsToSave: [record],
+            recordsToSave: [sessionRecord, answerRecord],
             groupName: "signal.answer.\(roomID)",
             isAtomic: false
         )
-        let saved = try extractSavedRecord(from: results, recordID: record.recordID)
+        let saved = try extractSavedRecord(from: results, recordID: answerRecord.recordID)
         return decodeSignalEnvelope(saved)!
     }
 
-    func publishIceCandidate(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, encodedCandidate: String, candidateType: String?) async throws -> SignalIceChunkSnapshot {
+    // MARK: - ICE batching (CloudKit rate-limit mitigation + 上書き可能設計)
+    // CloudKitのシグナリングゾーンは短時間に大量のModifyが走ると "Request Rate Limited"(503) / "Zone Busy" が出やすい。
+    // 送信者ごとに1レコードで、全ICE候補をJSON配列で上書き保存する。
+    private struct IceBatchV1Payload: Codable {
+        let v: Int
+        let candidates: [String]
+    }
+
+    /// ICE Candidatesを発行（上書き可能設計）
+    /// 送信者ごとに1レコードで、全候補を配列として保存
+    /// 既存レコードがあれば取得してマージ、新しいepochの場合はリセット
+    func publishIceCandidatesBatch(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, encodedCandidates: [String]) async throws -> SignalIceChunkSnapshot {
+        let trimmed = encodedCandidates.filter { !$0.isEmpty }
+        if trimmed.isEmpty {
+            throw NSError(domain: "CloudKitChatManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "encodedCandidates is empty"])
+        }
+
         let (database, zoneID) = try await resolveZone(for: roomID, purpose: .signal)
         _ = try await updateSignalSession(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID, nextCallEpoch: callEpoch)
         let sessionKey = signalSessionKey(roomID: roomID, localUserID: localUserID, remoteUserID: remoteUserID)
-        let recordID = CKSchema.signalIceChunkRecordID(sessionKey: sessionKey, callEpoch: callEpoch, ownerUserID: localUserID, zoneID: zoneID)
+
+        // 上書き可能設計: callEpochとUUIDを除去したRecordID
+        let recordID = CKSchema.signalIceChunkRecordID(sessionKey: sessionKey, ownerUserID: localUserID, zoneID: zoneID)
+
+        // 既存レコードを取得（あれば候補をマージ）
+        var existingCandidates: [String] = []
+        var existingEpoch = 0
+        if let existing = try? await database.record(for: recordID) {
+            if let payload = existing[CKSchema.FieldKey.candidate] as? String,
+               let data = payload.data(using: .utf8),
+               let batch = try? JSONDecoder().decode(IceBatchV1Payload.self, from: data) {
+                existingCandidates = batch.candidates
+            }
+            existingEpoch = existing[CKSchema.FieldKey.callEpoch] as? Int ?? 0
+        }
+
+        // 新しいepochの場合はリセット、同じepochなら追加（重複排除）
+        let finalCandidates: [String]
+        if callEpoch > existingEpoch {
+            // 新しいセッション → 古い候補をクリアして新しい候補のみ
+            finalCandidates = trimmed
+        } else {
+            // 同じセッション → 既存候補に追加（重複排除）
+            let combined = existingCandidates + trimmed
+            finalCandidates = Array(Set(combined))
+        }
+
+        // JSON配列として保存
+        let payload = IceBatchV1Payload(v: 1, candidates: finalCandidates)
+        let data = try JSONEncoder().encode(payload)
+        let json = String(data: data, encoding: .utf8) ?? ""
+
         let record = CKRecord(recordType: CKSchema.SharedType.signalIceChunk, recordID: recordID)
         record[CKSchema.FieldKey.sessionKey] = sessionKey as CKRecordValue
         record[CKSchema.FieldKey.roomID] = roomID as CKRecordValue
         record[CKSchema.FieldKey.callEpoch] = callEpoch as CKRecordValue
         record[CKSchema.FieldKey.ownerUserId] = localUserID as CKRecordValue
-        record[CKSchema.FieldKey.candidate] = encodedCandidate as CKRecordValue
-        if let candidateType {
-            record[CKSchema.FieldKey.candidateType] = candidateType as CKRecordValue
-        }
+        record[CKSchema.FieldKey.candidate] = json as CKRecordValue
+        record[CKSchema.FieldKey.candidateType] = "batch-v1" as CKRecordValue
         record[CKSchema.FieldKey.chunkCreatedAt] = Date() as CKRecordValue
+
         let results = try await performModifyRecordsOperation(
             database: database,
             recordsToSave: [record],
@@ -2356,31 +2455,6 @@ class CloudKitChatManager: ObservableObject {
         )
         let saved = try extractSavedRecord(from: results, recordID: recordID)
         return decodeSignalIceChunk(saved)!
-    }
-
-    // MARK: - ICE batching (CloudKit rate-limit mitigation)
-    // CloudKitのシグナリングゾーンは短時間に大量のModifyが走ると "Request Rate Limited"(503) / "Zone Busy" が出やすい。
-    // 1候補=1レコードを避けるため、複数候補をJSONで1レコードにまとめて送る（Schema変更なしでcandidate文字列に詰める）。
-    private struct IceBatchV1Payload: Codable {
-        let v: Int
-        let candidates: [String]
-    }
-
-    func publishIceCandidatesBatch(roomID: String, localUserID: String, remoteUserID: String, callEpoch: Int, encodedCandidates: [String]) async throws -> SignalIceChunkSnapshot {
-        let trimmed = encodedCandidates.filter { !$0.isEmpty }
-        if trimmed.isEmpty {
-            // 空は送らない（呼び出し側のバグ防止）
-            throw NSError(domain: "CloudKitChatManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "encodedCandidates is empty"])
-        }
-        let payload = IceBatchV1Payload(v: 1, candidates: trimmed)
-        let data = try JSONEncoder().encode(payload)
-        let json = String(data: data, encoding: .utf8) ?? ""
-        return try await publishIceCandidate(roomID: roomID,
-                                             localUserID: localUserID,
-                                             remoteUserID: remoteUserID,
-                                             callEpoch: callEpoch,
-                                             encodedCandidate: json,
-                                             candidateType: "batch-v1")
     }
 
     func decodeSignalRecord(_ record: CKRecord) -> SignalEnvelopeSnapshot? {

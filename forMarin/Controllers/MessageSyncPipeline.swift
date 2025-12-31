@@ -561,9 +561,11 @@ final class MessageSyncPipeline: NSObject {
                 aggregate.merge(batch)
             } catch let error as CloudKitChatManager.CloudKitChatError {
                 if error == .requiresFullReset {
-                    log("⚠️ Detected invalid change token for scope=\(scope.rawValue). Triggering full reset.", category: "MessageSyncPipeline")
-                    try await chatManager.performCompleteReset(bypassSafetyCheck: true)
-                    throw error
+                    // ★整理: 完全リセットは無効化（ユーザーデータ保護）
+                    // 代わりにトークンのみクリアして次回はフルスキャン
+                    log("⚠️ Detected invalid change token for scope=\(scope.rawValue). Clearing token only (data preserved).", category: "MessageSyncPipeline")
+                    await chatManager.clearChangeToken(for: scope)
+                    // リトライ可能にするためエラーは再スローしない
                 } else {
                     throw error
                 }
@@ -648,29 +650,9 @@ final class MessageSyncPipeline: NSObject {
                 continue
             }
 
+            // ★削除: シグナル処理はP2PController.pollSignalChanges()に一本化
+            // SignalEnvelope/SignalIceChunk は P2Pポーリングで処理するため、ここではスキップ
             if record.recordType == CKSchema.SharedType.signalEnvelope || record.recordType == CKSchema.SharedType.signalIceChunk {
-                let zoneRoomID = record.recordID.zoneID.zoneName
-                if let filter = roomFilter, filter != zoneRoomID { continue }
-                let applied = await P2PController.shared.applySignalRecord(record)
-                // #region agent log
-                AgentNDJSONLogger.post(runId: "pre-fix",
-                                       hypothesisId: "H4",
-                                       location: "MessageSyncPipeline.swift:processNonMessageRecords",
-                                       message: "applySignalRecord",
-                                       data: [
-                                        "roomID": zoneRoomID,
-                                        "type": record.recordType,
-                                        "record": String(record.recordID.recordName.suffix(8)),
-                                        "applied": applied
-                                       ])
-                // #endregion
-                if applied {
-                    if record.recordType == CKSchema.SharedType.signalEnvelope {
-                        envelopeApplied += 1
-                    } else {
-                        iceApplied += 1
-                    }
-                }
                 continue
             }
         }
